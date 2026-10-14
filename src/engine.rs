@@ -1,7 +1,8 @@
 //! Mix renderer shared by the realtime audio thread and the offline exporter.
 //! Tempo matching: with Key lock (default) each track is time-stretched by a WSOLA
 //! (waveform-similarity overlap-add) stretcher implemented here, which keeps pitch.
-//! Grains are anchored to the timeline (ideal input position computed from the mix beat),
+//! Grains are anchored to the timeline (ideal input position = the track's beat map evaluated at the mix beat,
+//! so the stretch ratio changes continuously and every source beat lands on a mix beat),
 //! so there is no drift. Without Key lock: varispeed (cubic Hermite resampling, pitch follows tempo).
 use crate::analysis::Audio;
 use crate::model::{Deck, Mix, Preset, StemMode};
@@ -10,7 +11,7 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64 }
+pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid }
 pub struct Snap { pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset, [StemMode; 4])>, pub decks: [Deck; 4], pub master: f32 }
 
 impl Snap {
@@ -20,7 +21,7 @@ impl Snap {
         for (i, t) in mix.tracks.iter().enumerate() {
             if let Some(Some(a)) = audio.get(i) {
                 map[i] = tracks.len();
-                tracks.push(SnapTrack { stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.bpm, vis: t.vis_start(mix.bpm), end: t.end(mix.bpm) });
+                tracks.push(SnapTrack { stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.bpm, vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid() });
             }
         }
         let trans = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX)
@@ -128,7 +129,7 @@ impl Wsola {
     fn reset(&mut self) { self.acc.iter_mut().for_each(|x| *x = [0.0; 2]); self.rd = WH; self.prev = None; self.active = false; }
     /// Produce one grain at mix beat `gb`; `pos_of` maps beat -> source sample position.
     fn grain(&mut self, a: &Audio, gb: f64, t: &SnapTrack, rs: f64, sg: Option<&[f32; 4]>) {
-        let ideal = (t.offset + (gb - t.start_beat) * 60.0 / t.bpm) * a.sr as f64;
+        let ideal = t.grid.sec(gb) * a.sr as f64; // beat map: stretch ratio follows tempo drift
         let get = |p: i64| -> f32 { if p >= 0 && (p as usize) < a.l.len() { a.l[p as usize] + a.r[p as usize] } else { 0.0 } };
         let mut start = ideal;
         if let Some(prev) = self.prev {
@@ -208,7 +209,7 @@ impl Engine {
             let a = &t.audio; let srt = a.sr as f64;
             let dst = &mut self.dbuf[t.lane];
             let rate = snap.bpm / t.bpm;
-            if snap.key_lock && (rate - 1.0).abs() > 1e-4 && ti < self.ws.len() {
+            if snap.key_lock && ((rate - 1.0).abs() > 1e-4 || t.grid.dynamic()) && ti < self.ws.len() {
                 let w = &mut self.ws[ti];
                 let id = (Arc::as_ptr(a) as usize, t.start_beat.to_bits(), t.offset.to_bits(), t.bpm.to_bits());
                 if w.id != id || !w.active || (w.next_beat - b0).abs() > bpb * 2.0 {
@@ -228,7 +229,7 @@ impl Engine {
             }
             for i in 0..n {
                 let b = b0 + bpb * i as f64;
-                let sec = t.offset + (b - t.start_beat) * 60.0 / t.bpm;
+                let sec = t.grid.sec(b);
                 let pos = sec * srt;
                 if pos < 1.0 || pos as usize + 2 >= a.l.len() { continue; }
                 let g = m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32);

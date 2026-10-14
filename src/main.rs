@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod analysis;
+mod beatmap;
 mod app;
 mod audio;
 mod engine;
@@ -33,7 +34,7 @@ fn selftest(dir: &Path) -> bool {
         ok &= pass;
         println!("{} {}: bpm {:.2} (exp {eb}) key {} (exp {ek}) offset {:.3}s (err {:.3}s, exp {eo}) dur {:.1}s peaks {} [{} ms]",
             if pass { "OK  " } else { "FAIL" }, an.title, an.bpm, an.key, an.offset, od, an.duration, an.peaks.len(), t0.elapsed().as_millis());
-        mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "Test".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default() });
+        mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "Test".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map() });
         auds.push(Some(Arc::new(a)));
     }
     let presets = [model::Preset::Crossfade, model::Preset::BassSwap, model::Preset::EchoOut, model::Preset::HighToLow];
@@ -61,6 +62,7 @@ fn selftest(dir: &Path) -> bool {
     ok &= stretch_tests();
     ok &= stem_tests();
     ok &= alignment_test(dir);
+    ok &= drift_test(dir);
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -68,7 +70,7 @@ fn selftest(dir: &Path) -> bool {
 fn one_track_mix(a: analysis::Audio, bpm: f64, mix_bpm: f64, key_lock: bool) -> (Arc<engine::Snap>, f64) {
     let dur = a.secs();
     let mut mix = model::Mix::default();
-    mix.tracks.push(model::Track { path: "t".into(), title: "t".into(), artist: "t".into(), bpm, offset: 0.0, key: "8A".into(), duration: dur, start_beat: 0.0, lane: 0, trans: Default::default() });
+    mix.tracks.push(model::Track { path: "t".into(), title: "t".into(), artist: "t".into(), bpm, offset: 0.0, key: "8A".into(), duration: dur, start_beat: 0.0, lane: 0, trans: Default::default(), map: Option::None });
     mix.bpm = mix_bpm; mix.key_lock = key_lock; mix.metronome = true; // metronome must stay out of offline renders
     let len = mix.length_beats();
     (Arc::new(engine::Snap::build(&mix, &[Some(Arc::new(a))])), len)
@@ -131,7 +133,7 @@ fn stem_tests() -> bool {
     let mut res = vec![];
     for (dm, vm) in [(Full, None), (None, Full)] {
         let mut mix = model::Mix::default(); mix.bpm = 120.0;
-        for (k, lane) in [(0usize, 0usize), (1, 1)] { mix.tracks.push(model::Track { path: format!("{k}"), title: "t".into(), artist: "t".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 40.0, start_beat: if k == 0 { 0.0 } else { 40.0 }, lane, trans: Default::default() }); }
+        for (k, lane) in [(0usize, 0usize), (1, 1)] { mix.tracks.push(model::Track { path: format!("{k}"), title: "t".into(), artist: "t".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 40.0, start_beat: if k == 0 { 0.0 } else { 40.0 }, lane, trans: Default::default(), map: Option::None }); }
         mix.tracks[1].trans.stems = [dm, Crossfade, Crossfade, vm];
         let auds = vec![Some(Arc::new(analysis::Audio { sr, l: ta.clone(), r: ta.clone() })), Some(Arc::new(analysis::Audio { sr, l: tb.clone(), r: tb.clone() }))];
         let st = vec![Some(mk(&ta, 0)), Some(mk(&tb, 3))];
@@ -179,6 +181,7 @@ fn stem_tests() -> bool {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "--analyse" { for p in &args[2..] { let pa = Path::new(p); match analysis::decode(pa) { Ok((a, t, ar)) => { let an = analysis::analyse(&a, t, ar, pa); println!("{p}: bpm {:.3} downbeat {:.3}s key {}", an.bpm, an.offset, an.key); } Err(e) => println!("{p}: {e}") } } return; }
+    if args.len() >= 4 && args[1] == "--align" { align_cli(Path::new(&args[2]), Path::new(&args[3])); return; }
     if args.len() >= 3 && args[1] == "--selftest" { std::process::exit(if selftest(Path::new(&args[2])) { 0 } else { 1 }); }
     if args.len() >= 3 && args[1] == "--separate" {
         for f in &args[2..] { let p = Path::new(f); let (a, _) = analysis::load(p).expect("decode");
@@ -219,7 +222,7 @@ fn alignment_test(dir: &Path) -> bool {
             let p = dir.join(format!("align_{}.wav", bpm as i32));
             let (l, r) = testgen::synth(bpm, 45 + i as i32 * 3, true, 90.0, lead, sr); engine::write_wav(&p, &l, &r, sr).unwrap();
             let (a, an) = analysis::load(&p).unwrap();
-            mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default() });
+            mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map() });
             auds.push(Some(Arc::new(a)));
         }
         mix.bpm = 126.0; mix.key_lock = key_lock;
@@ -238,4 +241,83 @@ fn alignment_test(dir: &Path) -> bool {
             if pass { "OK  " } else { "FAIL" }, if key_lock { "on " } else { "off" }, mix.tracks[0].bpm, mix.tracks[1].bpm, d.len(), e - s, mean, max);
     }
     ok
+}
+
+fn track_of(p: &Path, an: &analysis::Analysis) -> model::Track {
+    model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map() }
+}
+
+fn lowpass(x: &[f32], sr: u32) -> Vec<f32> {
+    let a = (-2.0 * std::f32::consts::PI * 150.0 / sr as f32).exp(); let (mut y1, mut y2) = (0f32, 0f32);
+    x.iter().map(|&v| { y1 = a * y1 + (1.0 - a) * v; y2 = a * y2 + (1.0 - a) * y1; y2 }).collect()
+}
+
+/// Render each deck of the first transition on its own and compare kick onsets beat by beat.
+/// Returns (pairs, mean ms, median ms, max ms, overlap beats).
+fn overlap_alignment(mix: &model::Mix, auds: &[Option<Arc<analysis::Audio>>], sr: u32, real: bool) -> Option<(usize, f64, f64, f64, f64)> {
+    let tr = mix.transitions(); let &(_, _, s, e) = tr.first()?;
+    let solo = |d: usize| { let mut m = mix.clone(); m.decks[1 - d].mute = true; m.metronome = false;
+        let snap = Arc::new(engine::Snap::build(&m, auds)); let x = engine::render_offline(snap, sr, s, e).0; if real { lowpass(&x, sr) } else { x } };
+    let (a, b) = (solo(0), solo(1));
+    let beat_s = 60.0 / mix.bpm;
+    let (oa, ob) = (kick_onsets(&a, sr, beat_s, 0.0), kick_onsets(&b, sr, beat_s, 0.0));
+    let mut d: Vec<f64> = oa.iter().zip(&ob).filter_map(|(x, y)| Some((x.as_ref()? - y.as_ref()?).abs() * 1000.0)).collect();
+    if real { d.retain(|&x| x < 0.25 * beat_s * 1000.0); } // drop beats where one side has no kick (breaks, fills)
+    if d.is_empty() { return None; }
+    let mean = d.iter().sum::<f64>() / d.len() as f64; let max = d.iter().cloned().fold(0.0, f64::max);
+    let mut s2 = d.clone(); s2.sort_by(|a, b| a.partial_cmp(b).unwrap()); let med = s2[s2.len() / 2];
+    Some((d.len(), mean, med, max, e - s))
+}
+
+/// Drifting kick track (125.05 -> 125.7 BPM) against a steady 124 BPM track, both orders, at 125 BPM:
+/// kicks must stay within 10 ms over the whole overlap. Also prints the fixed-grid result for comparison.
+fn drift_test(dir: &Path) -> bool {
+    let sr = 44100u32; let mut ok = true;
+    let pd = dir.join("drift_125.05-125.7.wav"); let ps = dir.join("steady_124.wav");
+    let (l, r) = testgen::synth_drift(125.05, 125.7, 45, true, 150.0, 0.41, sr); engine::write_wav(&pd, &l, &r, sr).unwrap();
+    let (l, r) = testgen::synth(124.0, 48, true, 150.0, 0.23, sr); engine::write_wav(&ps, &l, &r, sr).unwrap();
+    let (ad, and) = analysis::load(&pd).unwrap(); let (as_, ans) = analysis::load(&ps).unwrap();
+    let (ad, as_) = (Arc::new(ad), Arc::new(as_));
+    if let Some(m) = and.beat_map() { let (lo, hi) = m.tempo_range(); println!("     drift track: {} beats mapped, global {:.2} BPM, local {:.2}..{:.2} BPM, downbeat {:.3}s (exp 0.41 mod bar)", m.beats.len(), and.bpm, lo, hi, and.offset); }
+    for (order, key_lock) in [(0, true), (1, true), (0, false)] {
+        for dynamic in [true, false] {
+            let mut mix = model::Mix::default(); let mut auds = vec![];
+            let mut add = |p: &Path, an: &analysis::Analysis, a: &Arc<analysis::Audio>| { let mut t = track_of(p, an); if !dynamic { t.map = None; } mix.add_track(t); auds.push(Some(a.clone())); };
+            if order == 0 { add(&pd, &and, &ad); add(&ps, &ans, &as_); } else { add(&ps, &ans, &as_); add(&pd, &and, &ad); }
+            mix.bpm = 125.0; mix.key_lock = key_lock;
+            let Some((n, mean, med, max, len)) = overlap_alignment(&mix, &auds, sr, false) else { println!("FAIL drift: no overlap"); ok = false; continue; };
+            let name = if order == 0 { "drift->steady" } else { "steady->drift" };
+            if dynamic {
+                let pass = n >= 48 && max < 10.0; ok &= pass;
+                println!("{} beatmap align {name}, key lock {}: {n} kick pairs over {len:.0} beats, mean {mean:.2} ms, median {med:.2} ms, max {max:.2} ms (limit 10 ms)", if pass { "OK  " } else { "FAIL" }, if key_lock { "on " } else { "off" });
+            } else {
+                println!("INFO fixed-grid comparison {name}, key lock {}: mean {mean:.2} ms, max {max:.2} ms", if key_lock { "on " } else { "off" });
+            }
+        }
+    }
+    // a project saved without a beat map still loads and uses the linear grid
+    let mut t = track_of(&ps, &ans); t.map = None;
+    let js = serde_json::to_string(&t).unwrap().replace(",\"map\":null", "");
+    let back: Result<model::Track, _> = serde_json::from_str(&js);
+    let pass = back.as_ref().is_ok_and(|b| b.map.is_none() && (b.sec_at(b.start_beat + 8.0) - (b.offset + 8.0 * 60.0 / b.bpm)).abs() < 1e-9);
+    ok &= pass; println!("{} legacy project without beat map loads with linear grid", if pass { "OK  " } else { "FAIL" });
+    ok
+}
+
+/// `mixstudio --align a b`: analyse two files, lay them out as a mix and measure kick alignment in the rendered overlap.
+fn align_cli(a: &Path, b: &Path) {
+    let sr = 44100u32;
+    let (aa, ana) = analysis::load(a).unwrap(); let (ab, anb) = analysis::load(b).unwrap();
+    let (aa, ab) = (Arc::new(aa), Arc::new(ab));
+    for (an, p) in [(&ana, a), (&anb, b)] { let r = an.beat_map().map(|m| m.tempo_range()).unwrap_or((an.bpm, an.bpm)); println!("{}: global {:.3} BPM, local {:.2}..{:.2}, downbeat {:.3}s, {} beats", p.display(), an.bpm, r.0, r.1, an.offset, an.beats.len()); }
+    for dynamic in [true, false] { for key_lock in [true, false] {
+        let mut mix = model::Mix::default(); let mut ta = track_of(a, &ana); let mut tb = track_of(b, &anb);
+        if !dynamic { ta.map = None; tb.map = None; }
+        mix.add_track(ta); mix.add_track(tb); mix.bpm = ((ana.bpm + anb.bpm) / 2.0 * 10.0).round() / 10.0; mix.key_lock = key_lock;
+        match overlap_alignment(&mix, &[Some(aa.clone()), Some(ab.clone())], sr, true) {
+            Some((n, mean, med, max, len)) => println!("{} grid, key lock {}, mix {:.1} BPM: {n} kick pairs over {len:.0} beats, mean {mean:.2} ms, median {med:.2} ms, max {max:.2} ms",
+                if dynamic { "beat-map" } else { "fixed   " }, if key_lock { "on " } else { "off" }, mix.bpm),
+            None => println!("no overlap"),
+        }
+    } }
 }

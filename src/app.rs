@@ -144,7 +144,7 @@ impl App {
     fn insert(&mut self, p: PathBuf, au: Audio, an: Analysis, sample: Option<(usize, f64)>) {
         let key = p.display().to_string();
         let t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default() };
+            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map() };
         self.store.insert(key, (Arc::new(au), Arc::new(an)));
         match sample { Some((lane, at)) => { let mut t = t; t.lane = lane; t.start_beat = (at / 4.0).round() * 4.0; self.mix.tracks.push(t); }
             None => self.mix.add_track(t) }
@@ -219,18 +219,14 @@ impl App {
     }
     /// Make the audio at mix beat `beat` (inside track ti) the downbeat, placed on the nearest mix bar.
     fn set_downbeat_at(&mut self, ti: usize, beat: f64) {
-        let t = &mut self.mix.tracks[ti]; let bar = 240.0 / t.bpm;
-        let sec = t.offset + (beat - t.start_beat) * 60.0 / t.bpm;
-        let off = sec.rem_euclid(bar); let target = (beat / 4.0).round() * 4.0;
-        t.offset = off; t.start_beat = target - (sec - off) * t.bpm / 60.0;
-        t.start_beat = (t.start_beat / 4.0).round() * 4.0;
+        let t = &mut self.mix.tracks[ti];
+        let sec = t.sec_at(beat); let target = (beat / 4.0).round() * 4.0;
+        t.offset = sec; t.start_beat = target; t.normalize_grid();
     }
-    /// Shift the beat grid relative to the audio by `dsec` seconds (audio stays put on the mix grid's bars).
+    /// Shift the beat grid (fixed or beat map) relative to the audio by `dsec` seconds.
     fn nudge(&mut self, ti: usize, dsec: f64) {
-        let t = &mut self.mix.tracks[ti]; let bar = 240.0 / t.bpm;
-        t.offset += dsec;
-        while t.offset >= bar { t.offset -= bar; t.start_beat -= 4.0; }
-        while t.offset < 0.0 { t.offset += bar; t.start_beat += 4.0; }
+        let t = &mut self.mix.tracks[ti];
+        t.offset += dsec; t.normalize_grid();
     }
     fn request_stems(&mut self, i: usize) {
         let Some(t) = self.mix.tracks.get(i) else { return }; let p = t.path.clone();
@@ -575,11 +571,12 @@ impl App {
             let overlap: Vec<(f64, f64, bool, usize)> = trans.iter().filter(|x| x.0 == ti || x.1 == ti).map(|x| (x.2, x.3, x.0 == ti, x.1)).collect();
             let partner = |o: &(f64, f64, bool, usize)| -> usize { if o.2 { o.3 } else { trans.iter().find(|x| x.1 == ti).map(|x| x.0).unwrap_or(ti) } };
             let my_stems = self.stems.get(&t.path);
+            let grid = t.grid();
             let mut px = vis.left().floor();
             while px < vis.right() {
                 let (bb0, bb1) = (xb(px), xb(px + 1.0));
-                let c0 = ((t.offset + (bb0 - t.start_beat) * 60.0 / t.bpm) * cps) as i64;
-                let c1 = (((t.offset + (bb1 - t.start_beat) * 60.0 / t.bpm) * cps) as i64).max(c0 + 1);
+                let c0 = (grid.sec(bb0) * cps) as i64;
+                let c1 = ((grid.sec(bb1) * cps) as i64).max(c0 + 1);
                 if c0 >= 0 && (c0 as usize) < an.peaks.len() {
                     let mut m = [0u8; 3]; for c in c0..c1.min(an.peaks.len() as i64) { let v = an.peaks[c as usize]; for k in 0..3 { m[k] = m[k].max(v[k]); } }
                     let f = |v: u8| v as f32 / 255.0;
@@ -880,6 +877,9 @@ impl App {
                 ui.label("Key (Camelot)"); ui.text_edit_singleline(&mut t.key); ui.end_row();
                 ui.label("Start (bar)"); let mut bar = t.start_beat / 4.0 + 1.0; if ui.add(egui::DragValue::new(&mut bar).speed(0.1).fixed_decimals(0)).changed() { t.start_beat = (bar.round() - 1.0) * 4.0; } ui.end_row();
                 ui.label("Tempo change"); ui.label(format!("{:+.1}% (plays at {:.1} BPM)", (bpm_mix / t.bpm - 1.0) * 100.0, bpm_mix)); ui.end_row();
+                ui.label("Beatgrid"); if t.grid().dynamic() { let (lo, hi) = t.map.as_ref().map(|m| m.tempo_range()).unwrap_or((t.bpm, t.bpm));
+                    ui.label(format!("Beat map, follows tempo {lo:.2}–{hi:.2} BPM")).on_hover_text("Every beat is tracked, so tempo drift stays locked to the mix grid. Editing the BPM by hand switches to a fixed grid; Reset to analysis brings the beat map back."); }
+                else { ui.label("Fixed (linear)"); } ui.end_row();
                 ui.label("File"); ui.label(egui::RichText::new(&t.path).color(DIM).size(10.0)); ui.end_row();
             });
             if ui.button("Remove track").clicked() { remove = true; }
@@ -909,8 +909,8 @@ impl App {
             }
             if !self.taps.is_empty() { ui.label(egui::RichText::new(format!("{} taps", self.taps.len())).color(DIM)); }
             if ui.button("Reset to analysis").clicked() { if let Some((_, an)) = self.store.get(&self.mix.tracks[i].path).cloned() { self.snapshot();
-                let t = &mut self.mix.tracks[i]; let dbt = t.offset * t.bpm / 60.0; let anchor = t.start_beat - dbt; t.bpm = an.bpm; t.offset = an.offset;
-                t.start_beat = ((anchor + an.offset * an.bpm / 60.0) / 4.0).round() * 4.0; } }
+                let t = &mut self.mix.tracks[i]; let anchor = t.start_beat - t.intro_beats(); t.bpm = an.bpm; t.offset = an.offset; t.map = an.beat_map();
+                t.start_beat = ((anchor + t.intro_beats()) / 4.0).round() * 4.0; } }
             });
             ui.label(egui::RichText::new("On the clip: Alt+drag moves the grid, Shift+click a beat line sets the downbeat.\nDownbeats are the brighter lines.").color(DIM).size(11.0));
         });

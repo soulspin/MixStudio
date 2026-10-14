@@ -8,7 +8,7 @@ impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } 
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 2;
+pub const ANALYSIS_VERSION: u32 = 3;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -24,6 +24,14 @@ pub struct Analysis {
     pub title: String,
     pub artist: String,
     #[serde(default)] pub version: u32,
+    /// beat map: time (s) of every beat
+    #[serde(default)] pub beats: Vec<f64>,
+}
+
+impl Analysis {
+    pub fn beat_map(&self) -> Option<std::sync::Arc<crate::beatmap::BeatMap>> {
+        if self.beats.len() < 16 { None } else { Some(std::sync::Arc::new(crate::beatmap::BeatMap { beats: self.beats.clone(), bpm: self.bpm })) }
+    }
 }
 
 pub fn decode(path: &Path) -> anyhow::Result<(Audio, String, String)> {
@@ -344,10 +352,104 @@ pub fn load(path: &Path) -> anyhow::Result<(Audio, Analysis)> {
 
 pub fn analyse(audio: &Audio, title: String, artist: String, path: &Path) -> Analysis {
     let m = mono(audio);
-    let (bpm, offset) = detect_bpm(&m, audio.sr);
+    let (bpm, offset, beats) = detect_beats(&m, audio.sr);
     let key = detect_key(&m, audio.sr);
     let peaks = peaks(audio);
     let sections = sections(&peaks, audio.sr, bpm, offset);
     let title = if title.is_empty() { path.file_stem().map(|s| s.to_string_lossy().replace("_", " ")).unwrap_or_default() } else { title };
-    Analysis { version: ANALYSIS_VERSION, bpm, offset, key, duration: audio.secs(), peaks, peak_sr: audio.sr, sections, title, artist }
+    Analysis { version: ANALYSIS_VERSION, beats, bpm, offset, key, duration: audio.secs(), peaks, peak_sr: audio.sr, sections, title, artist }
+}
+
+/// Dynamic-programming beat tracker (Ellis 2007) on the onset envelope, followed by sub-frame
+/// refinement of every beat and a local weighted regression (+-8 beats) so the map follows slow
+/// tempo drift smoothly. Returns beat times in seconds covering the whole track.
+fn track_beats(o: &[f32], fps: f64, period: f64, phase: f64) -> Vec<f64> {
+    let n = o.len(); let p = period;
+    if n < (4.0 * p) as usize { return vec![]; }
+    let sd = { let m = o.iter().sum::<f32>() / n as f32; (o.iter().map(|x| (x - m).powi(2)).sum::<f32>() / n as f32).sqrt().max(1e-6) };
+    let on: Vec<f64> = o.iter().map(|&x| (x / sd) as f64).collect();
+    let alpha = 300.0;
+    let (lo, hi) = ((p * 0.85).round() as usize, (p * 1.15).round() as usize + 1);
+    let mut c = on.clone(); let mut back = vec![usize::MAX; n];
+    for t in lo..n {
+        let mut best = (f64::MIN, usize::MAX);
+        for tau in t.saturating_sub(hi)..=t - lo { let d = (t - tau) as f64 / p; let s = c[tau] - alpha * d.ln().powi(2); if s > best.0 { best = (s, tau); } }
+        if best.1 != usize::MAX && best.0 > 0.0 { c[t] = on[t] + best.0; back[t] = best.1; }
+    }
+    // start from the best score in the last beat period
+    let mut t = (n.saturating_sub(hi)..n).max_by(|&a, &b| c[a].partial_cmp(&c[b]).unwrap()).unwrap();
+    let mut fr = vec![t];
+    while back[t] != usize::MAX { t = back[t]; fr.push(t); }
+    fr.reverse();
+    // extend with the global grid where the DP chain does not reach (silent intro/outro)
+    let first = fr[0] as f64; let last = *fr.last().unwrap() as f64;
+    let _ = phase;
+    let mut fb: Vec<f64> = vec![];
+    let mut x = first - p; while x >= -0.5 * p { fb.push(x); x -= p; } fb.reverse();
+    let mut w: Vec<f64> = vec![0.0; fb.len()];
+    for &f in &fr {
+        // sub-frame peak near the DP beat
+        let mut bi = f; for i in f.saturating_sub(2)..(f + 3).min(n) { if o[i] > o[bi] { bi = i; } }
+        let y = if bi > 0 && bi + 1 < n { let (a, b, cc) = (o[bi - 1] as f64, o[bi] as f64, o[bi + 1] as f64); let d = a - 2.0 * b + cc;
+            if d.abs() > 1e-12 { bi as f64 + (0.5 * (a - cc) / d).clamp(-0.5, 0.5) } else { bi as f64 } } else { bi as f64 };
+        let strong = on[bi] > 0.5;
+        fb.push(if strong { y } else { f as f64 }); w.push(if strong { on[bi] } else { 0.02 });
+    }
+    let mut x = last + p; while x < n as f64 + 0.5 * p { fb.push(x); w.push(0.0); x += p; }
+    // local weighted linear regression of beat time vs index (+-8 beats, triangular window)
+    let m = fb.len(); let h = 8i64;
+    let mut sm = vec![0f64; m];
+    for k in 0..m {
+        let (mut sw, mut sx, mut sy, mut sxx, mut sxy) = (1e-9, 0.0, 0.0, 0.0, 0.0);
+        for j in (k as i64 - h).max(0)..=(k as i64 + h).min(m as i64 - 1) {
+            let ww = (w[j as usize] + 1e-4) * (1.0 - (j - k as i64).abs() as f64 / (h + 1) as f64);
+            let xx = (j - k as i64) as f64; sw += ww; sx += ww * xx; sy += ww * fb[j as usize]; sxx += ww * xx * xx; sxy += ww * xx * fb[j as usize];
+        }
+        let den = sw * sxx - sx * sx;
+        sm[k] = if den.abs() > 1e-12 { let b = (sw * sxy - sx * sy) / den; (sy - b * sx) / sw } else { fb[k] };
+    }
+    // monotonic, spacing within +-30 % of the global period
+    for k in 1..m { if sm[k] < sm[k - 1] + 0.7 * p { sm[k] = sm[k - 1] + 0.7 * p; } }
+    sm.iter().map(|f| f / fps).collect()
+}
+
+/// Choose which of the 4 beat phases is bar 1 on a beat list (low-band energy, kick attack, 8-bar phrase jumps).
+fn downbeat_idx(m: &[f32], sr: u32, beats: &[f64], onset: &[f32], fps: f64) -> usize {
+    let nb = beats.len(); if nb < 16 { return 0; }
+    let a = (-2.0 * std::f32::consts::PI * 120.0 / sr as f32).exp();
+    let win = (0.08 * sr as f64) as usize;
+    let mut le = vec![0f32; nb];
+    for (b, &t) in beats.iter().enumerate() {
+        let st = ((t.max(0.0)) * sr as f64) as usize; let mut lp = 0f32; let mut e = 0f32;
+        for i in st.saturating_sub(256)..st { if i < m.len() { lp = a * lp + (1.0 - a) * m[i]; } }
+        for i in st..(st + win).min(m.len()) { lp = a * lp + (1.0 - a) * m[i]; e += lp * lp; }
+        le[b] = (1e-6 + e / win as f32).ln();
+    }
+    let on_at = |b: usize| -> f32 { let f = (beats[b] * fps).max(0.0) as usize; (f.saturating_sub(1)..(f + 2).min(onset.len())).map(|i| onset[i]).fold(0.0, f32::max) };
+    let mean = le.iter().sum::<f32>() / nb as f32;
+    let sd = (le.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / nb as f32).sqrt().max(1e-3);
+    let omean = (0..nb).map(on_at).sum::<f32>() / nb as f32 + 1e-6;
+    let mut best = (f32::MIN, 0usize);
+    for k in 0..4 {
+        let (mut el, mut eo, mut n) = (0f32, 0f32, 0f32);
+        let mut b = k; while b < nb { el += (le[b] - mean) / sd; eo += on_at(b) / omean - 1.0; n += 1.0; b += 4; }
+        let mut phrase = 0f32;
+        for mph in 0..8 { let mut s = 0f32; let mut c = 0f32; let mut b = k + 4 * mph + 32;
+            while b + 4 < nb { let pre: f32 = le[b - 4..b].iter().sum(); let post: f32 = le[b..b + 4].iter().sum(); s += (post - pre).abs() / (4.0 * sd); c += 1.0; b += 32; }
+            if c > 0.0 { phrase = phrase.max(s / c); } }
+        let score = el / n + 0.7 * eo / n + 0.3 * phrase;
+        if score > best.0 { best = (score, k); }
+    }
+    best.1
+}
+
+/// Full beat analysis: (global BPM, first downbeat seconds, beat map seconds).
+pub fn detect_beats(m: &[f32], sr: u32) -> (f64, f64, Vec<f64>) {
+    let (bpm, off_lin) = detect_bpm(m, sr);
+    let (o, fps) = onset_env(m, sr);
+    let mut beats = track_beats(&o, fps, fps * 60.0 / bpm, off_lin * fps);
+    while beats.first().is_some_and(|&b| b < 0.0) { beats.remove(0); }
+    if beats.len() < 16 { return (bpm, off_lin, vec![]); }
+    let k = downbeat_idx(m, sr, &beats, &o, fps);
+    (bpm, beats[k], beats)
 }

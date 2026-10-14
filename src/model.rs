@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use crate::beatmap::{BeatMap, Grid};
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 pub enum Preset { #[default] Crossfade, BassSwap, HighToLow, LowToHigh, EchoOut }
@@ -26,10 +28,22 @@ pub struct Track {
     pub lane: usize,
     /// transition *into* this track (from the previous track on the main decks)
     pub trans: Transition,
+    /// dynamic beat map from analysis (absent in projects saved before v0.3: linear grid)
+    #[serde(default)] pub map: Option<Arc<BeatMap>>,
 }
 impl Track {
-    pub fn vis_start(&self, _mix_bpm: f64) -> f64 { self.start_beat - self.offset * self.bpm / 60.0 }
-    pub fn end(&self, _mix_bpm: f64) -> f64 { self.start_beat + (self.duration - self.offset) * self.bpm / 60.0 }
+    pub fn grid(&self) -> Grid { Grid::new(self.map.clone(), self.bpm, self.offset, self.start_beat) }
+    /// mix beat -> source seconds
+    pub fn sec_at(&self, b: f64) -> f64 { self.grid().sec(b) }
+    pub fn vis_start(&self, _mix_bpm: f64) -> f64 { self.grid().beat(0.0) }
+    pub fn end(&self, _mix_bpm: f64) -> f64 { self.grid().beat(self.duration) }
+    /// beats from the file start to the first downbeat
+    pub fn intro_beats(&self) -> f64 { self.start_beat - self.grid().beat(0.0) }
+    /// keep `offset` the first downbeat in the file (step whole bars), without moving the audio
+    pub fn normalize_grid(&mut self) {
+        for _ in 0..4096 { let p = self.grid().sec(self.start_beat - 4.0); if p >= 0.0 { self.offset = p; self.start_beat -= 4.0; } else { break; } }
+        for _ in 0..4096 { if self.offset >= 0.0 { break; } self.offset = self.grid().sec(self.start_beat + 4.0); self.start_beat += 4.0; }
+    }
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -71,8 +85,8 @@ impl Mix {
             let bpm = self.bpm;
             let t = &mut self.tracks[i];
             t.lane = k % 2;
-            if k == 0 { t.start_beat = (t.offset * t.bpm / 60.0 / 4.0).ceil() * 4.0; }
-            else { let intro = t.offset * t.bpm / 60.0; t.start_beat = ((cursor - overlap_bars * 4.0 + intro) / 4.0).round() * 4.0; }
+            if k == 0 { t.start_beat = (t.intro_beats() / 4.0).ceil() * 4.0; }
+            else { let intro = t.intro_beats(); t.start_beat = ((cursor - overlap_bars * 4.0 + intro) / 4.0).round() * 4.0; }
             cursor = t.end(bpm);
         }
     }
@@ -82,10 +96,10 @@ impl Mix {
         if let Some(&last) = o.last() {
             let p = &self.tracks[last];
             t.lane = 1 - p.lane;
-            let intro = t.offset * t.bpm / 60.0;
+            let intro = t.intro_beats();
             t.start_beat = ((p.end(self.bpm) - 64.0 + intro) / 4.0).round() * 4.0;
             t.start_beat = t.start_beat.max(p.start_beat + 4.0);
-        } else { t.lane = 0; t.start_beat = (t.offset * t.bpm / 60.0 / 4.0).ceil() * 4.0; }
+        } else { t.lane = 0; t.start_beat = (t.intro_beats() / 4.0).ceil() * 4.0; }
         self.tracks.push(t);
     }
 }

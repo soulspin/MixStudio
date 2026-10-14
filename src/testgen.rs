@@ -28,3 +28,29 @@ pub fn synth(bpm: f32, root_midi: i32, minor: bool, secs: f32, lead_in: f32, sr:
     }
     (l, r)
 }
+
+/// Like `synth`, but the tempo glides linearly from `bpm0` to `bpm1` over `secs` (beat phase = integral of tempo).
+pub fn synth_drift(bpm0: f32, bpm1: f32, root_midi: i32, minor: bool, secs: f32, lead_in: f32, sr: u32) -> (Vec<f32>, Vec<f32>) {
+    let n = (secs * sr as f32) as usize; let mut l = vec![0f32; n]; let mut r = vec![0f32; n];
+    let hz = |m: i32| 440.0 * 2f32.powf((m - 69) as f32 / 12.0);
+    let third = if minor { 3 } else { 4 };
+    let chord = [root_midi + 12, root_midi + 12 + third, root_midi + 19, root_midi + 24];
+    let span = (secs - lead_in) as f64;
+    for i in 0..n {
+        let t = i as f64 / sr as f64 - lead_in as f64;
+        let mut s = 0.0f32;
+        if t >= 0.0 {
+            let ph = (bpm0 as f64 * t + (bpm1 - bpm0) as f64 * t * t / (2.0 * span)) / 60.0; // beats elapsed
+            let local = bpm0 as f64 + (bpm1 - bpm0) as f64 * t / span; let beat = 60.0 / local;
+            let tb = (ph.fract() * beat) as f32;
+            let acc = if (ph as i64) % 4 == 0 { 1.0 } else { 0.55 };
+            let f = 50.0 + 120.0 * (-tb * 30.0).exp(); s += 0.8 * acc * (2.0 * PI * f * tb).sin() * (-tb * 7.0).exp();
+            let off = (((ph + 0.5).fract()) * beat) as f32;
+            s += 0.25 * (2.0 * PI * hz(root_midi) * t as f32).sin().signum() * (-off * 9.0).exp();
+            s += chord.iter().map(|&m| (2.0 * PI * hz(m) * t as f32).sin()).sum::<f32>() * 0.06;
+        }
+        let fade = (secs - i as f32 / sr as f32).min(2.0) / 2.0;
+        l[i] = s * 0.7 * fade; r[i] = s * 0.7 * fade;
+    }
+    (l, r)
+}
