@@ -1,0 +1,10 @@
+/target/
+/deliver/
+/deliver*.tgz
+/test/
+/ref/
+/preview.png
+*.wav
+*.mixstudio.json
+.cache/
+/release/
