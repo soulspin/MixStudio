@@ -63,6 +63,7 @@ fn selftest(dir: &Path) -> bool {
     ok &= stem_tests();
     ok &= alignment_test(dir);
     ok &= drift_test(dir);
+    ok &= soft_intro_test(dir);
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -247,21 +248,17 @@ fn track_of(p: &Path, an: &analysis::Analysis) -> model::Track {
     model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map() }
 }
 
-fn lowpass(x: &[f32], sr: u32) -> Vec<f32> {
-    let a = (-2.0 * std::f32::consts::PI * 150.0 / sr as f32).exp(); let (mut y1, mut y2) = (0f32, 0f32);
-    x.iter().map(|&v| { y1 = a * y1 + (1.0 - a) * v; y2 = a * y2 + (1.0 - a) * y1; y2 }).collect()
-}
 
 /// Render each deck of the first transition on its own and compare kick onsets beat by beat.
 /// Returns (pairs, mean ms, median ms, max ms, overlap beats).
 fn overlap_alignment(mix: &model::Mix, auds: &[Option<Arc<analysis::Audio>>], sr: u32, real: bool) -> Option<(usize, f64, f64, f64, f64)> {
     let tr = mix.transitions(); let &(_, _, s, e) = tr.first()?;
     let solo = |d: usize| { let mut m = mix.clone(); m.decks[1 - d].mute = true; m.metronome = false;
-        let snap = Arc::new(engine::Snap::build(&m, auds)); let x = engine::render_offline(snap, sr, s, e).0; if real { lowpass(&x, sr) } else { x } };
+        let snap = Arc::new(engine::Snap::build(&m, auds)); engine::render_offline(snap, sr, s, e).0 };
     let (a, b) = (solo(0), solo(1));
     if let Ok(dd) = std::env::var("MS_DUMP") { engine::write_wav(&Path::new(&dd).join("deck_a.wav"), &a, &a, sr).ok(); std::fs::write(Path::new(&dd).join("s.txt"), format!("{s} {e} {}", mix.bpm)).ok(); engine::write_wav(&Path::new(&dd).join("deck_b.wav"), &b, &b, sr).ok(); }
     let beat_s = 60.0 / mix.bpm;
-    let (oa, ob) = (kick_onsets(&a, sr, beat_s, 0.0), kick_onsets(&b, sr, beat_s, 0.0));
+    let (oa, ob) = if real { (attack_onsets(&a, sr, beat_s), attack_onsets(&b, sr, beat_s)) } else { (kick_onsets(&a, sr, beat_s, 0.0), kick_onsets(&b, sr, beat_s, 0.0)) };
     if std::env::var("MS_DEBUG").is_ok() { for (k, (x, y)) in oa.iter().zip(&ob).enumerate() { println!("  beat {k}: {:?} {:?}", x.map(|v| (v * 1000.0).round()), y.map(|v| (v * 1000.0).round())); } }
     let mut d: Vec<f64> = oa.iter().zip(&ob).filter_map(|(x, y)| Some((x.as_ref()? - y.as_ref()?).abs() * 1000.0)).collect();
     if real { d.retain(|&x| x < 0.25 * beat_s * 1000.0); } // drop beats where one side has no kick (breaks, fills)
@@ -332,4 +329,53 @@ fn align_cli(a: &Path, b: &Path) {
             None => println!("no overlap"),
         }
     } }
+}
+
+/// Steepest rise of a ripple-free low-band envelope near every mix beat (robust on real kicks). Times in s, None if no kick.
+fn attack_onsets(x: &[f32], sr: u32, beat_s: f64) -> Vec<Option<f64>> {
+    let a = (-2.0 * std::f32::consts::PI * 150.0 / sr as f32).exp(); let wq = sr as f32 / (2.0 * std::f32::consts::PI * 60.0);
+    let (mut y1, mut y2, mut pv) = (0f32, 0f32, 0f32);
+    let env: Vec<f32> = x.iter().map(|&v| { y1 = a * y1 + (1.0 - a) * v; y2 = a * y2 + (1.0 - a) * y1; let d = (y2 - pv) * wq; pv = y2; (y2 * y2 + d * d).sqrt() }).collect();
+    let gmax = env.iter().cloned().fold(0f32, f32::max); let dd = (0.001 * sr as f64) as usize;
+    let mut v = vec![]; let mut t = 0.0;
+    while ((t + 0.25 * beat_s) * sr as f64) as usize + dd < env.len() {
+        let s = ((t - 0.2 * beat_s).max(0.0) * sr as f64) as usize; let e = ((t + 0.2 * beat_s) * sr as f64) as usize;
+        let pk = env[s..e].iter().cloned().fold(0f32, f32::max);
+        v.push(if pk < 0.02 * gmax { None } else { let mut b = (0f32, s); for i in s..e { let r = env[i + dd] - env[i]; if r > b.0 { b = (r, i); } } Some(b.1 as f64 / sr as f64) });
+        t += beat_s;
+    }
+    v
+}
+
+/// Regression for the Night Transit order bug (v0.3.0): (1) beats on soft-attack kicks were placed later than on
+/// clicky kicks, and (2) key-lock WSOLA moved attacks by a few ms in a direction set by speed-up vs slow-down.
+/// A hard-kick 125.2 BPM track (slowed) into a 124 BPM track with a soft-kick intro (sped up), mixed at 124.6:
+/// the median kick offset over the overlap must stay under 2.5 ms with key lock on and off.
+fn soft_intro_test(dir: &Path) -> bool {
+    let sr = 44100u32; let mut ok = true;
+    let pa = dir.join("hard_125.2.wav"); let pb = dir.join("soft_intro_124.wav");
+    let (l, r) = testgen::synth_drift(125.2, 125.2, 45, true, 120.0, 0.31, sr); engine::write_wav(&pa, &l, &r, sr).unwrap();
+    let (l, r) = testgen::synth_soft_intro(124.0, 120.0, 0.17, 45.0, sr); engine::write_wav(&pb, &l, &r, sr).unwrap();
+    let (aa, ana) = analysis::load(&pa).unwrap(); let (ab, anb) = analysis::load(&pb).unwrap();
+    let (aa, ab) = (Arc::new(aa), Arc::new(ab));
+    for key_lock in [true, false] {
+        let mut mix = model::Mix::default(); mix.add_track(track_of(&pa, &ana)); mix.add_track(track_of(&pb, &anb)); mix.bpm = 124.6; mix.key_lock = key_lock;
+        let tr = mix.transitions(); let Some(&(_, _, s, e)) = tr.first() else { println!("FAIL soft intro: no overlap"); return false; };
+        let solo = |d: usize| { let mut m = mix.clone(); m.decks[1 - d].mute = true; engine::render_offline(Arc::new(engine::Snap::build(&m, &[Some(aa.clone()), Some(ab.clone())])), sr, s, e).0 };
+        let beat_s = 60.0 / mix.bpm;
+        let (oa, ob) = (attack_onsets(&solo(0), sr, beat_s), attack_onsets(&solo(1), sr, beat_s));
+        // the soft and hard kicks have different attack shapes; compare against the same kick measured on its own
+        // track at its own tempo, so only placement errors remain: offset of (A - B) minus the shape bias
+        let shape = { let (x, _) = testgen::synth_soft_intro(124.6, 8.0, 0.0, 4.0, sr); let o = attack_onsets(&x, sr, beat_s); let n = (4.0 / beat_s) as usize;
+            let soft: Vec<f64> = o[1..n].iter().enumerate().filter_map(|(k, v)| v.map(|v| v - (k + 1) as f64 * beat_s)).collect();
+            let hard: Vec<f64> = o[n + 1..o.len() - 1].iter().enumerate().filter_map(|(k, v)| v.map(|v| v - (k + n + 1) as f64 * beat_s)).collect();
+            soft.iter().sum::<f64>() / soft.len() as f64 - hard.iter().sum::<f64>() / hard.len() as f64 };
+        let mut d: Vec<f64> = oa.iter().zip(&ob).filter_map(|(x, y)| Some((x.as_ref()? - (y.as_ref()? - shape)) * 1000.0)).collect();
+        d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = d.get(d.len() / 2).cloned().unwrap_or(f64::NAN); let max = d.iter().fold(0f64, |a, x| a.max(x.abs()));
+        let pass = d.len() >= 32 && med.abs() < 2.5 && max < 10.0; ok &= pass;
+        println!("{} soft-intro regression (hard 125.2 -> soft-intro 124 at 124.6), key lock {}: {} kick pairs, median {med:+.2} ms, max {max:.2} ms (attack-shape bias {:.2} ms removed; limits 2.5 / 10 ms)",
+            if pass { "OK  " } else { "FAIL" }, if key_lock { "on " } else { "off" }, d.len(), shape * 1000.0);
+    }
+    ok
 }
