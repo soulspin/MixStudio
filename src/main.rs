@@ -259,6 +259,7 @@ fn overlap_alignment(mix: &model::Mix, auds: &[Option<Arc<analysis::Audio>>], sr
     let solo = |d: usize| { let mut m = mix.clone(); m.decks[1 - d].mute = true; m.metronome = false;
         let snap = Arc::new(engine::Snap::build(&m, auds)); let x = engine::render_offline(snap, sr, s, e).0; if real { lowpass(&x, sr) } else { x } };
     let (a, b) = (solo(0), solo(1));
+    if let Ok(dd) = std::env::var("MS_DUMP") { engine::write_wav(&Path::new(&dd).join("deck_a.wav"), &a, &a, sr).ok(); engine::write_wav(&Path::new(&dd).join("deck_b.wav"), &b, &b, sr).ok(); }
     let beat_s = 60.0 / mix.bpm;
     let (oa, ob) = (kick_onsets(&a, sr, beat_s, 0.0), kick_onsets(&b, sr, beat_s, 0.0));
     if std::env::var("MS_DEBUG").is_ok() { for (k, (x, y)) in oa.iter().zip(&ob).enumerate() { println!("  beat {k}: {:?} {:?}", x.map(|v| (v * 1000.0).round()), y.map(|v| (v * 1000.0).round())); } }
@@ -321,7 +322,7 @@ fn align_cli(a: &Path, b: &Path) {
     let (aa, ana) = analysis::load(a).unwrap(); let (ab, anb) = analysis::load(b).unwrap();
     let (aa, ab) = (Arc::new(aa), Arc::new(ab));
     for (an, p) in [(&ana, a), (&anb, b)] { let r = an.beat_map().map(|m| m.tempo_range()).unwrap_or((an.bpm, an.bpm)); println!("{}: global {:.3} BPM, local {:.2}..{:.2}, downbeat {:.3}s, {} beats", p.display(), an.bpm, r.0, r.1, an.offset, an.beats.len()); }
-    for dynamic in [true, false] { for key_lock in [true, false] {
+    for dynamic in [false, true] { for key_lock in [false, true] {
         let mut mix = model::Mix::default(); let mut ta = track_of(a, &ana); let mut tb = track_of(b, &anb);
         if !dynamic { ta.map = None; tb.map = None; }
         mix.add_track(ta); mix.add_track(tb); mix.bpm = ((ana.bpm + anb.bpm) / 2.0 * 10.0).round() / 10.0; mix.key_lock = key_lock;
