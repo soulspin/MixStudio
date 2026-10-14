@@ -221,8 +221,8 @@ pub fn detect_bpm(m: &[f32], sr: u32) -> (f64, f64) {
         for k in 0..128 { let p = ph - period * 0.1 + period * 0.2 * k as f64 / 128.0; let s = comb(&o, period, p.max(0.0)); if s > best.0 { best = (s, p.max(0.0)); } }
         ph = best.1;
     }
-    // onset frame i covers samples [i*hop, (i+1)*hop): its energy jump marks an attack ~half a hop after frame start
-    let off_beat = ((ph + 0.5) / fps).rem_euclid(60.0 / bpm);
+    // onset frame i covers samples [i*hop, (i+1)*hop); with the symmetric smoothing its peak sits at the attack (~2 ms on synthetic kicks)
+    let off_beat = (ph / fps).rem_euclid(60.0 / bpm);
     let off = downbeat(m, sr, bpm, off_beat, &o, fps);
     (bpm, off)
 }
