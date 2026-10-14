@@ -2,11 +2,11 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Alpha 0.1](https://img.shields.io/badge/status-alpha%200.2-e8e000?style=flat-square&labelColor=24262b)
+![Status: Alpha 0.3](https://img.shields.io/badge/status-alpha%200.3-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Alpha 0.2:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Alpha 0.3:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio timeline with a transition](docs/screenshots/transition.png)
 
@@ -16,12 +16,13 @@ Live DJ software is built for performing: two decks, a crossfader, and one shot 
 
 It's native, fast, and doesn't need an account. No sign-up, no license keys, no cloud. It's your music on your machine.
 
-## Features (Alpha 0.2)
+## Features (Alpha 0.3)
 
 - **Timeline decks:** songs alternate on Deck 1 and Deck 2 as coloured clips with 3-band waveforms (low/mid/high), beat and bar lines, bar numbers and rough section tags (DOWN / CHORUS / UP). There's an overview strip, a time ruler, zoom (Ctrl+scroll), scrolling, a playhead, click-to-seek, and clip dragging with snapping (off / beat / half bar / bar).
-- **Automatic analysis:** BPM (onset envelope plus autocorrelation and a comb search), first downbeat / bar 1 (kick and bass energy per beat phase, attack strength and phrase changes), and musical key (chromagram plus Krumhansl profiles) shown as **Camelot** codes. Results and waveforms are cached.
-- **Key-lock time-stretch:** every track plays at the mix tempo. Key lock (on by default) uses a built-in WSOLA stretcher that keeps the pitch. Switch it off for classic varispeed. Playback and export share the same engine.
-- **Editable beatgrid:** nudge ±1/±10 ms, Alt+drag the grid on a clip, set the downbeat (Shift+click a beat line or "Set downbeat at playhead"), BPM ×2 / ÷2, **tap tempo**, and reset to analysis.
+- **Automatic analysis:** global BPM (tempogram + full-track comb + beat regression, about 0.02 BPM), musical key (chromagram plus Krumhansl profiles) shown as **Camelot** codes, and bar 1. Results and waveforms are cached and re-analysed automatically when the analysis improves.
+- **Dynamic beatgrids:** every beat is tracked (dynamic-programming beat tracking, refined to the kick attack and smoothed over 16 beats), so tracks that drift in tempo (live-played, older or AI-generated material) still stay locked. The Track tab shows the tempo range the beat map follows. Projects saved before 0.3 load with the old fixed grid.
+- **Beat-locked time-stretch:** every track plays at the mix tempo through its beat map, so the stretch ratio changes continuously and each beat lands on a mix beat (kicks within a few ms in the self-tests, even against a drifting track). Key lock (on by default) uses a built-in WSOLA stretcher that keeps the pitch. Switch it off for classic varispeed. Playback and export share the same engine.
+- **Editable beatgrid:** nudge ±1/±10 ms, Alt+drag the grid on a clip, set the downbeat (Shift+click a beat line or "Set downbeat at playhead"). These work on beat maps too. BPM ×2 / ÷2, **tap tempo** (a hand-set BPM switches the track to a fixed grid), and reset to analysis.
 - **AI stem separation:** one click, or automatically for new tracks, splits a song into **drums, bass, melody and vocals** with [HT-Demucs](https://github.com/facebookresearch/demucs). It runs in the background through ONNX Runtime, on your **NVIDIA GPU via CUDA** when available, otherwise on the CPU. Stems are cached on disk, so each track is separated only once.
 - **Per-stem transitions:** when both tracks have stems, the overlap shows four real stem lanes, and the Drums / Bass / Melody / Vocals choices (**None / Swap / Crossfade / Full**) drive the audio in playback and export. Swap the bass at the drop, keep the incoming vocals out, or let the drums ride. Without stems, the preset's volume curve is used.
 - **Transitions:** overlaps become transition regions with presets that act on the audio: **Crossfade**, **Bass swap**, **High to low**, **Low to high** (filter sweeps) and **Echo out**. You can set the overlap length (4/8/16/32 bars), and the volume curves are drawn on the clips.
@@ -46,6 +47,7 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 - Rubber Band-quality time-stretching
 - Automix that picks transition points (phrases, energy)
 - Tempo automation in the tempo lane
+- Editing single beats in the beat map (warp markers) and non-4/4 meters
 - MIDI controller support
 - Headphone cue / pre-listen
 - A library browser
@@ -93,6 +95,10 @@ The first time you separate a track, MixStudio downloads the model (166 MB, veri
 
 Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates four test tracks and builds a demo mix. `mixstudio --selftest /tmp/ms-test` runs the analysis, stretch and render self-tests.
 
+### Command line
+
+`mixstudio --analyse <files>` prints BPM, downbeat and key. `mixstudio --align <a> <b>` mixes two tracks and measures kick alignment in the overlap. `mixstudio --selftest <dir>` runs the test suite.
+
 ## Usage
 
 1. Click **+** (Add tracks) or drop audio files on the window. Each new song goes on the next deck and overlaps the previous one by 16 bars.
@@ -116,6 +122,7 @@ Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates
 - Stem separation on the CPU is slower than real time on long tracks (about 1–2× real time on 8 cores). A GPU is much faster.
 - Stems are held in memory as 16-bit audio (about 30 MB per minute per track).
 - WSOLA is good, but not Rubber Band quality. Big tempo changes on pads and vocals can sound grainy.
+- Beat maps follow gradual drift, not sudden tempo jumps or rubato.
 - Analysis is tuned for 4/4 dance music. Some tracks are detected at half or double tempo (use ×2 / ÷2 or tap tempo).
 - Section tags are a rough energy guess.
 - Carousel, Library, Video, effects beyond EQ/filter/echo, and headphone cue aren't implemented yet.
