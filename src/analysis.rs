@@ -450,6 +450,9 @@ pub fn detect_beats(m: &[f32], sr: u32) -> (f64, f64, Vec<f64>) {
     let mut beats = track_beats(&o, fps, fps * 60.0 / bpm, off_lin * fps);
     while beats.first().is_some_and(|&b| b < 0.0) { beats.remove(0); }
     if beats.len() < 16 { return (bpm, off_lin, vec![]); }
-    let k = downbeat_idx(m, sr, &beats, &o, fps);
+    // bar phase from the global grid (robust), snapped to the nearest tracked beat; offset = first such downbeat
+    let near = beats.iter().enumerate().min_by(|x, y| (x.1 - off_lin).abs().partial_cmp(&(y.1 - off_lin).abs()).unwrap()).map(|x| x.0).unwrap_or(0);
+    let _ = downbeat_idx;
+    let k = near % 4;
     (bpm, beats[k], beats)
 }

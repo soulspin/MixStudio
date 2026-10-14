@@ -261,6 +261,7 @@ fn overlap_alignment(mix: &model::Mix, auds: &[Option<Arc<analysis::Audio>>], sr
     let (a, b) = (solo(0), solo(1));
     let beat_s = 60.0 / mix.bpm;
     let (oa, ob) = (kick_onsets(&a, sr, beat_s, 0.0), kick_onsets(&b, sr, beat_s, 0.0));
+    if std::env::var("MS_DEBUG").is_ok() { for (k, (x, y)) in oa.iter().zip(&ob).enumerate() { println!("  beat {k}: {:?} {:?}", x.map(|v| (v * 1000.0).round()), y.map(|v| (v * 1000.0).round())); } }
     let mut d: Vec<f64> = oa.iter().zip(&ob).filter_map(|(x, y)| Some((x.as_ref()? - y.as_ref()?).abs() * 1000.0)).collect();
     if real { d.retain(|&x| x < 0.25 * beat_s * 1000.0); } // drop beats where one side has no kick (breaks, fills)
     if d.is_empty() { return None; }
@@ -275,10 +276,20 @@ fn drift_test(dir: &Path) -> bool {
     let sr = 44100u32; let mut ok = true;
     let pd = dir.join("drift_125.05-125.7.wav"); let ps = dir.join("steady_124.wav");
     let (l, r) = testgen::synth_drift(125.05, 125.7, 45, true, 150.0, 0.41, sr); engine::write_wav(&pd, &l, &r, sr).unwrap();
-    let (l, r) = testgen::synth(124.0, 48, true, 150.0, 0.23, sr); engine::write_wav(&ps, &l, &r, sr).unwrap();
+    let (l, r) = testgen::synth_drift(124.0, 124.0, 48, true, 150.0, 0.23, sr); engine::write_wav(&ps, &l, &r, sr).unwrap();
     let (ad, and) = analysis::load(&pd).unwrap(); let (as_, ans) = analysis::load(&ps).unwrap();
     let (ad, as_) = (Arc::new(ad), Arc::new(as_));
     if let Some(m) = and.beat_map() { let (lo, hi) = m.tempo_range(); println!("     drift track: {} beats mapped, global {:.2} BPM, local {:.2}..{:.2} BPM, downbeat {:.3}s (exp 0.41 mod bar)", m.beats.len(), and.bpm, lo, hi, and.offset); }
+    if let Some(m) = and.beat_map() {
+        // true beat times of the glide: phase(t) = (b0 t + (b1-b0) t^2 / 2T) / 60
+        let (b0, b1, lead) = (125.05f64, 125.7f64, 0.41f64); let span = 150.0 - lead; let c = (b1 - b0) / span;
+        let truth = |k: f64| lead + (-b0 + (b0 * b0 + 2.0 * c * 60.0 * k).sqrt()) / c;
+        let errs: Vec<f64> = m.beats.iter().map(|&t| { let k = ((t - lead) * (b0 + c * (t - lead) / 2.0) / 60.0).round(); (t - truth(k)) * 1000.0 }).collect();
+        let max = errs.iter().fold(0f64, |a, e| a.max(e.abs())); let mean = errs.iter().sum::<f64>() / errs.len() as f64;
+        let pass = max < 5.0; ok &= pass;
+        println!("{} drift beat map vs true beat times: mean {mean:+.2} ms, max |err| {max:.2} ms over {} beats (limit 5 ms)", if pass { "OK  " } else { "FAIL" }, errs.len());
+        if std::env::var("MS_DEBUG").is_ok() { for (k, e) in errs.iter().enumerate().take(24) { println!("  map beat {k}: {e:+.2} ms"); } }
+    }
     for (order, key_lock) in [(0, true), (1, true), (0, false)] {
         for dynamic in [true, false] {
             let mut mix = model::Mix::default(); let mut auds = vec![];

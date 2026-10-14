@@ -119,7 +119,7 @@ fn track_mods(snap: &Snap, ti: usize, b: f64) -> Mods {
 
 pub const WN: usize = 2048; // grain length (output samples)
 pub const WH: usize = 512;  // synthesis hop (75% overlap)
-const WTOL: i64 = 512;      // search tolerance (source samples)
+const WTOL: i64 = 256;      // search tolerance (source samples); small so transients stay within ~6 ms of the beat map
 
 /// Per-track WSOLA state (preallocated; no allocation in the audio thread).
 pub struct Wsola { id: (usize, u64, u64, u64), acc: Vec<[f32; 2]>, fifo: Vec<[f32; 2]>, rd: usize, prev: Option<f64>, next_beat: f64, active: bool, win: Vec<f32> }
@@ -139,9 +139,10 @@ impl Wsola {
             let score = |d: i64, step: usize| -> f32 { let mut c = 0f32; let mut e = 1e-9f32; let mut j = 0i64;
                 while j < len { let x = get(ii + d + st(rs, j)); c += x * get(ni + st(rs, j)); e += x * x; j += step as i64; } c / e.sqrt() };
             let mut best = (f32::MIN, 0i64); let mut d = -WTOL;
-            while d <= WTOL { let sc = score(d, 8); if sc > best.0 { best = (sc, d); } d += 16; }
+            let pen = |d: i64, sc: f32| sc - 0.15 * sc.abs() * (d as f32 / WTOL as f32).powi(2); // prefer the ideal (beat-locked) position
+            while d <= WTOL { let sc = pen(d, score(d, 8)); if sc > best.0 { best = (sc, d); } d += 16; }
             let c0 = best.1; let mut d = c0 - 16;
-            while d <= c0 + 16 { let sc = score(d, 4); if sc > best.0 { best = (sc, d); } d += 2; }
+            while d <= c0 + 16 { let sc = pen(d, score(d, 4)); if sc > best.0 { best = (sc, d); } d += 2; }
             start = (ii + best.1) as f64 + (ideal - ii as f64);
         }
         for j in 0..WN {
