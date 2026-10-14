@@ -85,7 +85,7 @@ impl Mix {
             let bpm = self.bpm;
             let t = &mut self.tracks[i];
             t.lane = k % 2;
-            if k == 0 { t.start_beat = (t.intro_beats() / 4.0).ceil() * 4.0; }
+            if k == 0 { t.start_beat = (t.intro_beats() / 4.0 - 0.01).ceil() * 4.0; }
             else { let intro = t.intro_beats(); t.start_beat = ((cursor - overlap_bars * 4.0 + intro) / 4.0).round() * 4.0; }
             cursor = t.end(bpm);
         }
@@ -99,7 +99,7 @@ impl Mix {
             let intro = t.intro_beats();
             t.start_beat = ((p.end(self.bpm) - 64.0 + intro) / 4.0).round() * 4.0;
             t.start_beat = t.start_beat.max(p.start_beat + 4.0);
-        } else { t.lane = 0; t.start_beat = (t.intro_beats() / 4.0).ceil() * 4.0; }
+        } else { t.lane = 0; t.start_beat = (t.intro_beats() / 4.0 - 0.01).ceil() * 4.0; }
         self.tracks.push(t);
     }
 }

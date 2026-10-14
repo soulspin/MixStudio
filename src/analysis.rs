@@ -8,7 +8,7 @@ impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } 
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 3;
+pub const ANALYSIS_VERSION: u32 = 4;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -448,11 +448,44 @@ pub fn detect_beats(m: &[f32], sr: u32) -> (f64, f64, Vec<f64>) {
     let (bpm, off_lin) = detect_bpm(m, sr);
     let (o, fps) = onset_env(m, sr);
     let mut beats = track_beats(&o, fps, fps * 60.0 / bpm, off_lin * fps);
-    while beats.first().is_some_and(|&b| b < 0.0) { beats.remove(0); }
+    while beats.first().is_some_and(|&b| b < -0.05) { beats.remove(0); }
+    beats = refine_attacks(m, sr, &beats);
+    while beats.first().is_some_and(|&b| b < -0.02) { beats.remove(0); }
+    if let Some(b) = beats.first_mut() { *b = b.max(0.0); }
     if beats.len() < 16 { return (bpm, off_lin, vec![]); }
     // bar phase from the global grid (robust), snapped to the nearest tracked beat; offset = first such downbeat
     let near = beats.iter().enumerate().min_by(|x, y| (x.1 - off_lin).abs().partial_cmp(&(y.1 - off_lin).abs()).unwrap()).map(|x| x.0).unwrap_or(0);
     let _ = downbeat_idx;
     let k = near % 4;
     (bpm, beats[k], beats)
+}
+
+/// Sample-accurate refinement: move every beat to the steepest rise of the low-band (kick) envelope
+/// within +-25 ms, then re-smooth with a +-8 beat weighted local regression. Beats without a clear
+/// attack keep their position with a small weight.
+fn refine_attacks(m: &[f32], sr: u32, beats: &[f64]) -> Vec<f64> {
+    let n = beats.len(); if n < 16 { return beats.to_vec(); }
+    let a = (-2.0 * std::f32::consts::PI * 150.0 / sr as f32).exp(); let ae = (-1.0 / (0.002 * sr as f32)).exp();
+    let (mut y1, mut y2, mut ev) = (0f32, 0f32, 0f32);
+    let env: Vec<f32> = m.iter().map(|&x| { y1 = a * y1 + (1.0 - a) * x; y2 = a * y2 + (1.0 - a) * y1; ev = ae * ev + (1.0 - ae) * y2.abs(); ev }).collect();
+    let d = (0.001 * sr as f64) as usize; let w = (0.025 * sr as f64) as usize;
+    let mut obs = vec![(0f64, 0f64); n];
+    for (k, &t) in beats.iter().enumerate() {
+        let c = (t * sr as f64) as i64; if c - (w as i64) < 0 || (c as usize) + w + d >= env.len() { obs[k] = (t, 0.0); continue; }
+        let c = c as usize; let mut best = (0f32, c);
+        for i in (c - w..c + w).step_by(4) { let r = env[i + d] - env[i]; if r > best.0 { best = (r, i); } }
+        obs[k] = (best.1 as f64 / sr as f64, best.0 as f64);
+    }
+    let mut rs: Vec<f64> = obs.iter().map(|o| o.1).collect(); rs.sort_by(|a, b| a.partial_cmp(b).unwrap()); let med = rs[n / 2].max(1e-9);
+    let pts: Vec<(f64, f64)> = obs.iter().zip(beats).map(|(o, &t)| if o.1 > 0.3 * med { (o.0, (o.1 / med).min(3.0)) } else { (t, 0.01) }).collect();
+    let h = 8i64;
+    let mut out: Vec<f64> = (0..n).map(|k| {
+        let (mut sw, mut sx, mut sy, mut sxx, mut sxy) = (1e-12, 0.0, 0.0, 0.0, 0.0);
+        for j in (k as i64 - h).max(0)..=(k as i64 + h).min(n as i64 - 1) {
+            let (y, wt) = pts[j as usize]; let ww = wt * (1.0 - (j - k as i64).abs() as f64 / (h + 1) as f64); let x = (j - k as i64) as f64;
+            sw += ww; sx += ww * x; sy += ww * y; sxx += ww * x * x; sxy += ww * x * y; }
+        let den = sw * sxx - sx * sx; if den.abs() > 1e-15 { let b = (sw * sxy - sx * sy) / den; (sy - b * sx) / sw } else { beats[k] } }).collect();
+    let p = (beats[n - 1] - beats[0]) / (n - 1) as f64;
+    for k in 1..n { if out[k] < out[k - 1] + 0.7 * p { out[k] = out[k - 1] + 0.7 * p; } }
+    out
 }
