@@ -38,11 +38,11 @@ impl Default for Deck { fn default() -> Self { Deck { vol: 0.85, hi: 0.0, mid: 0
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Mix { pub name: String, pub bpm: f64, pub tracks: Vec<Track>, pub decks: [Deck; 4], #[serde(default = "one")] pub master: f32,
-    #[serde(default = "yes")] pub key_lock: bool, #[serde(default)] pub metronome: bool, #[serde(default = "half")] pub metro_vol: f32 }
+    #[serde(default = "yes")] pub key_lock: bool, #[serde(default)] pub metronome: bool, #[serde(default = "half")] pub metro_vol: f32, #[serde(default)] pub auto_stems: bool }
 fn yes() -> bool { true }
 fn half() -> f32 { 0.5 }
 fn one() -> f32 { 1.0 }
-impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5 } } }
+impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false } } }
 
 impl Mix {
     /// indices of main-deck tracks sorted by start

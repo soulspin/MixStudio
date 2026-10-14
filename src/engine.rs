@@ -4,25 +4,27 @@
 //! Grains are anchored to the timeline (ideal input position computed from the mix beat),
 //! so there is no drift. Without Key lock: varispeed (cubic Hermite resampling, pitch follows tempo).
 use crate::analysis::Audio;
-use crate::model::{Deck, Mix, Preset};
+use crate::model::{Deck, Mix, Preset, StemMode};
+use crate::stems::Stems;
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub struct SnapTrack { pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64 }
-pub struct Snap { pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset)>, pub decks: [Deck; 4], pub master: f32 }
+pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64 }
+pub struct Snap { pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset, [StemMode; 4])>, pub decks: [Deck; 4], pub master: f32 }
 
 impl Snap {
-    pub fn build(mix: &Mix, audio: &[Option<Arc<Audio>>]) -> Snap {
+    pub fn build(mix: &Mix, audio: &[Option<Arc<Audio>>]) -> Snap { Self::build_with(mix, audio, &[]) }
+    pub fn build_with(mix: &Mix, audio: &[Option<Arc<Audio>>], stems: &[Option<Arc<Stems>>]) -> Snap {
         let mut tracks = vec![]; let mut map = vec![usize::MAX; mix.tracks.len()];
         for (i, t) in mix.tracks.iter().enumerate() {
             if let Some(Some(a)) = audio.get(i) {
                 map[i] = tracks.len();
-                tracks.push(SnapTrack { audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.bpm, vis: t.vis_start(mix.bpm), end: t.end(mix.bpm) });
+                tracks.push(SnapTrack { stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.bpm, vis: t.vis_start(mix.bpm), end: t.end(mix.bpm) });
             }
         }
         let trans = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX)
-            .map(|(a, b, s, e)| (map[a], map[b], s, e, mix.tracks[b].trans.preset)).collect();
+            .map(|(a, b, s, e)| (map[a], map[b], s, e, mix.tracks[b].trans.preset, mix.tracks[b].trans.stems)).collect();
         Snap { key_lock: mix.key_lock, metro: if mix.metronome { Some(mix.metro_vol) } else { None }, bpm: mix.bpm, tracks, trans, decks: mix.decks, master: mix.master }
     }
 }
@@ -63,15 +65,15 @@ impl Biquad {
 
 /// Per-deck modulation computed from transitions at a given beat.
 #[derive(Clone, Copy)]
-struct Mods { gain: f32, low: f32, filter: f32, echo: f32 }
-impl Default for Mods { fn default() -> Self { Mods { gain: 1.0, low: 1.0, filter: 0.0, echo: 0.0 } } }
+struct Mods { gain: f32, low: f32, filter: f32, echo: f32, stem: Option<[f32; 4]> }
+impl Default for Mods { fn default() -> Self { Mods { gain: 1.0, low: 1.0, filter: 0.0, echo: 0.0, stem: None } } }
 
 fn smooth(x: f64) -> f32 { let x = x.clamp(0.0, 1.0) as f32; x * x * (3.0 - 2.0 * x) }
 
 /// Modulation for one track at beat `b`: (track gain, low-gain, filter, echo-send)
 fn track_mods(snap: &Snap, ti: usize, b: f64) -> Mods {
     let mut m = Mods::default();
-    for &(o, i, s, e, p) in &snap.trans {
+    for &(o, i, s, e, p, sm) in &snap.trans {
         if ti != o && ti != i { continue; }
         let out = ti == o;
         let x = ((b - s) / (e - s)).clamp(0.0, 1.0);
@@ -79,6 +81,19 @@ fn track_mods(snap: &Snap, ti: usize, b: f64) -> Mods {
         if !out && b < s { m.gain = 0.0; continue; }
         if b < s || b > e { if out && p == Preset::EchoOut && b > e { m.gain = 0.0; } continue; }
         let cf_out = (x as f32 * PI / 2.0).cos(); let cf_in = (x as f32 * PI / 2.0).sin();
+        if snap.tracks[o].stems.is_some() && snap.tracks[i].stems.is_some() {
+            // real stems on both sides: the per-stem choices drive the gains, the preset keeps its EQ/filter/echo moves
+            let g = [0, 1, 2, 3].map(|k| stem_gain(sm[k], x as f32, out));
+            let prev = m.stem.unwrap_or([1.0; 4]); m.stem = Some([0, 1, 2, 3].map(|k| prev[k] * g[k]));
+            match p {
+                Preset::BassSwap => { let sw = smooth((x - 0.5) / 0.03 + 0.5); m.low *= if out { 1.0 - sw } else { sw }; }
+                Preset::HighToLow => if out { m.filter = -0.95 * smooth(x / 0.9); },
+                Preset::LowToHigh => if out { m.filter = 0.9 * smooth(x / 0.9); },
+                Preset::EchoOut => if out { m.echo = if (0.35..0.5).contains(&x) { 1.0 } else { 0.0 }; },
+                Preset::Crossfade => {}
+            }
+            continue;
+        }
         match p {
             Preset::Crossfade => m.gain *= if out { cf_out } else { cf_in },
             Preset::BassSwap => {
@@ -112,7 +127,7 @@ impl Wsola {
         Wsola { id: (0, 0, 0, 0), acc: vec![[0.0; 2]; WN], fifo: vec![[0.0; 2]; WH], rd: WH, prev: None, next_beat: f64::NAN, active: false, win } }
     fn reset(&mut self) { self.acc.iter_mut().for_each(|x| *x = [0.0; 2]); self.rd = WH; self.prev = None; self.active = false; }
     /// Produce one grain at mix beat `gb`; `pos_of` maps beat -> source sample position.
-    fn grain(&mut self, a: &Audio, gb: f64, t: &SnapTrack, rs: f64) {
+    fn grain(&mut self, a: &Audio, gb: f64, t: &SnapTrack, rs: f64, sg: Option<&[f32; 4]>) {
         let ideal = (t.offset + (gb - t.start_beat) * 60.0 / t.bpm) * a.sr as f64;
         let get = |p: i64| -> f32 { if p >= 0 && (p as usize) < a.l.len() { a.l[p as usize] + a.r[p as usize] } else { 0.0 } };
         let mut start = ideal;
@@ -132,8 +147,10 @@ impl Wsola {
             let p = start + j as f64 * rs; let k = p.floor() as i64; let f = (p - k as f64) as f32;
             if k < 0 || k as usize + 1 >= a.l.len() { continue; }
             let k = k as usize; let w = self.win[j] * 0.5;
-            self.acc[j][0] += (a.l[k] * (1.0 - f) + a.l[k + 1] * f) * w;
-            self.acc[j][1] += (a.r[k] * (1.0 - f) + a.r[k + 1] * f) * w;
+            match (sg, t.stems.as_ref()) {
+                (Some(g), Some(st)) => { for ch in 0..2 { self.acc[j][ch] += (st.mixed(a, ch, k, g) * (1.0 - f) + st.mixed(a, ch, k + 1, g) * f) * w; } }
+                _ => { self.acc[j][0] += (a.l[k] * (1.0 - f) + a.l[k + 1] * f) * w; self.acc[j][1] += (a.r[k] * (1.0 - f) + a.r[k + 1] * f) * w; }
+            }
         }
         self.prev = Some(start);
         self.fifo.copy_from_slice(&self.acc[..WH]);
@@ -180,7 +197,7 @@ impl Engine {
         if !self.playing { self.meters(); return; }
         let bpb = snap.bpm / 60.0 / self.sr as f64; // beats per output sample
         let b0 = self.beat; let b1 = b0 + bpb * n as f64;
-        let mut deck_mod = [Mods { gain: 1.0, low: 1.0, filter: 0.0, echo: 0.0 }; 4];
+        let mut deck_mod = [Mods::default(); 4];
         for (ti, t) in snap.tracks.iter().enumerate() {
             if b1 < t.vis || b0 > t.end + 8.0 { continue; }
             let m0 = track_mods(&snap, ti, b0); let m1 = track_mods(&snap, ti, b1);
@@ -197,12 +214,12 @@ impl Engine {
                 if w.id != id || !w.active || (w.next_beat - b0).abs() > bpb * 2.0 {
                     w.reset(); w.id = id; w.active = true;
                     // pre-roll so the overlap-add is fully built up at b0
-                    for k in (1..WN / WH).rev() { w.grain(a, b0 - (k * WH) as f64 * bpb, t, srt / self.sr as f64); }
+                    for k in (1..WN / WH).rev() { w.grain(a, b0 - (k * WH) as f64 * bpb, t, srt / self.sr as f64, m0.stem.as_ref()); }
                     w.next_beat = b0; w.rd = WH;
                 }
                 let rs = srt / self.sr as f64;
                 for i in 0..n {
-                    if w.rd >= WH { let gb = w.next_beat; w.grain(a, gb, t, rs); }
+                    if w.rd >= WH { let gb = w.next_beat; w.grain(a, gb, t, rs, m0.stem.as_ref()); }
                     let f = w.fifo[w.rd]; w.rd += 1; w.next_beat += bpb;
                     let g = m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32);
                     dst[i][0] += f[0] * g; dst[i][1] += f[1] * g;
@@ -217,10 +234,12 @@ impl Engine {
                 let g = m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32);
                 if g <= 0.0 { continue; }
                 let k = pos as usize; let f = (pos - k as f64) as f32;
-                let herm = |v: &[f32]| { let (y0, y1, y2, y3) = (v[k - 1], v[k], v[k + 1], v[k + 2]);
+                let sg = m0.stem; let st = t.stems.as_deref();
+                let herm = |ch: usize| { let v = |i: usize| match (sg.as_ref(), st) { (Some(g), Some(st)) => st.mixed(a, ch, i, g), _ => if ch == 0 { a.l[i] } else { a.r[i] } };
+                    let (y0, y1, y2, y3) = (v(k - 1), v(k), v(k + 1), v(k + 2));
                     let c1 = 0.5 * (y2 - y0); let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3; let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
                     ((c3 * f + c2) * f + c1) * f + y1 };
-                dst[i][0] += herm(&a.l) * g; dst[i][1] += herm(&a.r) * g;
+                dst[i][0] += herm(0) * g; dst[i][1] += herm(1) * g;
             }
         }
         let any_solo = snap.decks.iter().any(|d| d.solo);
@@ -304,5 +323,17 @@ pub fn preset_gain(p: Preset, x: f32, out: bool) -> f32 {
         Preset::BassSwap => if out { 1.0 - smooth((xs - 0.5) * 2.0) } else { smooth(xs * 2.0) },
         Preset::HighToLow | Preset::LowToHigh => if out { 1.0 - smooth((xs - 0.8) / 0.2) } else { smooth(xs / 0.6) },
         Preset::EchoOut => if out { if x < 0.5 { 1.0 } else { 0.0 } } else { smooth((xs - 0.4) / 0.4) },
+    }
+}
+
+/// Per-stem gain in a transition at progress x for the outgoing (`out`) or incoming track.
+/// None: stem silent in the overlap; Full: stem at full level; Crossfade: equal-power fade;
+/// Swap: hard switch at the midpoint (short 3% ramp).
+pub fn stem_gain(m: StemMode, x: f32, out: bool) -> f32 {
+    match m {
+        StemMode::None => 0.0,
+        StemMode::Full => 1.0,
+        StemMode::Crossfade => if out { (x * PI / 2.0).cos() } else { (x * PI / 2.0).sin() },
+        StemMode::Swap => { let s = smooth(((x - 0.5) / 0.03 + 0.5) as f64); if out { 1.0 - s } else { s } }
     }
 }

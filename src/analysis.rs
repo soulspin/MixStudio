@@ -279,7 +279,9 @@ fn sections(p: &[[u8; 3]], peak_sr: u32, bpm: f64, off: f64) -> Vec<(f64, u8)> {
     res
 }
 
+pub fn cache_key(path: &Path) -> Option<String> { cache_path(path).and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string())) }
 fn cache_path(path: &Path) -> Option<std::path::PathBuf> {
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()); let path = canon.as_path();
     let md = std::fs::metadata(path).ok()?;
     let mut h: u64 = 1469598103934665603;
     for b in path.to_string_lossy().bytes().chain(md.len().to_le_bytes()) { h = (h ^ b as u64).wrapping_mul(1099511628211); }

@@ -1,12 +1,12 @@
 [package]
 name = "mixstudio"
-version = "0.1.0-alpha"
+version = "0.2.0-alpha"
 authors = ["soulspin"]
 license = "MIT"
 description = "A DAW-style DJ mixing app where every song is its own clip on a timeline"
 repository = "https://github.com/soulspin/MixStudio"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.92"
 
 [dependencies]
 anyhow = "1"
@@ -17,6 +17,9 @@ rustfft = "6"
 symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "mp3", "flac", "ogg", "vorbis", "isomp4", "aac", "alac"] }
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 cpal = "0.15"
+ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "load-dynamic", "cuda", "api-22"] }
+ureq = "2"
+sha2 = "0.10"
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 
 [profile.release]

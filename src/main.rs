@@ -3,6 +3,7 @@ mod analysis;
 mod app;
 mod audio;
 mod engine;
+mod stems;
 mod model;
 mod testgen;
 use std::path::Path;
@@ -58,6 +59,7 @@ fn selftest(dir: &Path) -> bool {
     ok &= back.tracks.len() == mix.tracks.len();
     std::fs::write(dir.join("demo.mixstudio.json"), js).ok();
     ok &= stretch_tests();
+    ok &= stem_tests();
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -99,9 +101,90 @@ fn stretch_tests() -> bool {
     ok
 }
 
+fn goertzel(x: &[f32], f: f32, sr: f32) -> f32 {
+    let w = 2.0 * std::f32::consts::PI * f / sr; let c = 2.0 * w.cos(); let (mut s1, mut s2) = (0f32, 0f32);
+    for &v in x { let s0 = v + c * s1 - s2; s2 = s1; s1 = s0; }
+    ((s1 * s1 + s2 * s2 - c * s1 * s2).max(0.0)).sqrt() / x.len() as f32 * 2.0
+}
+
+fn stem_tests() -> bool {
+    use model::StemMode::*;
+    let mut ok = true;
+    // 1) gain logic
+    let g = |m, x, o| engine::stem_gain(m, x, o);
+    let checks = [(None, 0.3, true, 0.0), (None, 0.7, false, 0.0), (Full, 0.9, true, 1.0), (Full, 0.1, false, 1.0),
+        (Swap, 0.2, true, 1.0), (Swap, 0.8, true, 0.0), (Swap, 0.2, false, 0.0), (Swap, 0.8, false, 1.0),
+        (Crossfade, 0.0, true, 1.0), (Crossfade, 1.0, false, 1.0), (Crossfade, 0.5, true, 0.7071)];
+    let bad: Vec<_> = checks.iter().filter(|c| (g(c.0, c.1, c.2) - c.3).abs() > 0.01).collect();
+    let cf_pow = (0..=10).map(|k| { let x = k as f32 / 10.0; g(Crossfade, x, true).powi(2) + g(Crossfade, x, false).powi(2) }).all(|p| (p - 1.0).abs() < 1e-3);
+    let pass = bad.is_empty() && cf_pow; ok &= pass;
+    println!("{} stem gain logic: {} cases, crossfade equal-power {}", if pass { "OK  " } else { "FAIL" }, checks.len(), cf_pow);
+
+    // 2) per-stem transition in the engine with synthetic stems: A = drums 100 Hz, B = vocals 1000 Hz
+    let sr = 44100u32; let n = sr as usize * 40;
+    let tone = |f: f32| -> Vec<f32> { (0..n).map(|i| 0.3 * (2.0 * std::f32::consts::PI * f * i as f32 / sr as f32).sin()).collect() };
+    let (ta, tb) = (tone(100.0), tone(1000.0));
+    let mk = |sig: &Vec<f32>, k: usize| { let q: Vec<i16> = sig.iter().map(|x| (x * 32767.0) as i16).collect(); let z = vec![0i16; n];
+        let mut st = stems::Stems { d: [z.clone(), z.clone()], b: [z.clone(), z.clone()], v: [z.clone(), z.clone()], peaks: vec![] };
+        match k { 0 => st.d = [q.clone(), q], _ => st.v = [q.clone(), q] }; std::sync::Arc::new(st) };
+    let mut res = vec![];
+    for (dm, vm) in [(Full, None), (None, Full)] {
+        let mut mix = model::Mix::default(); mix.bpm = 120.0;
+        for (k, lane) in [(0usize, 0usize), (1, 1)] { mix.tracks.push(model::Track { path: format!("{k}"), title: "t".into(), artist: "t".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 40.0, start_beat: if k == 0 { 0.0 } else { 40.0 }, lane, trans: Default::default() }); }
+        mix.tracks[1].trans.stems = [dm, Crossfade, Crossfade, vm];
+        let auds = vec![Some(Arc::new(analysis::Audio { sr, l: ta.clone(), r: ta.clone() })), Some(Arc::new(analysis::Audio { sr, l: tb.clone(), r: tb.clone() }))];
+        let st = vec![Some(mk(&ta, 0)), Some(mk(&tb, 3))];
+        let snap = Arc::new(engine::Snap::build_with(&mix, &auds, &st));
+        // overlap is beats 40..80; measure at x = 0.75 (beats 68..72)
+        let (l, _) = engine::render_offline(snap, sr, 68.0, 72.0);
+        res.push((goertzel(&l, 100.0, sr as f32), goertzel(&l, 1000.0, sr as f32)));
+    }
+    let pass = res[0].0 > 0.15 && res[0].1 < 0.01 && res[1].0 < 0.01 && res[1].1 > 0.15; ok &= pass;
+    println!("{} per-stem transition: drums Full/vocals None -> 100 Hz {:.3}, 1 kHz {:.3}; drums None/vocals Full -> 100 Hz {:.3}, 1 kHz {:.3}",
+        if pass { "OK  " } else { "FAIL" }, res[0].0, res[0].1, res[1].0, res[1].1);
+
+    // 3) real model (only if ONNX Runtime and the model are available)
+    match stems::session_info() {
+        Err(e) => println!("SKIP model separation test: {e}"),
+        Ok(ep) => {
+            if !stems::verify_model() { println!("FAIL model checksum"); return false; }
+            let secs = 16usize; let n = sr as usize * secs;
+            let mut kick = vec![0f32; n]; let mut pad = vec![0f32; n];
+            for i in 0..n { let t = i as f32 / sr as f32; let tb = t % 0.5; let f = 50.0 + 120.0 * (-tb * 30.0).exp();
+                kick[i] = 0.6 * (2.0 * std::f32::consts::PI * f * tb).sin() * (-tb * 7.0).exp();
+                pad[i] = [220.0f32, 277.2, 329.6].iter().map(|f| (2.0 * std::f32::consts::PI * f * t).sin()).sum::<f32>() * 0.08; }
+            let mixs: Vec<f32> = kick.iter().zip(&pad).map(|(a, b)| a + b).collect();
+            let a = analysis::Audio { sr, l: mixs.clone(), r: mixs.clone() };
+            let p = std::sync::atomic::AtomicU32::new(0); let t0 = std::time::Instant::now();
+            match stems::separate_raw(&a, &p) {
+                Err(e) => { println!("FAIL separation: {e}"); ok = false; }
+                Ok(raw) => {
+                    let el = t0.elapsed().as_secs_f32();
+                    let sum: Vec<f32> = (0..n).map(|i| raw.iter().map(|s| s[0][i]).sum()).collect();
+                    let e_mix = mixs.iter().map(|x| x * x).sum::<f32>(); let e_err = sum.iter().zip(&mixs).map(|(a, b)| (a - b).powi(2)).sum::<f32>();
+                    let corr = |x: &[f32], y: &[f32]| { let (mut a, mut b, mut c) = (0f32, 0f32, 0f32); for (p, q) in x.iter().zip(y) { a += p * q; b += p * p; c += q * q; } a / (b * c).sqrt().max(1e-9) };
+                    let cd = corr(&raw[0][0], &kick); let cp = corr(&raw[2][0], &pad).max(corr(&raw[3][0], &pad));
+                    let rel = (e_err / e_mix).sqrt();
+                    let pass = rel < 0.25 && cd > 0.7; ok &= pass;
+                    println!("{} HT-Demucs on {ep}: {secs}s audio in {el:.1}s ({:.1}x real time); sum of stems vs original: rel. error {:.3}; corr(drums, kick) {:.2}, corr(other/vocals, pad) {:.2}",
+                        if pass { "OK  " } else { "FAIL" }, secs as f32 / el, rel, cd, cp);
+                }
+            }
+        }
+    }
+    ok
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "--selftest" { std::process::exit(if selftest(Path::new(&args[2])) { 0 } else { 1 }); }
+    if args.len() >= 3 && args[1] == "--separate" {
+        for f in &args[2..] { let p = Path::new(f); let (a, _) = analysis::load(p).expect("decode");
+            let key = analysis::cache_key(p).unwrap(); let (dl, pr) = (std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicU32::new(0));
+            let t0 = std::time::Instant::now();
+            match stems::get_or_separate(&key, &a, &dl, &pr) { Ok(_) => println!("{}: stems ready in {:.1}s ({})", f, t0.elapsed().as_secs_f32(), stems::session_info().unwrap_or_default()), Err(e) => println!("{f}: {e}") } }
+        return;
+    }
     if args.len() >= 3 && args[1] == "--icon" { std::fs::write(&args[2], app::icon_png(256)).expect("icon"); return; }
     let demo = if args.len() >= 3 && args[1] == "--demo" { Some(args[2].clone()) } else { None };
     // winit has no file drag-and-drop on native Wayland: prefer X11/XWayland when available.
