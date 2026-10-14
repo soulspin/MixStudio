@@ -8,7 +8,7 @@ impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } 
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 4;
+pub const ANALYSIS_VERSION: u32 = 6;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -467,8 +467,21 @@ fn refine_attacks(m: &[f32], sr: u32, beats: &[f64]) -> Vec<f64> {
     let n = beats.len(); if n < 16 { return beats.to_vec(); }
     let a = (-2.0 * std::f32::consts::PI * 150.0 / sr as f32).exp(); let ae = (-1.0 / (0.002 * sr as f32)).exp();
     let (mut y1, mut y2, mut ev) = (0f32, 0f32, 0f32);
-    let env: Vec<f32> = m.iter().map(|&x| { y1 = a * y1 + (1.0 - a) * x; y2 = a * y2 + (1.0 - a) * y1; ev = ae * ev + (1.0 - ae) * y2.abs(); ev }).collect();
-    let d = (0.001 * sr as f64) as usize; let w = (0.025 * sr as f64) as usize;
+    // ripple-free quadrature envelope of the low band (|y| combined with its derivative scaled to ~60 Hz), so the
+    // attack is located without the lag of rectify-and-smooth; matches a Hilbert envelope to ~1 ms on kicks
+    let wq = sr as f32 / (2.0 * std::f32::consts::PI * 60.0); let _ = ae; let mut prev = 0f32;
+    let env: Vec<f32> = m.iter().map(|&x| { y1 = a * y1 + (1.0 - a) * x; y2 = a * y2 + (1.0 - a) * y1; let dy = (y2 - prev) * wq; prev = y2; ev = (y2 * y2 + dy * dy).sqrt(); ev }).collect();
+    let d = (0.001 * sr as f64) as usize; let w = (0.012 * sr as f64) as usize;
+    // Global attack offset: average the kick envelope around all beats (+-80 ms) and take its steepest rise.
+    // The onset-envelope beats lag the real attack by a track-dependent amount (tens of ms for kicks with a
+    // soft attack and long sub tail), so a fixed local search window alone cannot reach it.
+    let fw = (0.080 * sr as f64) as i64; let step = 8i64;
+    let mut fold = vec![0f64; (2 * fw / step) as usize + 1];
+    for &t in beats { let c = (t * sr as f64) as i64; if c - fw < 0 || (c + fw) as usize + d >= env.len() { continue; }
+        for (i, f) in fold.iter_mut().enumerate() { let q = (c - fw + i as i64 * step) as usize; *f += (env[q + d] - env[q]) as f64; } }
+    let gi = fold.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|x| x.0).unwrap_or((fw / step) as usize);
+    let g = ((gi as i64 * step - fw) as f64) / sr as f64;
+    let beats: Vec<f64> = beats.iter().map(|t| t + g).collect(); let beats = &beats[..];
     let mut obs = vec![(0f64, 0f64); n];
     for (k, &t) in beats.iter().enumerate() {
         let c = (t * sr as f64) as i64; if c - (w as i64) < 0 || (c as usize) + w + d >= env.len() { obs[k] = (t, 0.0); continue; }

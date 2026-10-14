@@ -138,12 +138,20 @@ impl Wsola {
             let len = (WN / 2) as i64; let st = |rs: f64, j: i64| (j as f64 * rs) as i64;
             let score = |d: i64, step: usize| -> f32 { let mut c = 0f32; let mut e = 1e-9f32; let mut j = 0i64;
                 while j < len { let x = get(ii + d + st(rs, j)); c += x * get(ni + st(rs, j)); e += x * x; j += step as i64; } c / e.sqrt() };
+            // transient guard: if a sharp energy rise (kick/snare attack) falls inside this grain, place the grain
+            // exactly at its beat-map position. A similarity shift here would move the attack by up to WTOL,
+            // in a direction that depends on whether the track is sped up or slowed down.
+            let blk = 256i64; let be = |p: i64| { let mut e = 1e-7f32; let mut j = 0; while j < blk { let x = get(p + j); e += x * x; j += 2; } e };
+            let mut transient = false; let mut prev_e = be(ii - blk); let mut q = ii;
+            while q < ii + WN as i64 { let e = be(q); if e > 4.0 * prev_e && e > 1e-4 * blk as f32 { transient = true; break; } prev_e = e; q += blk; }
+            if transient { start = ideal; } else {
             let mut best = (f32::MIN, 0i64); let mut d = -WTOL;
             let pen = |d: i64, sc: f32| sc - 0.15 * sc.abs() * (d as f32 / WTOL as f32).powi(2); // prefer the ideal (beat-locked) position
             while d <= WTOL { let sc = pen(d, score(d, 8)); if sc > best.0 { best = (sc, d); } d += 16; }
             let c0 = best.1; let mut d = c0 - 16;
             while d <= c0 + 16 { let sc = pen(d, score(d, 4)); if sc > best.0 { best = (sc, d); } d += 2; }
             start = (ii + best.1) as f64 + (ideal - ii as f64);
+            }
         }
         for j in 0..WN {
             let p = start + j as f64 * rs; let k = p.floor() as i64; let f = (p - k as f64) as f32;

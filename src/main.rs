@@ -259,7 +259,7 @@ fn overlap_alignment(mix: &model::Mix, auds: &[Option<Arc<analysis::Audio>>], sr
     let solo = |d: usize| { let mut m = mix.clone(); m.decks[1 - d].mute = true; m.metronome = false;
         let snap = Arc::new(engine::Snap::build(&m, auds)); let x = engine::render_offline(snap, sr, s, e).0; if real { lowpass(&x, sr) } else { x } };
     let (a, b) = (solo(0), solo(1));
-    if let Ok(dd) = std::env::var("MS_DUMP") { engine::write_wav(&Path::new(&dd).join("deck_a.wav"), &a, &a, sr).ok(); engine::write_wav(&Path::new(&dd).join("deck_b.wav"), &b, &b, sr).ok(); }
+    if let Ok(dd) = std::env::var("MS_DUMP") { engine::write_wav(&Path::new(&dd).join("deck_a.wav"), &a, &a, sr).ok(); std::fs::write(Path::new(&dd).join("s.txt"), format!("{s} {e} {}", mix.bpm)).ok(); engine::write_wav(&Path::new(&dd).join("deck_b.wav"), &b, &b, sr).ok(); }
     let beat_s = 60.0 / mix.bpm;
     let (oa, ob) = (kick_onsets(&a, sr, beat_s, 0.0), kick_onsets(&b, sr, beat_s, 0.0));
     if std::env::var("MS_DEBUG").is_ok() { for (k, (x, y)) in oa.iter().zip(&ob).enumerate() { println!("  beat {k}: {:?} {:?}", x.map(|v| (v * 1000.0).round()), y.map(|v| (v * 1000.0).round())); } }
