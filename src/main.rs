@@ -60,6 +60,7 @@ fn selftest(dir: &Path) -> bool {
     std::fs::write(dir.join("demo.mixstudio.json"), js).ok();
     ok &= stretch_tests();
     ok &= stem_tests();
+    ok &= alignment_test(dir);
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -177,6 +178,7 @@ fn stem_tests() -> bool {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && args[1] == "--analyse" { for p in &args[2..] { let pa = Path::new(p); match analysis::decode(pa) { Ok((a, t, ar)) => { let an = analysis::analyse(&a, t, ar, pa); println!("{p}: bpm {:.3} downbeat {:.3}s key {}", an.bpm, an.offset, an.key); } Err(e) => println!("{p}: {e}") } } return; }
     if args.len() >= 3 && args[1] == "--selftest" { std::process::exit(if selftest(Path::new(&args[2])) { 0 } else { 1 }); }
     if args.len() >= 3 && args[1] == "--separate" {
         for f in &args[2..] { let p = Path::new(f); let (a, _) = analysis::load(p).expect("decode");
@@ -193,4 +195,47 @@ fn main() {
         std::env::remove_var("WAYLAND_DISPLAY");
     }
     app::run(demo);
+}
+
+/// Kick onset times (s) in a render: first sample after each expected beat where |x| crosses 30% of that beat window's peak.
+fn kick_onsets(x: &[f32], sr: u32, beat_s: f64, first: f64) -> Vec<Option<f64>> {
+    let mut v = vec![]; let mut t = first;
+    while ((t + beat_s) * sr as f64) < x.len() as f64 {
+        let s = ((t - beat_s * 0.4).max(0.0) * sr as f64) as usize; let e = ((t + beat_s * 0.4) * sr as f64) as usize;
+        let w = &x[s..e.min(x.len())]; let pk = w.iter().fold(0f32, |a, y| a.max(y.abs()));
+        v.push(if pk < 0.01 { None } else { w.iter().position(|y| y.abs() > 0.3 * pk).map(|i| (s + i) as f64 / sr as f64) });
+        t += beat_s;
+    }
+    v
+}
+
+/// Two kick tracks at 124 and 128 BPM, analysed, laid out by the mixer and rendered at the 126 BPM mix tempo:
+/// every kick of the outgoing track must land within 10 ms of the incoming track's kick across the whole overlap.
+fn alignment_test(dir: &Path) -> bool {
+    let sr = 44100u32; let mut ok = true;
+    for key_lock in [true, false] {
+        let mut mix = model::Mix::default(); let mut auds = vec![];
+        for (i, &(bpm, lead)) in [(124.0f32, 0.53f32), (128.0, 0.21)].iter().enumerate() {
+            let p = dir.join(format!("align_{}.wav", bpm as i32));
+            let (l, r) = testgen::synth(bpm, 45 + i as i32 * 3, true, 90.0, lead, sr); engine::write_wav(&p, &l, &r, sr).unwrap();
+            let (a, an) = analysis::load(&p).unwrap();
+            mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default() });
+            auds.push(Some(Arc::new(a)));
+        }
+        mix.bpm = 126.0; mix.key_lock = key_lock;
+        let tr = mix.transitions(); if tr.is_empty() { println!("FAIL align: no overlap"); return false; }
+        let (_, _, s, e) = tr[0];
+        let solo = |d: usize| { let mut m = mix.clone(); m.decks[1 - d].mute = true;
+            let snap = Arc::new(engine::Snap::build(&m, &auds)); engine::render_offline(snap, sr, s, e).0 };
+        let (a, b) = (solo(0), solo(1));
+        let beat_s = 60.0 / mix.bpm;
+        let (oa, ob) = (kick_onsets(&a, sr, beat_s, 0.0), kick_onsets(&b, sr, beat_s, 0.0));
+        let d: Vec<f64> = oa.iter().zip(&ob).filter_map(|(x, y)| Some((x.as_ref()? - y.as_ref()?).abs() * 1000.0)).collect();
+        let max = d.iter().cloned().fold(0.0, f64::max); let mean = d.iter().sum::<f64>() / d.len().max(1) as f64;
+        let pass = d.len() >= 32 && max < 10.0;
+        ok &= pass;
+        println!("{} align 124+128 BPM kicks at 126 BPM, key lock {}: analysed {:.3}/{:.3} BPM, {} kick pairs over {:.0} beats, offset mean {:.2} ms, max {:.2} ms (limit 10 ms)",
+            if pass { "OK  " } else { "FAIL" }, if key_lock { "on " } else { "off" }, mix.tracks[0].bpm, mix.tracks[1].bpm, d.len(), e - s, mean, max);
+    }
+    ok
 }

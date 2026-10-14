@@ -7,6 +7,9 @@ pub struct Audio { pub sr: u32, pub l: Vec<f32>, pub r: Vec<f32> }
 impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } }
 
 /// Samples per waveform peak column (at the track's own sample rate).
+/// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
+pub const ANALYSIS_VERSION: u32 = 2;
+
 pub const PEAK_HOP: usize = 441;
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -20,6 +23,7 @@ pub struct Analysis {
     pub sections: Vec<(f64, u8)>, // (track beat, 0=DOWN 1=CHORUS 2=UP)
     pub title: String,
     pub artist: String,
+    #[serde(default)] pub version: u32,
 }
 
 pub fn decode(path: &Path) -> anyhow::Result<(Audio, String, String)> {
@@ -143,44 +147,82 @@ pub fn downbeat(m: &[f32], sr: u32, bpm: f64, first_beat: f64, onset: &[f32], fp
     first_beat + best.1 as f64 * beat
 }
 
+/// Parabolic sub-frame peak position around index i.
+fn parabolic(o: &[f32], i: usize) -> f64 {
+    if i == 0 || i + 1 >= o.len() { return i as f64; }
+    let (a, b, c) = (o[i - 1] as f64, o[i] as f64, o[i + 1] as f64);
+    let d = a - 2.0 * b + c;
+    if d.abs() < 1e-12 { i as f64 } else { i as f64 + (0.5 * (a - c) / d).clamp(-0.5, 0.5) }
+}
+
+/// Fit a straight beat grid to the onset peaks nearest each predicted beat (weighted least squares,
+/// two passes with outlier rejection). Returns (period frames, phase frames) or None.
+fn regress_grid(o: &[f32], period: f64, phase: f64) -> Option<(f64, f64)> {
+    let (mut p, mut ph) = (period, phase);
+    for pass in 0..3 {
+        let tol = if pass == 0 { 0.2 } else { 0.12 };
+        let (mut sw, mut sx, mut sy, mut sxx, mut sxy) = (0f64, 0f64, 0f64, 0f64, 0f64);
+        let mut k = 0f64; let mut used = 0;
+        loop {
+            let t = ph + k * p; if t + p * tol + 2.0 >= o.len() as f64 { break; }
+            let lo = (t - p * tol).max(0.0) as usize; let hi = (t + p * tol) as usize + 1;
+            let mut bi = lo; for i in lo..hi.min(o.len()) { if o[i] > o[bi] { bi = i; } }
+            let w = o[bi] as f64;
+            if w > 0.0 && bi > lo && bi + 1 < hi {
+                let y = parabolic(o, bi);
+                sw += w; sx += w * k; sy += w * y; sxx += w * k * k; sxy += w * k * y; used += 1;
+            }
+            k += 1.0;
+        }
+        if used < 16 { return None; }
+        let den = sw * sxx - sx * sx; if den.abs() < 1e-9 { return None; }
+        let np = (sw * sxy - sx * sy) / den; let nph = (sy - np * sx) / sw;
+        if (np / period - 1.0).abs() > 0.02 { return None; }
+        p = np; ph = nph;
+    }
+    Some((p, ph.rem_euclid(p)))
+}
+
 pub fn detect_bpm(m: &[f32], sr: u32) -> (f64, f64) {
     let (o, fps) = onset_env(m, sr);
     if o.len() < 64 { return (128.0, 0.0); }
-    // autocorrelation over 70..180 BPM with mild tempo prior around 125
+    // 1) coarse tempo: autocorrelation over the whole track, 60..200 BPM, with a mild prior around 125.
+    let ac_at = |lag: f64| -> f64 { let li = lag as usize; let f = (lag - li as f64) as f32; let mut ac = 0f32;
+        for i in 0..o.len().saturating_sub(li + 1) { ac += o[i] * (o[i + li] * (1.0 - f) + o[i + li + 1] * f); } ac as f64 / (o.len() - li) as f64 };
     let mut best = (0f64, 128.0f64);
-    let mut bpm = 70.0;
-    while bpm <= 180.0 {
+    let mut bpm = 60.0;
+    while bpm <= 200.0 {
         let lag = fps * 60.0 / bpm;
-        let li = lag as usize; let f = (lag - li as f64) as f32;
-        let mut ac = 0f32;
-        for i in 0..o.len().saturating_sub(li + 1) { ac += o[i] * (o[i + li] * (1.0 - f) + o[i + li + 1] * f); }
-        // also reward the double period (bar coherence)
-        let w = (-0.5 * ((bpm / 125.0).log2() / 0.6).powi(2)).exp();
-        let score = ac as f64 * (0.6 + 0.4 * w);
+        // tempogram-style: also sum the 2x and 4x lags (bar coherence)
+        let s = ac_at(lag) + 0.5 * ac_at(2.0 * lag) + 0.25 * ac_at(4.0 * lag);
+        let w = (-0.5 * ((bpm / 125.0).log2() / 0.5).powi(2)).exp();
+        let score = s * (0.5 + 0.5 * w);
         if score > best.0 { best = (score, bpm); }
-        bpm += 0.25;
+        bpm += 0.1;
     }
-    // fine search with comb filter over phases
-    let mut fine = (0f32, best.1, 0.0f64);
-    let mut b = best.1 - 1.5;
-    while b <= best.1 + 1.5 {
+    // octave correction into the dance range 85..175
+    let mut c = best.1; while c < 85.0 { c *= 2.0; } while c > 175.0 { c /= 2.0; }
+    // 2) fine comb over the full track: +-1 BPM at 0.005 BPM
+    let mut fine = (0f32, c, 0.0f64);
+    let mut b = c - 1.0;
+    while b <= c + 1.0 {
         let p = fps * 60.0 / b;
-        let steps = 48;
-        for k in 0..steps {
-            let ph = p * k as f64 / steps as f64;
-            let s = comb(&o, p, ph);
-            if s > fine.0 { fine = (s, b, ph); }
-        }
-        b += 0.01;
+        for k in 0..32 { let ph = p * k as f64 / 32.0; let s = comb(&o, p, ph); if s > fine.0 { fine = (s, b, ph); } }
+        b += 0.005;
     }
-    let mut bpm = fine.1;
-    if (bpm - bpm.round()).abs() < 0.08 { bpm = bpm.round(); }
-    let period = fps * 60.0 / bpm;
-    // refine phase at chosen bpm
-    let mut ph = (0f32, fine.2);
-    for k in 0..64 { let p = period * k as f64 / 64.0; let s = comb(&o, period, p); if s > ph.0 { ph = (s, p); } }
-    let beat_ph = ph.1; // frames, phase of beats
-    let off_beat = (beat_ph / fps).max(0.0);
+    let mut period = fps * 60.0 / fine.1; let mut ph = fine.2;
+    for k in 0..64 { let p = ph - period * 0.25 + period * 0.5 * k as f64 / 64.0; let s = comb(&o, period, p.max(0.0)); if s > comb(&o, period, ph) { ph = p.max(0.0); } }
+    // 3) refine by regression of the actual beat onsets across the whole track
+    if let Some((p, q)) = regress_grid(&o, period, ph) { period = p; ph = q; }
+    let mut bpm = fps * 60.0 / period;
+    if (bpm - bpm.round()).abs() < 0.03 { // snap to the integer tempo most productions use, re-fit phase
+        bpm = bpm.round(); period = fps * 60.0 / bpm;
+        let mut best = (f32::MIN, ph);
+        for k in 0..128 { let p = ph - period * 0.1 + period * 0.2 * k as f64 / 128.0; let s = comb(&o, period, p.max(0.0)); if s > best.0 { best = (s, p.max(0.0)); } }
+        ph = best.1;
+    }
+    // onset frame i covers samples [i*hop, (i+1)*hop): its energy jump marks an attack ~half a hop after frame start
+    let off_beat = ((ph + 0.5) / fps).rem_euclid(60.0 / bpm);
     let off = downbeat(m, sr, bpm, off_beat, &o, fps);
     (bpm, off)
 }
@@ -294,7 +336,7 @@ fn cache_path(path: &Path) -> Option<std::path::PathBuf> {
 pub fn load(path: &Path) -> anyhow::Result<(Audio, Analysis)> {
     let (audio, title, artist) = decode(path)?;
     let cp = cache_path(path);
-    if let Some(c) = &cp { if let Ok(s) = std::fs::read(c) { if let Ok(a) = serde_json::from_slice::<Analysis>(&s) { return Ok((audio, a)); } } }
+    if let Some(c) = &cp { if let Ok(s) = std::fs::read(c) { if let Ok(a) = serde_json::from_slice::<Analysis>(&s) { if a.version == ANALYSIS_VERSION { return Ok((audio, a)); } } } }
     let a = analyse(&audio, title, artist, path);
     if let Some(c) = cp { let _ = std::fs::create_dir_all(c.parent().unwrap()); let _ = std::fs::write(c, serde_json::to_vec(&a).unwrap_or_default()); }
     Ok((audio, a))
@@ -307,5 +349,5 @@ pub fn analyse(audio: &Audio, title: String, artist: String, path: &Path) -> Ana
     let peaks = peaks(audio);
     let sections = sections(&peaks, audio.sr, bpm, offset);
     let title = if title.is_empty() { path.file_stem().map(|s| s.to_string_lossy().replace("_", " ")).unwrap_or_default() } else { title };
-    Analysis { bpm, offset, key, duration: audio.secs(), peaks, peak_sr: audio.sr, sections, title, artist }
+    Analysis { version: ANALYSIS_VERSION, bpm, offset, key, duration: audio.secs(), peaks, peak_sr: audio.sr, sections, title, artist }
 }
