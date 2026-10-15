@@ -3,12 +3,40 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use symphonia::core::{audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint};
 
+#[cfg(test)]
+mod grid_recommendation_tests {
+    use super::*;
+
+    #[test]
+    fn tempo_jump_does_not_automatically_enable_experimental_flex() {
+        let times = crate::testgen::jump_times(100.0, 64, 128.0, 96, 0.5);
+        let (l, r) = crate::testgen::synth_kicks(&times, (*times.last().unwrap() + 1.0) as f32, 44100);
+        let an = analyse(&Audio { sr: 44100, l, r }, "Jump".into(), String::new(), Path::new("jump.wav"));
+        let saved = serde_json::to_value(&an).unwrap();
+        assert_eq!(saved.get("recommended_grid_mode").and_then(|x| x.as_u64()), Some(1), "Flex must require an explicit choice until real-music validation exists");
+        let map = an.flex_map().unwrap();
+        for t in &times[2..times.len() - 2] {
+            let error = map.beats.iter().map(|b| (b - t).abs()).fold(f64::MAX, f64::min);
+            assert!(error < 0.010, "recommended grid missed a kick by {error:.3} s");
+        }
+    }
+
+    #[test]
+    fn steady_track_analysis_keeps_the_dynamic_grid() {
+        let times: Vec<_> = (0..128).map(|i| 0.5 + i as f64 * 0.5).collect();
+        let (l, r) = crate::testgen::synth_kicks(&times, 65.0, 44100);
+        let an = analyse(&Audio { sr: 44100, l, r }, "Steady".into(), String::new(), Path::new("steady.wav"));
+        let saved = serde_json::to_value(&an).unwrap();
+        assert_eq!(saved.get("recommended_grid_mode").and_then(|x| x.as_u64()), Some(1));
+    }
+}
+
 pub struct Audio { pub sr: u32, pub l: Vec<f32>, pub r: Vec<f32> }
 impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } }
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 8;
+pub const ANALYSIS_VERSION: u32 = 9;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -28,7 +56,10 @@ pub struct Analysis {
     #[serde(default)] pub beats: Vec<f64>,
     /// flex beat map (piecewise, follows deliberate tempo jumps and ramps)
     #[serde(default)] pub flex: Vec<f64>,
+    /// Legacy cache hint. Keep Dynamic as the safe default; Flex requires manual selection.
+    #[serde(default = "dynamic_grid")] pub recommended_grid_mode: u8,
 }
+fn dynamic_grid() -> u8 { 1 }
 
 impl Analysis {
     pub fn flex_map(&self) -> Option<std::sync::Arc<crate::beatmap::BeatMap>> {
@@ -367,11 +398,14 @@ pub fn analyse(audio: &Audio, title: String, artist: String, path: &Path) -> Ana
     let (bpm, offset, beats) = detect_beats(&m, audio.sr);
     let key = detect_key(&m, audio.sr);
     let flex = flex_beats(&m, audio.sr, bpm).0;
+    // Segment boundaries alone are not evidence of a reliable beat map: real tracks
+    // can produce large Flex timing jumps even when their Dynamic grid is stable.
+    let recommended_grid_mode = 1;
     let peaks = peaks(audio);
     // phrases (track beat from the first downbeat, label) on the 8/16/32-bar grid
     let sections = crate::phrase::detect(&crate::phrase::bar_features(&peaks, audio.sr, PEAK_HOP, bpm, offset));
     let title = if title.is_empty() { path.file_stem().map(|s| s.to_string_lossy().replace("_", " ")).unwrap_or_default() } else { title };
-    Analysis { version: ANALYSIS_VERSION, beats, bpm, offset, key, duration: audio.secs(), peaks, peak_sr: audio.sr, sections, title, artist, flex }
+    Analysis { version: ANALYSIS_VERSION, beats, bpm, offset, key, duration: audio.secs(), peaks, peak_sr: audio.sr, sections, title, artist, flex, recommended_grid_mode }
 }
 
 /// Dynamic-programming beat tracker (Ellis 2007) on the onset envelope, followed by sub-frame

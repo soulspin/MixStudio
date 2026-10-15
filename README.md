@@ -2,13 +2,23 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.15](https://img.shields.io/badge/status-beta%200.15-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.16](https://img.shields.io/badge/status-beta%200.16-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.15:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.16:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
-![MixStudio timeline with a transition](docs/screenshots/transition.png)
+![MixStudio 0.16: select and repeat a song section](docs/screenshots/sections.png)
+
+## New in 0.16
+
+- **Arrange sections inside a song:** select a beat- or bar-snapped range, repeat it, copy/paste it at the playhead, or delete it and close the gap.
+- **Ripple editing:** later songs keep their transition overlaps when a song becomes longer or shorter. Later samples, effect blocks and manual tempo points move with the edit.
+- **Audition the selection:** loop the marked section, then return to normal clip movement with **Move**. Each section edit has one Undo step.
+- **Timing fixes:** fine grid offsets stay precise, edited sections keep their original source beatgrid, and splice fades/reset handling work in the shared playback/export renderer. **Dynamic** stays the default; experimental **Flex** is selected manually.
+
+The clipboard in this first version rearranges sections **within the same source song**. It does not copy audio between different songs. Original audio files are never rewritten.
+
 
 ## Why
 
@@ -16,14 +26,15 @@ Live DJ software is built for performing: two decks, a crossfader, and one shot 
 
 It's native, fast, and doesn't need an account. No sign-up, no license keys, no cloud. It's your music on your machine.
 
-## Features (Beta 0.15)
+## Features (Beta 0.16)
 
-- **Timeline decks:** songs alternate on Deck 1 and Deck 2 as coloured clips with 3-band waveforms (low/mid/high), beat and bar lines, bar numbers and rough section tags (DOWN / CHORUS / UP). There's an overview strip, a time ruler, zoom (Ctrl+scroll), scrolling, a playhead, click-to-seek, and clip dragging with snapping (off / beat / half bar / bar).
+- **Timeline decks:** songs alternate on Deck 1 and Deck 2 as coloured clips with 3-band waveforms (low/mid/high), beat and bar lines, bar numbers and heuristic phrase tags (Intro / Build / Drop / Breakdown / Outro). There's an overview strip, a time ruler, zoom (Ctrl+scroll), scrolling, a playhead, click-to-seek, and clip dragging with snapping (off / beat / half bar / bar).
 - **Automatic analysis:** global BPM (tempogram + full-track comb + beat regression, about 0.02 BPM), musical key (chromagram plus Krumhansl profiles) shown as **Camelot** codes, and bar 1. Results and waveforms are cached and re-analysed automatically when the analysis improves.
 - **Dynamic beatgrids:** every beat is tracked (dynamic-programming beat tracking, refined to the kick attack on a ripple-free low-band envelope and smoothed over 16 beats, so soft intro kicks and clicky main kicks land on the same grid), so tracks that drift in tempo (live-played, older or AI-generated material) still stay locked. The Track tab shows the tempo range the beat map follows. Projects saved before 0.3 load with the old fixed grid.
 - **Beat-locked time-stretch:** every track plays at the mix tempo through its beat map, so the stretch ratio changes continuously and each beat lands on a mix beat (kicks within a few ms in the self-tests, even against a drifting track). Key lock (on by default) uses a built-in WSOLA stretcher that keeps the pitch; grains containing a kick or snare attack are placed exactly on the beat map, so attacks don't shift when a track is sped up or slowed down. Switch it off for classic varispeed. Playback and export share the same engine.
 - **Editable beatgrid:** nudge ±1/±10 ms, Alt+drag the grid on a clip, set the downbeat (Shift+click a beat line or "Set downbeat at playhead"). These work on beat maps too. BPM ×2 / ÷2, **tap tempo** (a hand-set BPM switches the track to a fixed grid), and reset to analysis.
-- **Beatgrid editor:** zoom in until beat markers (▼) appear on the clips. Hover a marker for the mode popup: **Adjust full grid** (drag shifts the whole beat map), **Beat + following** (beats up to one bar to the left stay anchored and the following beats stretch; the tempo change is shown in %), or **Single beat**. Right-click a marker for *Set downbeat here* / *Set first beat here*. Fixed grids are turned into an editable beat map on the first edit, playback and export follow every edit immediately, and every edit can be undone.
+- **Beatgrid editor:** zoom in until beat markers (▼) appear on the clips. Hover a marker for the mode popup: **Adjust full grid** (drag shifts the whole beat map), **Beat + following** (beats up to one bar to the left stay anchored and the following beats stretch; the tempo change is shown in %), or **Single beat**. Right-click a marker for *Set downbeat here* / *Set first beat here*. Fixed grids are turned into an editable beat map on the first edit, playback and export follow every edit immediately, and every edit can be undone. Correct the source beatgrid before arranging sections; changing its tempo later changes their beat lengths.
+- **Section editing:** choose **Select** above the timeline and drag a range on one waveform. The existing snap setting chooses beats, half bars or bars. **Ctrl+C / Ctrl+V** copies and inserts within the same source song at the playhead; **Ctrl+D** repeats directly after the selection; **Delete + close gap** shortens the song. Following songs and their transitions move together, as do later samples, effect blocks and manual tempo nodes. **Loop selection** auditions the range. Original audio stays untouched; edits are saved in the mix JSON and each command has one Undo step. **Move** restores normal clip dragging. Section edges have short splice fades, and continuous source ranges merge automatically.
 - **Timeline editing:** **Ctrl+E** splits the clip under the mouse (or at the playhead) into two clips that keep their source offsets. Drag a clip's left/right edge to trim or extend it, and drag a track's end onto the next clip to close a gap. Drag a transition's blue bar to move the incoming track. Drag a track down into a sample lane (or a sample up onto the decks). **Alt+drag** a sample to duplicate it, and drag the white squares on a sample to set its fade-in/out. Moves and trims snap magnetically to the playhead, clip edges and transition boundaries (yellow snap line), otherwise to the grid.
 - **AI stem separation:** one click, or automatically for new tracks, splits a song into **drums, bass, melody and vocals** with [HT-Demucs](https://github.com/facebookresearch/demucs). It runs in the background through ONNX Runtime, on your **NVIDIA GPU via CUDA** when available, otherwise on the CPU. Stems are cached on disk, so each track is separated only once.
 - **Per-stem transitions:** when both tracks have stems, the overlap shows four real stem lanes, and the Drums / Bass / Melody / Vocals choices (**None / Swap / Crossfade / Full**) drive the audio in playback and export. Swap the bass at the drop, keep the incoming vocals out, or let the drums ride. Without stems, the preset's volume curve is used.
@@ -42,36 +53,37 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 - **Metronome:** a click on mix beats, accented on the downbeat, with its own volume. It's never exported.
 - **Undo/redo**, **save/load mixes as JSON**, **export** of the whole mix (WAV, FLAC, MP3), and **drag and drop** of audio files (mp3, wav, flac, ogg, m4a).
 
-| Transition tab | Track / Beatgrid tab | Playlist |
-|---|---|---|
-| ![Transition tab](docs/screenshots/transition.png) | ![Track tab](docs/screenshots/track.png) | ![Playlist](docs/screenshots/playlist.png) |
+## Screenshots
 
-![Whole mix overview](docs/screenshots/wide.png)
+Captured from MixStudio 0.16 on Linux using the app's generated demo music.
 
-![Per-stem transition](docs/screenshots/stems.png)
+| Transition editing | Beatgrid corrections |
+|---|---|
+| ![Transition presets, stem controls and volume curves](docs/screenshots/transition.png) | ![Dynamic beatgrid and precise timing controls](docs/screenshots/track.png) |
 
-![Auto-order and compatibility badges](docs/screenshots/autoorder.png)
+| Zoomed beat markers | Automation and effects |
+|---|---|
+| ![Editable beat markers at high zoom](docs/screenshots/grid.png) | ![Automation curve and effect blocks](docs/screenshots/effects.png) |
+
+![Playlist with tempo, key and transition information](docs/screenshots/playlist.png)
+
+![Whole mix overview with four songs and two sample lanes](docs/screenshots/wide.png)
 
 ## Roadmap
 
-- AI lyrics: Whisper transcription of the vocal stem as a lyric lane (planned for v0.15, postponed: it needs a ~150 MB+ model download and an encoder/decoder + tokenizer pipeline that could not be verified on the test machine yet)
-- Per-stem automation curves and stem solo/mute on clips
-- Higher-quality stem models (HT-Demucs fine-tuned bag, MDX-Net)
-- Rubber Band-quality time-stretching
-- Automix that picks transition presets per phrase pair (phrase-aware overlaps landed in v0.12)
-- Auto-order across a whole library (build a set from a crate), with BPM-range and must-include constraints
-- Tempo automation in the tempo lane
-- Editing single beats in the beat map (warp markers) and non-4/4 meters
-- MIDI controller support
-- Headphone cue / pre-listen
-- Library: watch folders for changes live (filesystem watcher); for now, rescan at start or with *Rescan now*
-- Video export
-- Rekordbox / Serato export (import landed in v0.13); Serato / Engine cue point import
-- VST effects
+- Project autosave, recovery and easier relinking of missing audio
+- Export a selected region, CUE sheets and split files
+- Section clipboard across songs, plus more flexible arrangement trim/extend tools
+- Better analysis confidence and correction workflows for difficult tracks
+- Per-stem automation and higher-quality time-stretching
+- Library folder watching and set creation across a whole library
+- Headphone cue / pre-listen and MIDI controllers
+- Video export, DJ-library export and VST effects
+- Local lyric transcription; requires a separate verified model/runtime pipeline
 
 ## Platforms
 
-MixStudio is built with [egui/eframe](https://github.com/emilk/egui) and [cpal](https://github.com/RustAudio/cpal), so it's cross-platform by design: **Windows, Linux and macOS**. The Alpha is tested on Linux (CachyOS, KDE Plasma). Windows and macOS builds are coming.
+MixStudio is built with [egui/eframe](https://github.com/emilk/egui) and [cpal](https://github.com/RustAudio/cpal), so it's cross-platform by design: **Windows, Linux and macOS**. This beta is tested on Linux (CachyOS, KDE Plasma). Windows and macOS support has not been verified; there are no tested release packages for them yet.
 
 On Linux, MixStudio prefers X11/XWayland when it's available, because winit doesn't support file drag and drop on native Wayland yet. Set `MIXSTUDIO_WAYLAND=1` to force native Wayland.
 
@@ -107,7 +119,16 @@ The first time you separate a track, MixStudio downloads the model (166 MB, veri
 
 **Model and license:** `htdemucs_fp16weights.onnx` from [StemSplitio/htdemucs-onnx](https://huggingface.co/StemSplitio/htdemucs-onnx) (pinned revision). It's an ONNX export of HT-Demucs by Meta AI Research ([facebookresearch/demucs](https://github.com/facebookresearch/demucs)). Both the original weights/code and the export are **MIT-licensed**. The model isn't bundled with MixStudio.
 
-Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates four test tracks and builds a demo mix. `mixstudio --selftest /tmp/ms-test` runs the analysis, stretch and render self-tests.
+Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates four test tracks and builds a demo mix. Set `MIXSTUDIO_DEMO_TAB=sections` to open a prepared section-editing example. Other demo views: `transition`, `playlist`, `wide`, `grid`, `effects`, `autoorder` (the default view is `track`).
+
+Run `cargo test --locked` for the automated regression and headless interaction tests. `mixstudio --selftest /tmp/ms-test` runs analysis, beat alignment, stretching, rendering, imports and export checks; the model separation check skips if its model has not been downloaded. A local-audio integration check can be run separately:
+
+```sh
+MIXSTUDIO_SECTION_TEST_PROJECT=/path/to/mix.json \
+  cargo test --locked render_saved_pair_after_section_edits -- --ignored --nocapture
+```
+
+The optional check reads local source files and writes an edited test mix and short render excerpts under the system temporary directory; it does not overwrite the source mix.
 
 ### Command line
 
@@ -118,7 +139,8 @@ Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates
 1. Open the **Library** tab, add your music folders, and double-click or drag tracks onto the timeline. Or click **+** (Add tracks) or drop audio files on the window. Each new song goes on the next deck and overlaps the previous one by 16 bars.
 2. Drag clips to adjust overlaps, and click a blue transition bar to choose a preset in the **Transition** tab.
 3. Fix any beatgrid in the **Track** tab, and set the mix tempo and key lock in **Master**.
-4. Press **Harmonize** for a key-friendly order, then **Export** to render a WAV.
+4. Choose **Select** above the timeline and drag a range on one song. Use **Repeat**, **Copy / Paste**, **Delete + close gap** or **Loop selection**. Paste inserts at the playhead within that same source song. Switch to **Move** to drag clips normally.
+5. Use **Auto-order** for a key/tempo-aware playlist, then choose an export format in **Master** and export the mix.
 
 | Shortcut | Action |
 |---|---|
@@ -126,7 +148,10 @@ Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates
 | Ctrl + scroll | Zoom around the pointer |
 | Scroll | Move in time |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
-| Delete | Remove the selected track |
+| Ctrl+C / Ctrl+V | Copy selected section / insert at playhead within the same song |
+| Ctrl+D | Repeat the selected section directly after itself |
+| Delete | Delete the selected section and close the gap; otherwise remove the selected track in Move mode |
+| Escape | Clear the section selection and its playback loop |
 | Z | Zoom the decks vertically |
 | Ctrl+E | Split the clip under the mouse / at the playhead |
 | Alt + drag on a sample | Duplicate it |
@@ -139,11 +164,13 @@ Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates
 - Stem separation on the CPU is slower than real time on long tracks (about 1–2× real time on 8 cores). A GPU is much faster.
 - Stems are held in memory as 16-bit audio (about 30 MB per minute per track).
 - WSOLA is good, but not Rubber Band quality. Big tempo changes on pads and vocals can sound grainy.
-- Beat maps follow gradual drift, not sudden tempo jumps or rubato.
+- **Dynamic** is the safe default for gradual drift. **Flex** is experimental and can produce bad beat timing on some tracks; irregular source beat spacing can cause severe tempo changes in Auto mode. Use Dynamic if this happens.
+- Section clipboard is currently limited to the same source song. An arranged clip's trim can reverse during one drag; to restore material removed by a committed trim, use Undo.
+- Save files store source paths and edits, not the audio itself. Keep the original audio available.
 - Analysis is tuned for 4/4 dance music. Some tracks are detected at half or double tempo (use ×2 / ÷2 or tap tempo).
 - Section tags are a rough energy guess.
 - File dialogs use the XDG desktop portal (KDE/GNOME), then kdialog, then zenity. If none works, the status line says why: type or paste a folder path in the Library tab, or drop a folder on the window. `MIXSTUDIO_DIALOG=kdialog` (or portal/zenity) forces one; `mixstudio --dialog-check` lists what is available.
-- Carousel, Video, effects beyond EQ/filter/echo, and headphone cue aren't implemented yet.
+- Carousel, video export, headphone cue and VST hosting are not implemented.
 - Decoded audio is held in memory (about 100 MB per 6-minute track).
 
 ## Not affiliated
@@ -166,7 +193,7 @@ Analysis finds phrase boundaries on the 8/16/32-bar grid from energy, spectrum (
 them **Intro / Build / Drop / Breakdown / Outro** (heuristic). Coloured phrase strips and markers sit on every clip:
 click a phrase to cycle its label, right-click to choose one or reset to the detection (edits are saved in the project).
 Clips snap to other clips' phrase boundaries. Auto-order and *Overlap outros with intros* start the next track's
-intro on the previous track's outro. (Analysis cache v7: tracks are re-analysed once.)
+intro on the previous track's outro. (Analysis cache v9: stale cached analysis is regenerated.)
 
 ### Import from other DJ software (v0.13)
 The Library tab has a sidebar with your MixStudio folders and **Other DJ software**: *Find libraries* looks in the
@@ -193,3 +220,10 @@ is clearly closer to the tempo it joins, which also fixes Auto tempo gliding 140
   at the intro and outro, stabilize just those clips so they mix on a straight grid; boundaries stay seamless.
 - **Tempo lane**: per clip the average BPM (orange) and the local tempo (grey); zoom in to see drift % labels.
 - **Downbeats**: bar lines red, beats yellow, bars stay visible zoomed out; *Set downbeat* recolours them.
+
+### Section editing and timing corrections (v0.16)
+- Ordered source ranges keep repeated and deleted sections non-destructive; the waveform and audio renderer use the same arrangement mapping.
+- Source automation follows copied/deleted ranges. Manual tempo interpolation outside the edit is preserved when later points ripple.
+- Short splice fades and section-aware WSOLA pre-roll avoid carrying audio from the previous section across a cut. Beat Slice evaluates its source endpoints inside the current section.
+- Selection clears when its song, grid or timeline placement changes, preventing actions on an outdated range. Edited trim gestures use the drag-start arrangement so dragging back restores material within the same gesture.
+- Dynamic/Flex/Imported grid evaluation preserves fine fractional offsets. Returning to an analysed grid restores its compatible source BPM; Flex is never enabled automatically.

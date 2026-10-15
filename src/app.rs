@@ -41,14 +41,15 @@ fn bm_col(m: BmMode) -> C { match m { BmMode::Grid => C::from_rgb(90, 200, 255),
 #[derive(Clone)]
 struct BmDrag { ti: usize, k: i64, i: usize, pivot: usize, span: f64, lastx: f32, mode: BmMode }
 
-#[derive(Clone, Copy)]
-enum TlDrag { Edge { ti: usize, left: bool }, Fade { ti: usize, left: bool }, Trans { ti: usize, grab: f64, orig: f64 } }
+#[derive(Clone)]
+enum TlDrag { Edge { ti: usize, left: bool, original: Box<Track> }, Fade { ti: usize, left: bool }, Trans { ti: usize, grab: f64, orig: f64 } }
 
 enum Msg { Found(Vec<PathBuf>), ImportPick(PathBuf), Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>), Clip(Track, Audio, Analysis) }
 
 struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::AtomicU32> }
 
 pub struct App {
+    section_state: Vec<u64>, select_sections: bool, section_range: Option<(usize, f64, f64)>, section_drag: Option<(usize, f64)>, section_copy: Option<crate::sections::SectionCopy>,
     mix: Mix, store: HashMap<String, (Arc<Audio>, Arc<Analysis>)>,
     out: crate::audio::Audio, ppb: f32, scroll: f64, tab: Tab, top: usize,
     sel: Option<usize>, sel_in: Option<usize>, undo: Vec<String>, redo: Vec<String>,
@@ -66,7 +67,7 @@ pub struct App {
 
 pub fn run(demo: Option<String>) {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("MixStudio").with_app_id("mixstudio")
+        viewport: egui::ViewportBuilder::default().with_title(format!("MixStudio {}",env!("CARGO_PKG_VERSION"))).with_app_id("mixstudio")
             .with_inner_size([1440.0, 900.0]).with_min_inner_size([1000.0, 640.0]).with_icon(icon()).with_drag_and_drop(true),
         ..Default::default()
     };
@@ -117,6 +118,11 @@ fn hsv(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
 
 impl App {
     fn new(cc: &eframe::CreationContext, demo: Option<String>) -> Self {
+        let c=cc.egui_ctx.clone();
+        let lib=crate::library::Library::new(crate::library::config_dir(),crate::library::cache_dir(),Arc::new(move || c.request_repaint()));
+        Self::new_with(&cc.egui_ctx,demo,crate::audio::start(),lib)
+    }
+    fn new_with(ctx: &egui::Context, demo: Option<String>, out: crate::audio::Audio, lib: crate::library::Library) -> Self {
         let mut st = egui::Style::default(); st.visuals = egui::Visuals::dark();
         st.visuals.panel_fill = PANEL; st.visuals.window_fill = PANEL; st.visuals.extreme_bg_color = BG;
         st.visuals.selection.bg_fill = C::from_rgb(110, 106, 10); st.visuals.selection.stroke = Stroke::new(1.0_f32, ACCENT);
@@ -124,20 +130,20 @@ impl App {
         st.visuals.widgets.hovered.weak_bg_fill = C::from_rgb(66, 68, 76);
         for w in [&mut st.visuals.widgets.inactive, &mut st.visuals.widgets.hovered, &mut st.visuals.widgets.active] { w.rounding = Rounding::same(6.0); }
         st.spacing.button_padding = vec2(8.0, 4.0);
-        cc.egui_ctx.set_style(st);
+        ctx.set_style(st);
         let (tx, rx) = crossbeam_channel::unbounded();
         // background stem-separation worker (one job at a time; the model session is reused)
         let (stem_tx, stem_rx) = crossbeam_channel::unbounded::<StemJob>();
         let dl_prog = Arc::new(std::sync::atomic::AtomicU32::new(0)); let ep = Arc::new(Mutex::new(String::new()));
-        { let tx = tx.clone(); let dl = dl_prog.clone(); let ep = ep.clone(); let ctx = cc.egui_ctx.clone();
+        { let tx = tx.clone(); let dl = dl_prog.clone(); let ep = ep.clone(); let ctx = ctx.clone();
           std::thread::spawn(move || for j in stem_rx { let key = analysis::cache_key(std::path::Path::new(&j.path)).unwrap_or_else(|| "nokey".into());
             let r = crate::stems::get_or_separate(&key, &j.audio, &dl, &j.prog);
             if let Ok(e) = crate::stems::session_info() { *ep.lock().unwrap() = e; }
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
-        let mut a = App { mix: Mix::default(), store: HashMap::new(), out: crate::audio::start(), ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
+        let mut a = App { section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
             file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, scratch_win: false, scratch_play: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
-            lib: { let c = cc.egui_ctx.clone(); crate::library::Library::new(crate::library::config_dir(), crate::library::cache_dir(), Arc::new(move || c.request_repaint())) },
+            lib,
             lib_q: String::new(), lib_path: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
             lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_node: None, lib_cur: vec![], lib_cur_key: None, lib_found: vec![], lib_imp: String::new(), lib_remaps: vec![], lib_remaps_init: false, lib_view_key: None, timeline_rect: Rect::NOTHING };
         if !a.lib.cfg.folders.is_empty() { a.lib.rescan(); }
@@ -149,19 +155,39 @@ impl App {
             let s0 = a.mix.transitions().first().map(|x| x.2).unwrap_or(0.0);
             if let Some(p) = paths.get(1) { let (au, an) = analysis::load(p).unwrap(); a.insert(p.clone(), au, an, Some((2, s0 - 24.0))); }
             if let Some(p) = paths.get(1) { let (au, an) = analysis::load(p).unwrap(); a.insert(p.clone(), au, an, Some((3, s0 + 40.0))); }
-            for t in a.mix.tracks.iter_mut().filter(|t| t.lane >= 2) { t.title = format!("{} vocals HQ", t.title); t.duration = t.duration.min(t.offset + 18.0); }
+            for t in a.mix.tracks.iter_mut().filter(|t| t.lane >= 2) { t.title = format!("{} sample", t.title); t.duration = t.duration.min(t.offset + 18.0); }
             a.mix.name = "Electric Vision 5".into();
             if let Some(&(_, i, s, e)) = a.mix.transitions().first() { a.sel_in = Some(i); a.scroll = s - 40.0; a.seek((s + e) / 2.0 - 4.0); }
             a.ppb = 7.5; a.tab = Tab::Track; a.sel = Some(1); a.mix.metronome = true; a.follow = false;
             match std::env::var("MIXSTUDIO_DEMO_TAB").as_deref() { Ok("transition") => { a.tab = Tab::Transition; a.sel = None; }
-                Ok("playlist") => { a.tab = Tab::Playlist; a.sel = Some(1); } Ok("wide") => { a.tab = Tab::Playlist; a.ppb = 3.0; a.scroll = -4.0; a.sel = None; } _ => {} }
+                Ok("playlist") => { a.tab = Tab::Playlist; a.sel = Some(1); }
+                Ok("wide") => { a.tab = Tab::Playlist; a.ppb = 1.0; a.scroll = -4.0; a.sel = None; }
+                Ok("sections") => {
+                    let first=a.mix.main_order()[0]; let at=a.mix.tracks[first].start_beat+128.0;
+                    let copy=a.mix.tracks[first].copy_section(at-32.0,at).unwrap();
+                    a.snapshot(); a.mix.insert_section(first,at,&copy).unwrap();
+                    a.sel=Some(first); a.select_sections=true; a.section_range=Some((first,at,at+32.0)); a.remember_section();
+                    a.tab=Tab::Playlist; a.ppb=4.5; a.scroll=72.0; a.seek(at); a.status="Demo: 8 bars repeated · source audio untouched · Undo restores edits".into();
+                }
+                Ok("grid") => { a.tab=Tab::Track; a.sel=Some(0); a.ppb=28.0; a.scroll=48.0; a.seek(64.0); }
+                Ok("effects") => {
+                    a.tab=Tab::Effects; a.fx_target=0;
+                    let start=s0-24.0; a.mix.fx.push(crate::fx::FxBlock::new(crate::fx::FxKind::FilterSweep,0,start));
+                    a.fx_sel=Some(0); a.mix.fx.push(crate::fx::FxBlock::new(crate::fx::FxKind::Echo,1,s0+32.0));
+                    a.auto_track=Some(0); a.auto_param=0;
+                    let t=&mut a.mix.tracks[0]; let rel=start-t.start_beat;
+                    t.auto=vec![vec![(rel-16.0,1.0),(rel,0.75),(rel+16.0,1.0)]];
+                    a.seek(start);
+                }
+                Ok("autoorder") => { a.tab=Tab::Playlist; a.sel=Some(1); a.auto_order(); }
+                _ => {} }
         }
         a
     }
     fn snapshot(&mut self) { self.undo.push(serde_json::to_string(&self.mix).unwrap()); if self.undo.len() > 200 { self.undo.remove(0); } self.redo.clear(); }
     fn do_undo(&mut self) { if let Some(s) = self.undo.pop() { self.redo.push(serde_json::to_string(&self.mix).unwrap()); self.mix = serde_json::from_str(&s).unwrap(); self.fix_sel(); } }
     fn do_redo(&mut self) { if let Some(s) = self.redo.pop() { self.undo.push(serde_json::to_string(&self.mix).unwrap()); self.mix = serde_json::from_str(&s).unwrap(); self.fix_sel(); } }
-    fn fix_sel(&mut self) { let n = self.mix.tracks.len(); if self.sel.is_some_and(|s| s >= n) { self.sel = None; } if self.sel_in.is_some_and(|s| s >= n) { self.sel_in = None; } }
+    fn fix_sel(&mut self) { self.clear_section(); let n = self.mix.tracks.len(); if self.sel.is_some_and(|s| s >= n) { self.sel = None; } if self.sel_in.is_some_and(|s| s >= n) { self.sel_in = None; } }
     fn beat(&self) -> f64 { self.out.shared.beat() }
     fn playing(&self) -> bool { self.out.shared.playing.load(std::sync::atomic::Ordering::Relaxed) }
     fn seek(&self, b: f64) { self.out.shared.beat.store(b.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed); let _ = self.out.tx.send(Cmd::Seek(b.max(0.0))); }
@@ -170,7 +196,7 @@ impl App {
     fn insert(&mut self, p: PathBuf, au: Audio, an: Analysis, sample: Option<(usize, f64)>) {
         let key = p.display().to_string();
         let mut t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, beat_mult: 1.0, grid_mode: 1, stabilize: false, flex: None, imported: None };
+            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, beat_mult: 1.0, grid_mode: 1, stabilize: false, flex: None, imported: None, sections: vec![] };
         if let Some((src, et)) = self.lib.ext_info(&key) { if !et.cues.is_empty() {
             let v: Vec<(f64, String)> = et.cues.iter().map(|c| (c.pos, if !c.name.is_empty() { c.name.clone() } else if c.hot >= 0 { format!("{} hot cue {}", src.name(), (b'A' + (c.hot as u8).min(25)) as char) } else { format!("{} cue", src.name()) })).collect();
             self.mix.cue_marks.insert(key.clone(), v); } }
@@ -262,7 +288,7 @@ impl App {
         self.status = format!("Auto-order ({}): {greens}/{} smooth transitions, score {:.2} → {:.2} in {} ms, {np} outro→intro phrase overlaps. Undo restores the old order.", self.ao_mode.name(), ord.len() - 1, c0, c1, t0.elapsed().as_millis());
     }
     fn remove_sel(&mut self) {
-        if let Some(i) = self.sel { self.snapshot(); self.mix.tracks.remove(i); self.sel = None; self.sel_in = None;
+        if let Some(i) = self.sel { self.clear_section(); self.snapshot(); self.mix.tracks.remove(i); self.sel = None; self.sel_in = None;
             let o = self.mix.main_order(); for (k, &i) in o.iter().enumerate() { self.mix.tracks[i].lane = k % 2; } }
     }
     /// Make the audio at mix beat `beat` (inside track ti) the downbeat, placed on the nearest mix bar.
@@ -274,7 +300,8 @@ impl App {
     /// Shift the beat grid (fixed or beat map) relative to the audio by `dsec` seconds.
     fn nudge(&mut self, ti: usize, dsec: f64) {
         let t = &mut self.mix.tracks[ti];
-        t.offset += dsec; t.normalize_grid();
+        if t.grid().dynamic() { t.edit_map(|m| m.shift(dsec)); }
+        else { t.offset += dsec; t.normalize_grid(); }
     }
     fn request_stems(&mut self, i: usize) {
         let Some(t) = self.mix.tracks.get(i) else { return }; let p = t.path.clone();
@@ -326,7 +353,7 @@ impl App {
             if let Err(e) = engine::write_wav(&p, &clip.l, &clip.r, clip.sr) { let _ = tx.send(Msg::Status(format!("Could not write the clip: {e}"))); return; }
             let nt = t.clip_track(sa, sb, p.display().to_string(), format!("{} ({name})", t.title), free);
             let an = Analysis { bpm: nt.bpm, offset: nt.offset, key: nt.key.clone(), duration: nt.duration, peaks: analysis::peaks(&clip), peak_sr: clip.sr, sections: vec![],
-                title: nt.title.clone(), artist: nt.artist.clone(), version: 0, beats: nt.map.as_ref().map(|m| m.beats.clone()).unwrap_or_default(), flex: vec![] };
+                title: nt.title.clone(), artist: nt.artist.clone(), version: 0, beats: nt.map.as_ref().map(|m| m.beats.clone()).unwrap_or_default(), flex: vec![], recommended_grid_mode: 1 };
             let _ = tx.send(Msg::Clip(nt, clip, an));
         });
     }
@@ -488,6 +515,73 @@ impl App {
             else { self.tc_drag = None; }
         }
     }
+    fn section_signature(t: &Track) -> Vec<u64> {
+        use std::hash::{Hash,Hasher};
+        let mut hash=std::collections::hash_map::DefaultHasher::new(); t.path.hash(&mut hash);
+        let mut v=vec![hash.finish(),t.start_beat.to_bits(),t.bpm.to_bits(),t.offset.to_bits(),t.beat_mult.to_bits(),t.trim_in.to_bits(),t.trim_out.to_bits(),t.duration.to_bits(),t.grid_mode as u64,t.lane as u64];
+        for map in [&t.map,&t.flex,&t.imported] { v.push(map.as_ref().map_or(0,|m| Arc::as_ptr(m) as u64)); }
+        for (a,b) in &t.sections { v.extend([a.to_bits(),b.to_bits()]); } v
+    }
+    fn remember_section(&mut self) { self.section_state=self.section_range.and_then(|(ti,_,_)| self.mix.tracks.get(ti)).map(Self::section_signature).unwrap_or_default(); }
+    fn validate_section(&mut self) {
+        if let Some((ti,a,b))=self.section_range {
+            let valid=self.sel==Some(ti) && self.mix.tracks.get(ti).is_some_and(|t| Self::section_signature(t)==self.section_state && a>=t.vis_start(0.0)-1e-7 && b<=t.end(0.0)+1e-7);
+            if !valid { self.clear_section(); }
+        }
+    }
+    fn clear_section(&mut self) {
+        self.section_range=None; self.section_drag=None; self.section_state.clear();
+        if self.loop_on { self.loop_on=false; let _=self.out.tx.send(Cmd::Loop(None)); }
+    }
+    // 0 copy, 1 paste, 2 repeat, 3 delete, 4 audition loop.
+    fn section_action(&mut self, action: u8) {
+        self.validate_section();
+        if self.lock && matches!(action,1..=3) { self.status="Unlock the timeline to edit sections".into(); return; }
+        if action==1 {
+            let Some(copy)=self.section_copy.clone() else { self.status="Copy a section first (Ctrl+C)".into(); return; };
+            let Some(ti)=self.sel else { self.status="Select the source song".into(); return; };
+            let at=self.snap_beat(self.beat()); let mut edited=self.mix.clone();
+            match edited.insert_section(ti,at,&copy) {
+                Ok(len)=>{ self.snapshot(); self.mix=edited; self.clear_section(); self.section_range=Some((ti,at,at+len)); self.remember_section(); self.status=format!("Pasted {:.1} beats · following material moved",len); }
+                Err(e)=>self.status=e,
+            } return;
+        }
+        let Some((ti,a,b))=self.section_range else { self.status="Choose Select, then drag a range on a song".into(); return; };
+        if action==4 { self.loop_on=true; let _=self.out.tx.send(Cmd::Loop(Some((a,b)))); self.seek(a); let _=self.out.tx.send(Cmd::Play(true)); return; }
+        let Some(t)=self.mix.tracks.get(ti) else { self.clear_section(); return; };
+        let copy=match t.copy_section(a,b) { Ok(c)=>c,Err(e)=>{self.status=e; return;} };
+        if action==0 { self.section_copy=Some(copy); self.status=format!("Copied {:.1} beats · paste within this song",b-a); return; }
+        let mut edited=self.mix.clone();
+        let result=if action==2 { edited.insert_section(ti,b,&copy).map(|_| ()) } else { edited.delete_section(ti,a,b) };
+        match result {
+            Ok(())=>{ self.snapshot(); self.mix=edited; self.clear_section(); self.sel=Some(ti);
+                if action==2 { self.section_range=Some((ti,b,b+b-a)); self.remember_section(); self.status="Section repeated · Ctrl+D repeats it again".into(); }
+                else { self.seek(a); self.status="Section deleted · gap closed and following material moved".into(); }
+            }
+            Err(e)=>self.status=e,
+        }
+    }
+    fn section_toolbar(&mut self, ui: &mut egui::Ui) {
+        self.validate_section();
+        let mut action=None;
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.select_sections,false,"↔ Move").on_hover_text("Drag clips to move them");
+            if ui.selectable_value(&mut self.select_sections,true,"▧ Select").on_hover_text("Drag a range on one song; uses the timeline's beat/bar snap").changed() { self.drag=None; self.auto_track=None; self.stem_sel=None; }
+            ui.separator();
+            let selected=self.section_range.is_some(); let unlocked=!self.lock;
+            for (id,label,tip,enabled) in [
+                (0,"Copy","Ctrl+C · copy selected source ranges and automation",selected),
+                (1,"Paste","Ctrl+V · insert at playhead within the same song",unlocked && self.section_copy.is_some() && self.sel.is_some()),
+                (2,"Repeat","Ctrl+D · insert a copy directly after selection",unlocked && selected),
+                (3,"Delete + close gap","Delete · shorten song and move following material",unlocked && selected),
+                (4,"▶ Loop selection","Play the selected section repeatedly",selected),
+            ] { if ui.add_enabled(enabled,egui::Button::new(label)).on_hover_text(tip).clicked() {action=Some(id);} }
+            if selected { if ui.small_button("Clear").on_hover_text("Escape").clicked() { self.clear_section(); } }
+            if let Some((_,a,b))=self.section_range { ui.label(egui::RichText::new(format!("{:.1} beats / {:.2} bars · Ripple on",b-a,(b-a)/4.0)).color(ACCENT)); }
+            else { ui.label(egui::RichText::new(if self.select_sections {"Drag on a waveform to select · Ripple on"} else {"Select a range to edit a song"}).color(DIM)); }
+        });
+        if let Some(a)=action { self.section_action(a); }
+    }
     fn snap_beat(&self, b: f64) -> f64 { match self.snapping { Snapping::Off => b, Snapping::Free => b.round(), Snapping::Half => (b / 2.0).round() * 2.0, Snapping::Full => (b / 4.0).round() * 4.0 } }
 }
 
@@ -495,6 +589,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
         for t in self.mix.tracks.iter_mut() { if t.flex.is_none() { if let Some((_, an)) = self.store.get(&t.path) { if an.flex.len() >= 16 { t.flex = an.flex_map(); } } } }
         self.mix.resolve_ratios();
+        self.validate_section();
         if let Some((i, k)) = ctx.data_mut(|d| { let r = d.get_temp::<(usize, u8)>(egui::Id::new("grid_act")); d.remove::<(usize, u8)>(egui::Id::new("grid_act")); r }) { if i < self.mix.tracks.len() {
             self.snapshot();
             if k >= 100 { self.mix.tracks[i].stabilize = k == 101; self.status = if k == 101 { "Clip stabilized: plays flat at its average tempo".into() } else { "Clip keeps its groove".into() }; }
@@ -538,7 +633,11 @@ impl eframe::App for App {
         if !ctx.wants_keyboard_input() {
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) { let _ = self.out.tx.send(Cmd::Play(!self.playing())); }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) { if ctx.input(|i| i.modifiers.shift) { self.do_redo() } else { self.do_undo() } }
-            if ctx.input(|i| i.key_pressed(egui::Key::Delete)) { self.remove_sel(); }
+            if ctx.input(|i| i.key_pressed(egui::Key::Delete)) { if self.section_range.is_some() { self.section_action(3); } else if !self.select_sections { self.remove_sel(); } }
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C)) { self.section_action(0); }
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V)) { self.section_action(1); }
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) { self.section_action(2); }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) { self.clear_section(); }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::E)) { self.split_here(); }
             if ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::Z)) { self.vzoom = !self.vzoom; }
         }
@@ -575,7 +674,7 @@ impl App {
     fn top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top").exact_height(44.0).frame(egui::Frame::none().fill(PANEL).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
-                if ui.add(egui::Button::new("🏠").min_size(vec2(30.0, 28.0))).on_hover_text("New empty mix").clicked() && !self.mix.tracks.is_empty() { self.snapshot(); self.mix = Mix::default(); self.sel = None; self.sel_in = None; }
+                if ui.add(egui::Button::new("🏠").min_size(vec2(30.0, 28.0))).on_hover_text("New empty mix").clicked() && !self.mix.tracks.is_empty() { self.snapshot(); self.mix = Mix::default(); self.clear_section(); self.sel = None; self.sel_in = None; }
                 ui.spacing_mut().item_spacing.x = 0.0;
                 ui.label(egui::RichText::new("Mix").color(ACCENT).size(20.0).strong());
                 ui.label(egui::RichText::new("Studio").color(TXT).size(20.0).strong());
@@ -587,7 +686,7 @@ impl App {
                     ui.menu_button(egui::RichText::new(name).size(14.0), |ui| {
                         ui.horizontal(|ui| { ui.label("Name:"); ui.text_edit_singleline(&mut self.mix.name); });
                         ui.separator();
-                        if ui.button("New mix").clicked() { self.snapshot(); self.mix = Mix::default(); self.sel = None; self.file = None; ui.close_menu(); }
+                        if ui.button("New mix").clicked() { self.snapshot(); self.mix = Mix::default(); self.clear_section(); self.sel = None; self.file = None; ui.close_menu(); }
                         if ui.button("Open mix…").clicked() { self.dialog(false, 0); ui.close_menu(); }
                         if ui.button("Save").clicked() { match self.file.clone() { Some(p) => self.save(p), None => self.dialog(true, 1) } ui.close_menu(); }
                         if ui.button("Save as…").clicked() { self.dialog(true, 1); ui.close_menu(); }
@@ -665,8 +764,8 @@ impl App {
                 let pl = self.playing();
                 if ui.add(egui::Button::new(egui::RichText::new(if pl { "⏸" } else { "▶" }).color(C::BLACK).size(18.0)).fill(ACCENT).rounding(18.0).min_size(vec2(38.0, 36.0))).on_hover_text("Play/pause (space)").clicked() { let _ = self.out.tx.send(Cmd::Play(!pl)); }
                 let lb = egui::Button::new(egui::RichText::new("🔁").size(16.0).color(if self.loop_on { ACCENT } else { TXT })).frame(false).min_size(vec2(30.0, 30.0));
-                if ui.add(lb).on_hover_text("Loop the selected bar length from the current bar").clicked() { self.loop_on = !self.loop_on;
-                    let s = (b / 4.0).floor() * 4.0; let _ = self.out.tx.send(Cmd::Loop(if self.loop_on { Some((s, s + self.bars as f64 * 4.0)) } else { None })); }
+                if ui.add(lb).on_hover_text("Loop the selected section, or the bar length from the current bar").clicked() { self.loop_on = !self.loop_on;
+                    let s = (b / 4.0).floor() * 4.0; let _ = self.out.tx.send(Cmd::Loop(if self.loop_on { Some(self.section_range.map(|(_,a,b)| (a,b)).unwrap_or((s, s + self.bars as f64 * 4.0))) } else { None })); }
                 if flat(ui, "⏭", "Next track").clicked() { if let Some(s) = self.mix.main_order().iter().map(|&i| self.mix.tracks[i].vis_start(bpm)).find(|&s| s > b + 0.5) { self.seek(s); } }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add(egui::Button::new("⌨").min_size(vec2(30.0, 28.0))).on_hover_text("Space: play · Ctrl+scroll: zoom · Scroll: pan · Delete: remove · Ctrl+Z / Ctrl+Shift+Z");
@@ -746,7 +845,8 @@ impl App {
 
 impl App {
     fn timeline(&mut self, ui: &mut egui::Ui) {
-        let full = ui.max_rect();
+        self.section_toolbar(ui);
+        let full = ui.available_rect_before_wrap();
         let mini_h = 14.0;
         let mini = Rect::from_min_max(full.min, pos2(full.right(), full.top() + mini_h));
         let area = Rect::from_min_max(pos2(full.left(), mini.bottom()), full.max);
@@ -868,7 +968,7 @@ impl App {
             while px < vis.right() {
                 let (bb0, bb1) = (xb(px), xb(px + 1.0));
                 let c0 = (grid.sec(bb0) * cps) as i64;
-                let c1 = ((grid.sec(bb1) * cps) as i64).max(c0 + 1);
+                let c1 = ((grid.region_sec(bb1, bb0) * cps) as i64).max(c0 + 1);
                 if c0 >= 0 && (c0 as usize) < an.peaks.len() {
                     let mut m = [0u8; 3]; for c in c0..c1.min(an.peaks.len() as i64) { let v = an.peaks[c as usize]; for k in 0..3 { m[k] = m[k].max(v[k]); } }
                     let f = |v: u8| v as f32 / 255.0;
@@ -937,14 +1037,21 @@ impl App {
                     tp.text(pos2(x + 2.0, tr.bottom() + 5.0), Align2::LEFT_CENTER, format!("{bar}"), FontId::proportional(8.5), DIM); } }
                     b += 4.0; bar += 1; }
                 let phr = self.mix.phrases(&t.path, &an.sections);
-                for (k, &(sb, kind)) in phr.iter().enumerate() {
-                    let end = phr.get(k + 1).map(|x| x.0).unwrap_or(ve - t.start_beat);
+                let sg=t.source_grid(); let mut dest=vs; let mut phrases=vec![];
+                for (sa,se) in t.source_spans() {
+                    let u=sg.beat(sa); let v=sg.beat(se);
+                    for (k,&(sb,kind)) in phr.iter().enumerate() {
+                        let lo=(t.start_beat+sb).max(u); let hi=(t.start_beat+phr.get(k+1).map(|x| x.0).unwrap_or(sg.beat(t.duration)-t.start_beat)).min(v);
+                        if hi>lo { phrases.push((k,kind,dest+lo-u-t.start_beat,dest+hi-u-t.start_beat)); }
+                    } dest+=v-u;
+                }
+                for (k,kind,sb,end) in phrases {
                     let r = Rect::from_min_max(pos2(bx(t.start_beat + sb), cr.bottom() - 8.0), pos2(bx(t.start_beat + end) - 1.0, cr.bottom())).intersect(cr); if r.width() <= 0.0 { continue; }
                     let pc = crate::phrase::colour(kind); let kind = (kind as usize).min(4);
                     tp.rect_filled(r, 0.0, C::from_rgb(pc[0], pc[1], pc[2]));
                     let xm = bx(t.start_beat + sb); if xm >= cr.left() && xm <= cr.right() { tp.line_segment([pos2(xm, cr.top()), pos2(xm, cr.bottom())], Stroke::new(1.0_f32, C::from_rgba_unmultiplied(pc[0], pc[1], pc[2], 150))); }
                     if r.width() > 40.0 { tp.text(pos2(r.left().max(tl_x0) + 3.0, r.center().y), Align2::LEFT_CENTER, crate::phrase::LABELS[kind], FontId::proportional(7.5), C::BLACK); }
-                    if !self.lock {
+                    if !self.lock && !self.select_sections {
                         let pr = ui.interact(r, ui.id().with(("phrase", ti, k)), Sense::click());
                         let set = |v: Option<Vec<(f64, u8)>>| ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("phr_act"), (t.path.clone(), v)));
                         if pr.clicked() { let mut v = phr.to_vec(); v[k].1 = ((kind + 1) % 5) as u8; set(Some(v)); }
@@ -957,24 +1064,34 @@ impl App {
                     }
                 }
                 if let Some(cs) = self.mix.cue_marks.get(&t.path) { let oc = C::from_rgb(255, 140, 0); for (s, name) in cs {
-                    let x = bx(t.grid().beat(*s)); if x < cr.left() || x > cr.right() { continue; }
+                    for beat in grid.occurrences(*s) { let x = bx(beat); if x < cr.left() || x > cr.right() { continue; }
                     tp.line_segment([pos2(x, cr.top()), pos2(x, cr.bottom() - 8.0)], Stroke::new(1.0_f32, oc.gamma_multiply(0.8)));
                     tp.add(egui::Shape::convex_polygon(vec![pos2(x - 4.0, cr.top()), pos2(x + 4.0, cr.top()), pos2(x, cr.top() + 6.0)], oc, Stroke::NONE));
-                    tp.text(pos2(x + 5.0, cr.top() + 5.0), Align2::LEFT_CENTER, name, FontId::proportional(8.5), oc); } }
+                    tp.text(pos2(x + 5.0, cr.top() + 5.0), Align2::LEFT_CENTER, name, FontId::proportional(8.5), oc); } } }
                 for o in &overlap { let x1 = bx(o.1).min(cr.right());
                     for k in 0..4 { let r = Rect::from_min_size(pos2(x1 - 9.0 * (4 - k) as f32 - 3.0, cr.bottom() - 16.0), vec2(7.0, 6.0));
                         tp.rect_filled(r, 1.5, STEM[k].gamma_multiply(0.7)); } }
             }
+            for cut in grid.cuts() { let x=bx(cut); if x>=vis.left() && x<=vis.right() {
+                tp.line_segment([pos2(x,wave.top()),pos2(x,wave.bottom())],Stroke::new(1.5_f32,ACCENT));
+                tp.text(pos2(x+3.0,wave.top()+3.0),Align2::LEFT_TOP,"│",FontId::proportional(10.0),ACCENT);
+            } }
             let selected = self.sel == Some(ti);
             tp.rect_stroke(cr, 2.0, Stroke::new(if selected { 1.5_f32 } else { 0.5 }, if selected { ACCENT } else { C::from_rgb(70, 70, 40) }));
             let resp = ui.interact(vis, ui.id().with(("clip", ti)), Sense::click_and_drag());
             if let Some(pp) = resp.interact_pointer_pos() {
                 let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
-                if resp.drag_started() && ui.input(|i| i.modifiers.command) && t.stem_view > 0 && !sample {}
-                else if resp.drag_started() && alt && !sample { clicked_clip = Some((ti, xb(pp.x), 2u8)); }
+                if self.select_sections && !self.lock && resp.drag_started() {
+                    let anchor = ui.input(|i| i.pointer.press_origin()).map(|p| xb(p.x)).unwrap_or(xb(pp.x));
+                    clicked_clip = Some((ti, anchor, 5));
+                }
+                else if self.select_sections && resp.clicked() { clicked_clip = Some((ti, xb(pp.x), 6)); }
+                else if self.select_sections {}
+                else if resp.drag_started() && ui.input(|i| i.modifiers.command) && t.stem_view > 0 && !sample {}
+                else if resp.drag_started() && alt && !sample && t.sections.is_empty() { clicked_clip = Some((ti, xb(pp.x), 2u8)); }
                 else if resp.drag_started() && alt && sample && !self.lock { clicked_clip = Some((ti, xb(pp.x), 4)); }
                 else if resp.drag_started() && !self.lock { clicked_clip = Some((ti, xb(pp.x), 1)); }
-                else if resp.clicked() && shift && !sample { clicked_clip = Some((ti, xb(pp.x), 3)); }
+                else if resp.clicked() && shift && !sample && t.sections.is_empty() { clicked_clip = Some((ti, xb(pp.x), 3)); }
                 else if resp.clicked() { clicked_clip = Some((ti, xb(pp.x), 0)); }
             }
             if resp.hovered() { if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) { tl_hover = Some((ti, xb(hp.x))); } }
@@ -1064,14 +1181,14 @@ impl App {
                     if ui.button("Unmute all stems on this track").clicked() { stem_act = Some((ti, 4, 0, 0.0)); ui.close_menu(); }
                 });
             }
-            if !self.lock {
+            if !self.lock && !self.select_sections {
                 for left in [true, false] {
                     let x = if left { cr.left() } else { cr.right() };
                     if x < vis.left() - 1.0 || x > vis.right() + 1.0 { continue; }
                     let hr = Rect::from_min_max(pos2(if left { x } else { x - 6.0 }, wave.top() + if sample { 10.0 } else { 15.0 }), pos2(if left { x + 6.0 } else { x }, wave.bottom()));
                     let r = ui.interact(hr, ui.id().with(("edge", ti, left)), Sense::drag());
                     if r.hovered() || r.dragged() { ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal); tp.rect_filled(hr, 1.0, ACCENT.gamma_multiply(0.7)); }
-                    if r.drag_started() { tl_act = Some(TlDrag::Edge { ti, left }); }
+                    if r.drag_started() { tl_act = Some(TlDrag::Edge { ti, left, original: Box::new(t.clone()) }); }
                     r.on_hover_text(if left { "Drag to trim or extend the start of the clip" } else { "Drag to trim or extend the end of the clip (snaps to the next clip to close gaps)" });
                 }
                 if t.fade_in > 0.0 || t.fade_out > 0.0 || sample {
@@ -1092,7 +1209,7 @@ impl App {
                     }
                 }
             }
-            if !sample && ppb >= 22.0 {
+            if !self.select_sections && t.sections.is_empty() && !sample && ppb >= 22.0 {
                 let k0 = (xb(vis.left()) - t.start_beat).ceil() as i64; let k1 = (xb(vis.right()) - t.start_beat).floor() as i64;
                 for k in k0..=k1 {
                     let x = bx(t.start_beat + k as f64);
@@ -1229,16 +1346,33 @@ impl App {
                 } } else { self.tempo_drag = None; }
             }
         }
-        if bg.clicked() { if let Some(pp) = bg.interact_pointer_pos() { self.seek(xb(pp.x)); self.sel = None; } }
+        if bg.clicked() { if let Some(pp) = bg.interact_pointer_pos() { self.seek(xb(pp.x)); if !self.select_sections { self.clear_section(); self.sel = None; } } }
         if let Some(i) = clicked_trans { self.sel_in = Some(i); self.tab = Tab::Transition; }
         else if let Some((ti, b, drag)) = clicked_clip {
+            if drag != 5 && drag != 6 { self.clear_section(); }
             self.sel = Some(ti);
-            if drag == 1 { self.snapshot(); self.drag = Some((ti, b, self.mix.tracks[ti].start_beat)); }
+            if drag == 5 { self.clear_section(); let t=&self.mix.tracks[ti]; let a=self.snap_beat(b).clamp(t.vis_start(0.0),t.end(0.0)); self.section_drag=Some((ti,a)); }
+            else if drag == 6 { self.seek(self.snap_beat(b)); }
+            else if drag == 1 { self.clear_section(); self.snapshot(); self.drag = Some((ti, b, self.mix.tracks[ti].start_beat)); }
             else if drag == 2 { self.snapshot(); self.grid_drag = Some((ti, ui.input(|i| i.pointer.hover_pos()).map(|p| p.x).unwrap_or(0.0))); }
             else if drag == 4 { self.snapshot(); let n = self.mix.duplicate(ti); self.sel = Some(n); self.drag = Some((n, b, self.mix.tracks[n].start_beat)); self.status = "Sample duplicated".into(); }
             else if drag == 3 { self.snapshot(); let t = &self.mix.tracks[ti]; let line = t.start_beat + (b - t.start_beat).round(); self.set_downbeat_at(ti, line); self.status = "Downbeat set".into(); }
             else { self.seek(b); if let Some(x) = trans.iter().find(|x| x.1 == ti || x.0 == ti) { self.sel_in = Some(x.1); } }
         }
+        if let Some((ti,anchor))=self.section_drag {
+            if ui.input(|i| i.pointer.primary_down()) {
+                if let (Some(t),Some(pp))=(self.mix.tracks.get(ti),ui.input(|i| i.pointer.hover_pos())) {
+                    let end=self.snap_beat(xb(pp.x)).clamp(t.vis_start(0.0),t.end(0.0));
+                    if (end-anchor).abs()>=0.01 { self.section_range=Some((ti,anchor.min(end),anchor.max(end))); self.remember_section(); }
+                    else { self.section_range=None; }
+                }
+            } else { self.section_drag=None; }
+        }
+        if let Some((ti,a,b))=self.section_range { if let Some(t)=self.mix.tracks.get(ti) {
+            let row=rows[t.lane.min(3)].1;
+            let r=clip(Rect::from_min_max(pos2(bx(a),row.top()+15.0),pos2(bx(b),row.bottom()-9.0)));
+            if r.is_positive() { tp.rect_filled(r,0.0,C::from_rgba_unmultiplied(110,170,255,55)); tp.rect_stroke(r,0.0,Stroke::new(2.0_f32,C::from_rgb(130,190,255))); }
+        } }
         self.bm_mode = bm_mode;
         if let Some(p) = bm_hover { self.bm_pop = Some((p, std::time::Instant::now())); }
         if let Some((p, at)) = self.bm_pop {
@@ -1344,9 +1478,9 @@ impl App {
             if ui.input(|i| i.pointer.primary_down()) { if let Some(pp) = pp {
                 let tol = 8.0 / ppb as f64; let b = xb(pp.x);
                 match d {
-                    TlDrag::Edge { ti, left } => if ti < self.mix.tracks.len() {
+                    TlDrag::Edge { ti, left, original } => if ti < self.mix.tracks.len() {
                         let c = self.magnet_cands(ti); let nb = match crate::model::magnet(b, &c, tol) { Some(m) => { snap_line = Some(m); m } None => if self.snapping == Snapping::Off { b } else { b.round() } };
-                        self.mix.set_edge(ti, left, nb); },
+                        self.mix.tracks[ti]=*original; self.mix.set_edge(ti, left, nb); },
                     TlDrag::Fade { ti, left } => if ti < self.mix.tracks.len() {
                         let t = &mut self.mix.tracks[ti]; let (vs, ve) = (t.vis_start(bpm), t.end(bpm)); let len = ve - vs;
                         let snapb = |x: f64| if self.snapping == Snapping::Off { x } else { (x * 2.0).round() / 2.0 };
@@ -1579,8 +1713,9 @@ impl App {
 
     fn track_tab(&mut self, ui: &mut egui::Ui) {
         let Some(i) = self.sel.filter(|&i| i < self.mix.tracks.len()) else { ui.label(egui::RichText::new("Select a track in the timeline or playlist.").color(DIM)); return; };
-        let bpm_mix = self.mix.bpm;
+        let bpm_mix = self.mix.bpm_at(self.beat());
         let mut remove = false; let mut sep = false;
+        let mut bpm_edit = None; let mut offset_edit = None;
         ui.horizontal_top(|ui| {
         ui.vertical(|ui| { ui.set_width(520.0);
             let t = &mut self.mix.tracks[i];
@@ -1588,15 +1723,15 @@ impl App {
                 .response.on_hover_text("Key lock keeps the pitch (WSOLA), Vinyl changes pitch with tempo, Beat slice plays each beat at its original speed from the beat start"); });
             ui.heading(format!("{} — {}", t.title, t.artist));
             egui::Grid::new("tt").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                ui.label("Track BPM"); ui.add(egui::DragValue::new(&mut t.bpm).range(60.0..=200.0).speed(0.01).fixed_decimals(2)); ui.end_row();
-                ui.label("First beat (s)"); ui.add(egui::DragValue::new(&mut t.offset).range(0.0..=30.0).speed(0.002).fixed_decimals(3)); ui.end_row();
+                ui.label("Track BPM (manual)"); let mut b = t.bpm; if ui.add(egui::DragValue::new(&mut b).range(40.0..=250.0).speed(0.01).fixed_decimals(2)).on_hover_text("Sets a fixed grid at this BPM. Choose Dynamic or Flex to restore the analysed timing.").changed() { bpm_edit = Some(b); } ui.end_row();
+                ui.label("Grid anchor (s)"); let mut off = t.offset; if ui.add(egui::DragValue::new(&mut off).range(0.0..=t.duration).speed(0.001).fixed_decimals(3)).on_hover_text("Source time of the grid anchor. Increasing it moves grid markers later in the source audio.").changed() { offset_edit = Some(off); } ui.end_row();
                 ui.label("Key (Camelot)"); ui.text_edit_singleline(&mut t.key); ui.end_row();
                 ui.label("Start (bar)"); let mut bar = t.start_beat / 4.0 + 1.0; if ui.add(egui::DragValue::new(&mut bar).speed(0.1).fixed_decimals(0)).changed() { t.start_beat = (bar.round() - 1.0) * 4.0; } ui.end_row();
                 ui.label("Tempo change"); ui.label(format!("{:+.1}% (plays at {:.1} BPM{})", (bpm_mix / t.eff_bpm() - 1.0) * 100.0, bpm_mix, if t.beat_mult != 1.0 { format!(", beat ratio ×{:.2}", t.beat_mult) } else { String::new() })); ui.end_row();
-                ui.label("Beatgrid"); if t.grid().dynamic() { let (lo, hi) = t.map.as_ref().map(|m| m.tempo_range()).unwrap_or((t.bpm, t.bpm));
+                ui.label("Beatgrid"); if t.grid().dynamic() { let (lo, hi) = t.cur_map().as_ref().map(|m| m.tempo_range()).unwrap_or((t.bpm, t.bpm));
                     ui.label(format!("Beat map, follows tempo {lo:.2}–{hi:.2} BPM")).on_hover_text("Every beat is tracked, so tempo drift stays locked to the mix grid. Editing the BPM by hand switches to a fixed grid; Reset to analysis brings the beat map back."); }
                 else { ui.label("Fixed (linear)"); } ui.end_row();
-                ui.label("Grid mode"); { let cur = t.grid_mode.min(4) as usize; let avail = [true, t.map.is_some(), t.flex.is_some(), t.imported.is_some(), true];
+                ui.label("Grid mode"); { let cur = if t.grid().dynamic() { t.grid_mode.min(4) as usize } else { 0 }; let avail = [true, t.map.is_some(), t.flex.is_some(), t.imported.is_some(), true];
                     let cx = ui.ctx().clone(); let set = move |k: u8| cx.data_mut(|d| d.insert_temp(egui::Id::new("grid_act"), (i, k)));
                     egui::ComboBox::from_id_salt("grid_mode").selected_text(crate::model::GRID_MODES[cur]).show_ui(ui, |ui| { for k in 0..5 {
                         if ui.add_enabled(avail[k], egui::SelectableLabel::new(k == cur, crate::model::GRID_MODES[k])).on_hover_text(crate::model::GRID_HELP[k]).on_disabled_hover_text(if k == 2 { "No flex map yet (re-analysed tracks get one)" } else { "No grid imported for this track (add it from a Rekordbox / Traktor import)" }).clicked() && k != cur { set(k as u8); } } })
@@ -1615,20 +1750,29 @@ impl App {
         });
         ui.separator();
         ui.vertical(|ui| {
-            ui.label(egui::RichText::new("Beatgrid").strong());
+            ui.label(egui::RichText::new("Correct beat timing").strong());
+            ui.label("Move grid earlier (−) / later (+). Does not move the clip on the timeline.");
+            if self.mix.tracks[i].grid_mode == 2 {
+                ui.colored_label(egui::Color32::from_rgb(240, 180, 80), "Flex is experimental: irregular beats can cause audible tempo jumps.");
+                if ui.button("Use Dynamic grid (stable timing)").clicked() {
+                    self.snapshot();
+                    if let Some((_, an)) = self.store.get(&self.mix.tracks[i].path) { self.mix.tracks[i].map = an.beat_map(); }
+                    self.mix.tracks[i].set_grid_mode(1);
+                }
+            }
             ui.horizontal_wrapped(|ui| {
             for (lab, ms) in [("−10 ms", -10.0), ("−1 ms", -1.0), ("+1 ms", 1.0), ("+10 ms", 10.0)] {
-                if ui.button(lab).on_hover_text("Nudge the grid relative to the audio").clicked() { self.snapshot(); self.nudge(i, ms / 1000.0); } }
+                if ui.button(lab).on_hover_text(if ms < 0.0 { "Move every grid beat earlier in the source audio" } else { "Move every grid beat later in the source audio" }).clicked() { self.snapshot(); self.nudge(i, ms / 1000.0); } }
             if ui.button("Set downbeat at playhead").on_hover_text("The beat under the playhead becomes bar 1 and lands on the nearest mix bar. Shortcut: Shift+click a beat line on the clip.").clicked() {
                 self.snapshot(); let b = self.beat(); let t = &self.mix.tracks[i]; let line = t.start_beat + (b - t.start_beat).round(); self.set_downbeat_at(i, line); }
-            if ui.button("BPM ×2").clicked() { self.snapshot(); self.mix.tracks[i].bpm = (self.mix.tracks[i].bpm * 2.0).min(220.0); }
-            if ui.button("BPM ÷2").clicked() { self.snapshot(); self.mix.tracks[i].bpm = (self.mix.tracks[i].bpm / 2.0).max(40.0); }
+            if ui.button("Double BPM (fixed grid)").clicked() { bpm_edit = Some((self.mix.tracks[i].bpm * 2.0).min(250.0)); }
+            if ui.button("Halve BPM (fixed grid)").clicked() { bpm_edit = Some((self.mix.tracks[i].bpm / 2.0).max(40.0)); }
             let now = std::time::Instant::now();
             if ui.button("Tap tempo").on_hover_text("Tap at least 4 times in time with the track").clicked() {
                 if self.taps.last().is_some_and(|l| now.duration_since(*l).as_secs_f64() > 2.0) { self.taps.clear(); }
                 self.taps.push(now); if self.taps.len() > 16 { self.taps.remove(0); }
                 if self.taps.len() >= 4 { let span = self.taps.last().unwrap().duration_since(self.taps[0]).as_secs_f64(); let bpm = 60.0 * (self.taps.len() - 1) as f64 / span;
-                    if (40.0..=220.0).contains(&bpm) { if self.taps.len() == 4 { self.snapshot(); } self.mix.tracks[i].bpm = (bpm * 10.0).round() / 10.0; } }
+                    if (40.0..=220.0).contains(&bpm) { bpm_edit = Some((bpm * 10.0).round() / 10.0); } }
             }
             if !self.taps.is_empty() { ui.label(egui::RichText::new(format!("{} taps", self.taps.len())).color(DIM)); }
             if ui.button("Reset to analysis").clicked() { if let Some((_, an)) = self.store.get(&self.mix.tracks[i].path).cloned() { self.snapshot();
@@ -1638,6 +1782,8 @@ impl App {
             ui.label(egui::RichText::new("On the clip: Alt+drag moves the grid, Shift+click a beat line sets the downbeat.\nBar lines (downbeats) are red, beats yellow.").color(DIM).size(11.0));
         });
         });
+        if let Some(bpm) = bpm_edit { self.snapshot(); let t = &mut self.mix.tracks[i]; t.bpm = bpm; t.grid_mode = 0; self.status = format!("Fixed grid: {bpm:.2} BPM. Select Dynamic or Flex to use analysed timing."); }
+        if let Some(offset) = offset_edit { self.snapshot(); let delta = offset - self.mix.tracks[i].offset; self.nudge(i, delta); }
         if sep { self.request_stems(i); }
         if remove { self.remove_sel(); }
     }
@@ -1866,4 +2012,81 @@ fn node_ui(ui: &mut egui::Ui, n: &crate::import::Node, li: usize, path: &mut Vec
         if ui.selectable_label(me, format!("♫ All in {} ({})", n.name, n.all_tracks().len())).clicked() { *sel = Some(Some((li, path.clone()))); }
         for (ci, c) in n.children.iter().enumerate() { path.push(ci); node_ui(ui, c, li, path, cur, sel); path.pop(); }
     });
+}
+
+#[cfg(test)]
+mod section_ui_tests {
+    use super::*;
+    fn setup() -> (App,egui::Context,crossbeam_channel::Receiver<Cmd>,PathBuf) {
+        let ctx=egui::Context::default(); let (tx,rx)=crossbeam_channel::unbounded();
+        let out=crate::audio::Audio {tx,shared:Arc::new(Shared::new()),_stream:None,info:"test".into()};
+        static NEXT: std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
+        let dir=std::env::temp_dir().join(format!("mixstudio-section-ui-{}-{}",std::process::id(),NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));
+        let lib=crate::library::Library::new(dir.join("config"),dir.join("data"),Arc::new(|| {}));
+        let mut app=App::new_with(&ctx,None,out,lib);
+        app.mix.bpm=120.0;
+        let t: Track=serde_json::from_str(r#"{"path":"test.wav","title":"Test","artist":"Test","bpm":120.0,"offset":0.0,"key":"8A","duration":32.0,"start_beat":0.0,"lane":0,"trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]}}"#).unwrap();
+        let audio=Arc::new(Audio {sr:8000,l:vec![0.0;8000*32],r:vec![0.0;8000*32]});
+        let an=Analysis {bpm:120.0,duration:32.0,peak_sr:8000,peaks:vec![[80,100,90];600],..Default::default()};
+        app.store.insert(t.path.clone(),(audio,Arc::new(an))); app.mix.tracks.push(t); app.sel=Some(0);
+        (app,ctx,rx,dir)
+    }
+    fn frame(app: &mut App,ctx: &egui::Context,events:Vec<egui::Event>,width:f32)->egui::FullOutput {
+        ctx.run(egui::RawInput {screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(width,800.0))),events,..Default::default()},|ctx| {
+            egui::CentralPanel::default().show(ctx,|ui|app.timeline(ui));
+        })
+    }
+    #[test]
+    fn selecting_waveform_then_repeat_delete_and_undo_is_one_step_per_edit() {
+        let (mut a,ctx,_rx,dir)=setup(); a.select_sections=true;
+        frame(&mut a,&ctx,vec![],1000.0);
+        let start=pos2(HEAD_W+8.0+12.0*7.0,150.0); let end=pos2(HEAD_W+8.0+20.0*7.0,150.0);
+        let pointer=|pos,pressed|egui::Event::PointerButton {pos,button:egui::PointerButton::Primary,pressed,modifiers:egui::Modifiers::default()};
+        frame(&mut a,&ctx,vec![egui::Event::PointerMoved(start),pointer(start,true)],1000.0);
+        frame(&mut a,&ctx,vec![egui::Event::PointerMoved(end)],1000.0);
+        frame(&mut a,&ctx,vec![pointer(end,false)],1000.0);
+        assert_eq!(a.section_range,Some((0,8.0,16.0)),"Select mode must select instead of moving the clip");
+        let original=serde_json::to_string(&a.mix).unwrap();
+        a.section_action(2); assert_eq!(a.undo.len(),1); assert_eq!(a.section_range,Some((0,16.0,24.0)));
+        a.section_action(2); assert_eq!(a.undo.len(),2); assert_eq!(a.mix.tracks[0].end(0.0),80.0);
+        a.do_undo(); assert_eq!(a.mix.tracks[0].end(0.0),72.0); assert!(a.section_range.is_none());
+        a.do_undo(); assert_eq!(serde_json::to_string(&a.mix).unwrap(),original);
+        a.do_redo(); assert_eq!(a.mix.tracks[0].end(0.0),72.0);
+        a.section_range=Some((0,16.0,24.0)); a.remember_section(); a.section_action(3);
+        assert_eq!(serde_json::to_string(&a.mix).unwrap(),original);
+        let output=frame(&mut a,&ctx,vec![],1000.0); assert!(output.shapes.len()>100);
+        drop(a); std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn trimming_an_arranged_song_can_reverse_direction_in_one_gesture() {
+        let (mut a,ctx,_rx,dir)=setup(); a.mix.delete_section(0,8.0,16.0).unwrap();
+        frame(&mut a,&ctx,vec![],1000.0);
+        let bx=|beat:f32|HEAD_W+8.0+(beat+4.0)*7.0;
+        let start=pos2(bx(56.0)-3.0,150.0);
+        let pointer=|pos,pressed|egui::Event::PointerButton {pos,button:egui::PointerButton::Primary,pressed,modifiers:egui::Modifiers::default()};
+        frame(&mut a,&ctx,vec![egui::Event::PointerMoved(start),pointer(start,true)],1000.0);
+        frame(&mut a,&ctx,vec![egui::Event::PointerMoved(pos2(bx(48.0),150.0))],1000.0);
+        assert_eq!(a.mix.tracks[0].end(0.0),48.0);
+        let end=pos2(bx(52.0),150.0);
+        frame(&mut a,&ctx,vec![egui::Event::PointerMoved(end)],1000.0);
+        assert_eq!(a.mix.tracks[0].end(0.0),52.0,"trim must use the drag-start arrangement on each pointer frame");
+        frame(&mut a,&ctx,vec![pointer(end,false)],1000.0);
+        assert_eq!(a.undo.len(),1); a.do_undo(); assert_eq!(a.mix.tracks[0].end(0.0),56.0);
+        drop(a); std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn stale_selection_cannot_edit_after_relayout_and_lock_prevents_mutation() {
+        let (mut a,ctx,rx,dir)=setup();
+        a.section_range=Some((0,8.0,16.0)); a.remember_section(); a.section_action(0);
+        a.lock=true; a.section_action(2); assert!(a.undo.is_empty());
+        a.lock=false; a.mix.tracks[0].start_beat=4.0;
+        let original=serde_json::to_string(&a.mix).unwrap(); a.section_action(2);
+        assert!(a.section_range.is_none()); assert_eq!(serde_json::to_string(&a.mix).unwrap(),original);
+        a.section_range=Some((0,8.0,16.0)); a.remember_section(); a.section_action(4);
+        assert!(rx.try_iter().any(|c|matches!(c,Cmd::Loop(Some((8.0,16.0))))));
+        a.clear_section(); assert!(rx.try_iter().any(|c|matches!(c,Cmd::Loop(None))));
+        a.seek(24.0); a.section_action(1); assert_eq!(a.section_range,Some((0,24.0,32.0))); assert_eq!(a.undo.len(),1);
+        frame(&mut a,&ctx,vec![],1440.0);
+        drop(a); std::fs::remove_dir_all(dir).ok();
+    }
 }

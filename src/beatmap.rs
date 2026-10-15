@@ -43,7 +43,7 @@ impl BeatMap {
 /// Mix beat <-> source seconds for one track. Track beat x = mix beat - start_beat; x = 0 is the
 /// downbeat at `offset` seconds. With a beat map the spacing follows the map; otherwise linear.
 #[derive(Clone)]
-pub struct Grid { map: Option<Arc<BeatMap>>, r: f64, u0: f64, bpm: f64, offset: f64, start: f64 }
+pub struct Grid { map: Option<Arc<BeatMap>>, r: f64, u0: f64, bpm: f64, offset: f64, start: f64, regions: Arc<Vec<(f64, f64, f64)>>, revision: u64 }
 
 impl Grid {
     pub fn new(map: Option<Arc<BeatMap>>, bpm: f64, offset: f64, start: f64) -> Grid {
@@ -54,16 +54,55 @@ impl Grid {
             None => (None, 1.0),
         };
         let u0 = map.as_ref().map(|m| m.u_of(offset)).unwrap_or(0.0);
-        Grid { map, r, u0, bpm, offset, start }
+        let revision = map.as_ref().map_or(0, |m| Arc::as_ptr(m) as u64);
+        Grid { map, r, u0, bpm, offset, start, regions: Arc::new(vec![]), revision }
     }
     /// Beat ratio: one mix beat covers `1/m` track beats (m = 2: a 70 BPM track runs on a 140 BPM grid).
     pub fn scaled(mut self, m: f64) -> Grid { if m > 0.0 && m != 1.0 { self.r /= m; self.bpm *= m; } self }
     pub fn dynamic(&self) -> bool { self.map.is_some() }
     pub fn ratio(&self) -> f64 { self.r }
     /// Mix beat -> source seconds.
-    #[inline] pub fn sec(&self, b: f64) -> f64 { let x = b - self.start; match &self.map { Some(m) => m.t_of(self.u0 + x * self.r), None => self.offset + x * 60.0 / self.bpm } }
+    #[inline] fn raw_sec(&self, b: f64) -> f64 { let x = b - self.start; match &self.map { Some(m) => m.t_of(self.u0 + x * self.r), None => self.offset + x * 60.0 / self.bpm } }
+    /// Ordered (destination beat, source beat, length) spans. Source beat maps remain monotonic.
+    pub fn arranged(mut self, sections: &[(f64, f64)], trim: f64) -> Self {
+        let mut dest = self.raw_beat(trim); let mut regions = vec![];
+        let mut hash = 0xcbf29ce484222325u64 ^ self.revision;
+        for &(a,b) in sections {
+            let source = self.raw_beat(a); let len = self.raw_beat(b) - source;
+            if len.is_finite() && len > 1e-9 {
+                regions.push((dest, source, len)); dest += len;
+                hash = (hash ^ a.to_bits()).wrapping_mul(0x100000001b3);
+                hash = (hash ^ b.to_bits()).wrapping_mul(0x100000001b3);
+            }
+        }
+        if !regions.is_empty() { self.revision = hash; self.regions = Arc::new(regions); } self
+    }
+    fn region(&self, b: f64) -> usize { self.regions.partition_point(|r| r.0 <= b).saturating_sub(1) }
+    pub fn section_id(&self, b: f64) -> u64 { self.revision.wrapping_add(self.region(b) as u64) }
+    pub fn splice_gain(&self, b: f64) -> f64 {
+        if self.regions.is_empty() { return 1.0; }
+        let i = self.region(b); let r = self.regions[i];
+        let width = self.bpm / 60.0 * 0.003;
+        let left = if i>0 { (b-r.0)/width } else { 1.0 };
+        let right = if i+1<self.regions.len() { (r.0+r.2-b)/width } else { 1.0 };
+        left.min(right).clamp(0.0,1.0)
+    }
+    pub fn cuts(&self) -> impl Iterator<Item=f64> + '_ { self.regions.iter().skip(1).map(|r| r.0) }
+    /// Evaluate within the section containing `at`, also for WSOLA pre-roll outside its edges.
+    #[inline] pub fn region_sec(&self, b: f64, at: f64) -> f64 {
+        let source = self.regions.get(self.region(at)).map(|r| r.1 + b - r.0).unwrap_or(b);
+        self.raw_sec(source)
+    }
+    #[inline] pub fn sec(&self, b: f64) -> f64 { self.region_sec(b, b) }
+    /// Every arranged occurrence of a source marker; no occurrence when the source was deleted.
+    pub fn occurrences(&self, s: f64) -> Vec<f64> {
+        let source = self.raw_beat(s);
+        if self.regions.is_empty() { return vec![source]; }
+        self.regions.iter().filter(|r| source >= r.1 && source < r.1+r.2).map(|r| r.0+source-r.1).collect()
+    }
+    pub fn beat(&self, s: f64) -> f64 { self.occurrences(s).first().copied().unwrap_or_else(|| self.raw_beat(s)) }
     /// Source seconds -> mix beat.
-    pub fn beat(&self, s: f64) -> f64 { self.start + match &self.map { Some(m) => (m.u_of(s) - self.u0) / self.r, None => (s - self.offset) * self.bpm / 60.0 } }
+    fn raw_beat(&self, s: f64) -> f64 { self.start + match &self.map { Some(m) => (m.u_of(s) - self.u0) / self.r, None => (s - self.offset) * self.bpm / 60.0 } }
 }
 
 /// Beatgrid editor operations. Every edit keeps the beats strictly increasing.

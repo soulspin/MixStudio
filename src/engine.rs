@@ -15,7 +15,7 @@ pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub
 impl SnapTrack {
     /// clip gate and fades: 0 outside [vis, end), linear fades in beats
     #[inline] fn edge(&self, b: f64) -> f32 { if b < self.vis || b >= self.end { return 0.0; } let mut g = 1.0;
-        if self.fade_in > 0.0 { g *= ((b - self.vis) / self.fade_in).min(1.0); } if self.fade_out > 0.0 { g *= ((self.end - b) / self.fade_out).min(1.0); } g as f32 }
+        if self.fade_in > 0.0 { g *= ((b - self.vis) / self.fade_in).min(1.0); } if self.fade_out > 0.0 { g *= ((self.end - b) / self.fade_out).min(1.0); } (g * self.grid.splice_gain(b)) as f32 }
 }
 #[allow(dead_code)]
 pub struct Snap { pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset, [StemMode; 4])>, pub decks: [Deck; 4], pub master: f32,
@@ -134,15 +134,15 @@ pub const WH: usize = 512;  // synthesis hop (75% overlap)
 const WTOL: i64 = 256;      // search tolerance (source samples); small so transients stay within ~6 ms of the beat map
 
 /// Per-track WSOLA state (preallocated; no allocation in the audio thread).
-pub struct Wsola { id: (usize, u64, u64, u64), acc: Vec<[f32; 2]>, fifo: Vec<[f32; 2]>, rd: usize, prev: Option<f64>, next_beat: f64, active: bool, win: Vec<f32> }
+pub struct Wsola { id: (usize, u64, u64, u64, u64), acc: Vec<[f32; 2]>, fifo: Vec<[f32; 2]>, rd: usize, prev: Option<f64>, next_beat: f64, active: bool, win: Vec<f32> }
 impl Wsola {
     pub fn new() -> Self { let win = (0..WN).map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / WN as f32).cos()).collect();
-        Wsola { id: (0, 0, 0, 0), acc: vec![[0.0; 2]; WN], fifo: vec![[0.0; 2]; WH], rd: WH, prev: None, next_beat: f64::NAN, active: false, win } }
+        Wsola { id: (0, 0, 0, 0, 0), acc: vec![[0.0; 2]; WN], fifo: vec![[0.0; 2]; WH], rd: WH, prev: None, next_beat: f64::NAN, active: false, win } }
     fn reset(&mut self) { self.acc.iter_mut().for_each(|x| *x = [0.0; 2]); self.rd = WH; self.prev = None; self.active = false; }
     /// Produce one grain at mix beat `gb`; `pos_of` maps beat -> source sample position.
-    fn grain(&mut self, a: &Audio, gb: f64, t: &SnapTrack, rs: f64, sg: Option<&[f32; 4]>) {
-        let comb = combine(sg.copied(), t.mute_gain(t.grid.sec(gb))); let sg = comb.as_ref();
-        let ideal = t.grid.sec(gb) * a.sr as f64; // beat map: stretch ratio follows tempo drift
+    fn grain(&mut self, a: &Audio, gb: f64, at: f64, t: &SnapTrack, rs: f64, sg: Option<&[f32; 4]>) {
+        let comb = combine(sg.copied(), t.mute_gain(t.grid.region_sec(gb, at))); let sg = comb.as_ref();
+        let ideal = t.grid.region_sec(gb, at) * a.sr as f64; // beat map: stretch ratio follows tempo drift
         let get = |p: i64| -> f32 { if p >= 0 && (p as usize) < a.l.len() { a.l[p as usize] + a.r[p as usize] } else { 0.0 } };
         let mut start = ideal;
         if let Some(prev) = self.prev {
@@ -236,16 +236,17 @@ impl Engine {
             let scr = snap.scratch.iter().find(|s| s.0 == t.lane && b1 > s.1 && b0 < s.2);
             if scr.is_none() && t.stretch == 1 && ((rate - 1.0).abs() > 1e-4 || t.grid.dynamic()) && ti < self.ws.len() {
                 let w = &mut self.ws[ti];
-                let id = (Arc::as_ptr(a) as usize, t.start_beat.to_bits(), t.offset.to_bits(), t.bpm.to_bits());
-                if w.id != id || !w.active || (w.next_beat - b0).abs() > bpb * 2.0 {
-                    w.reset(); w.id = id; w.active = true;
-                    // pre-roll so the overlap-add is fully built up at b0
-                    for k in (1..WN / WH).rev() { w.grain(a, b0 - (k * WH) as f64 * bpb, t, srt / self.sr as f64, m0.stem.as_ref()); }
-                    w.next_beat = b0; w.rd = WH;
-                }
                 let rs = srt / self.sr as f64;
                 for i in 0..n {
-                    if w.rd >= WH { let gb = w.next_beat; w.grain(a, gb, t, rs, m0.stem.as_ref()); }
+                    let b = b0 + bpb * i as f64;
+                    let id = (Arc::as_ptr(a) as usize, t.start_beat.to_bits(), t.offset.to_bits(), t.bpm.to_bits(), t.grid.section_id(b));
+                    if w.id != id || !w.active || (w.next_beat-b).abs()>bpb*2.0 {
+                        w.reset(); w.id=id; w.active=true;
+                        // Pre-roll within this source span, including immediately after a splice.
+                        for k in (1..WN/WH).rev() { w.grain(a,b-(k*WH) as f64*bpb,b,t,rs,m0.stem.as_ref()); }
+                        w.next_beat=b; w.rd=WH;
+                    }
+                    if w.rd >= WH { let gb=w.next_beat; w.grain(a,gb,b,t,rs,m0.stem.as_ref()); }
                     let f = w.fifo[w.rd]; w.rd += 1; w.next_beat += bpb;
                     let g = ((m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32)) * (av0 + (av1 - av0) * (i as f32 / n as f32))) * t.edge(b0 + bpb * i as f64);
                     dst[i][0] += f[0] * g; dst[i][1] += f[1] * g;
@@ -391,8 +392,43 @@ impl SnapTrack {
     /// Beat slice: each beat's audio plays at its original speed from the beat start; it is cut at
     /// the next mix beat (faster tempo) or ends early leaving a short gap (slower tempo). 2 ms fades.
     #[inline] fn slice(&self, b: f64, bpm: f64) -> (f64, f32) {
-        let k = (b - self.start_beat).floor(); let bs = self.start_beat + k; let s0 = self.grid.sec(bs); let s1 = self.grid.sec(bs + 1.0);
+        let k = (b - self.start_beat).floor(); let bs = self.start_beat + k; let s0 = self.grid.region_sec(bs,b); let s1 = self.grid.region_sec(bs + 1.0,b);
         let el = (b - bs) * 60.0 / bpm; let sec = s0 + el; let left = (1.0 - (b - bs)) * 60.0 / bpm;
         let g = (el / 0.002).min((s1 - sec) / 0.002).min(left / 0.002).clamp(0.0, 1.0) as f32; (sec, g)
+    }
+}
+
+#[cfg(test)]
+mod section_audio_tests {
+    use super::*;
+    #[test]
+    fn beat_slice_does_not_silence_the_beat_before_a_repeat() {
+        let mut m=Mix::default();
+        let t: crate::model::Track=serde_json::from_str(r#"{"path":"test","title":"Test","artist":"Test","bpm":120.0,"offset":0.0,"key":"8A","duration":32.0,"start_beat":0.0,"lane":0,"trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]}}"#).unwrap();
+        m.tracks.push(t); let c=m.tracks[0].copy_section(8.0,16.0).unwrap(); m.insert_section(0,16.0,&c).unwrap();
+        let snap=Snap::build(&m,&[Some(Arc::new(Audio {sr:8000,l:vec![0.25;8000*32],r:vec![0.25;8000*32]}))]);
+        let (sec,gain)=snap.tracks[0].slice(15.5,120.0); assert!((sec-7.75).abs()<1e-8); assert!(gain>0.99);
+        let c=m.tracks[0].copy_section(8.25,10.75).unwrap(); m.insert_section(0,20.25,&c).unwrap();
+        let snap=Snap::build(&m,&[Some(Arc::new(Audio {sr:8000,l:vec![0.25;8000*32],r:vec![0.25;8000*32]}))]);
+        let (sec,gain)=snap.tracks[0].slice(20.5,120.0); assert!((sec-4.25).abs()<1e-8); assert!(gain>0.99);
+    }
+    #[test]
+    fn section_splices_have_short_fades_and_stable_render_timing() {
+        let t=serde_json::from_str(r#"{"path":"test","title":"Test","artist":"Test","bpm":120.0,"offset":0.0,"key":"8A","duration":8.0,"start_beat":0.0,"lane":0,"trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]}}"#).unwrap();
+        let mut mix=Mix::default(); mix.bpm=120.0; mix.tracks.push(t);
+        mix.delete_section(0,4.0,8.0).unwrap();
+        let sr=16000;
+        let signal: Vec<_>=(0..sr*8).map(|i| { let f=if i<sr*4 { 220.0 } else { 440.0 }; 0.25*(2.0*PI*f*i as f32/sr as f32).sin() }).collect();
+        let audio=Arc::new(Audio { sr, l:signal.clone(), r:signal });
+        for stretch in [1,2,3] {
+            mix.tracks[0].stretch=stretch; mix.bpm=126.0;
+            let snap=Arc::new(Snap::build(&mix,&[Some(audio.clone())]));
+            assert!(snap.tracks[0].edge(4.0)<0.001,"splice must fade at its boundary");
+            assert!(snap.tracks[0].edge(4.1)>0.99,"fade must stay short");
+            let (l,r)=render_offline(snap,sr,0.0,12.0);
+            assert_eq!(l.len(),r.len()); assert!(l.iter().all(|v| v.is_finite() && v.abs()<=1.0));
+            let (at, before)=((4.0*60.0/126.0*sr as f64) as usize,(3.8*60.0/126.0*sr as f64) as usize);
+            assert!(l[before..at+160].windows(2).all(|w| (w[1]-w[0]).abs()<0.3),"audible discontinuity, stretch {stretch}");
+        }
     }
 }
