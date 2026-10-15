@@ -11,7 +11,7 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64 }
+pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub mutes: Vec<(u8, f64, f64)> }
 impl SnapTrack {
     /// clip gate and fades: 0 outside [vis, end), linear fades in beats
     #[inline] fn edge(&self, b: f64) -> f32 { if b < self.vis || b >= self.end { return 0.0; } let mut g = 1.0;
@@ -26,7 +26,7 @@ impl Snap {
         for (i, t) in mix.tracks.iter().enumerate() {
             if let Some(Some(a)) = audio.get(i) {
                 map[i] = tracks.len();
-                tracks.push(SnapTrack { stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.bpm, vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out });
+                tracks.push(SnapTrack { stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.bpm, vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect() });
             }
         }
         let trans = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX)
@@ -134,6 +134,7 @@ impl Wsola {
     fn reset(&mut self) { self.acc.iter_mut().for_each(|x| *x = [0.0; 2]); self.rd = WH; self.prev = None; self.active = false; }
     /// Produce one grain at mix beat `gb`; `pos_of` maps beat -> source sample position.
     fn grain(&mut self, a: &Audio, gb: f64, t: &SnapTrack, rs: f64, sg: Option<&[f32; 4]>) {
+        let comb = combine(sg.copied(), t.mute_gain(t.grid.sec(gb))); let sg = comb.as_ref();
         let ideal = t.grid.sec(gb) * a.sr as f64; // beat map: stretch ratio follows tempo drift
         let get = |p: i64| -> f32 { if p >= 0 && (p as usize) < a.l.len() { a.l[p as usize] + a.r[p as usize] } else { 0.0 } };
         let mut start = ideal;
@@ -249,7 +250,7 @@ impl Engine {
                 let g = (m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32)) * t.edge(b);
                 if g <= 0.0 { continue; }
                 let k = pos as usize; let f = (pos - k as f64) as f32;
-                let sg = m0.stem; let st = t.stems.as_deref();
+                let sg = combine(m0.stem, t.mute_gain(sec)); let st = t.stems.as_deref();
                 let herm = |ch: usize| { let v = |i: usize| match (sg.as_ref(), st) { (Some(g), Some(st)) => st.mixed(a, ch, i, g), _ => if ch == 0 { a.l[i] } else { a.r[i] } };
                     let (y0, y1, y2, y3) = (v(k - 1), v(k), v(k + 1), v(k + 2));
                     let c1 = 0.5 * (y2 - y0); let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3; let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
@@ -351,4 +352,17 @@ pub fn stem_gain(m: StemMode, x: f32, out: bool) -> f32 {
         StemMode::Crossfade => if out { (x * PI / 2.0).cos() } else { (x * PI / 2.0).sin() },
         StemMode::Swap => { let s = smooth(((x - 0.5) / 0.03 + 0.5) as f64); if out { 1.0 - s } else { s } }
     }
+}
+impl SnapTrack {
+    /// stem gains from muted ranges at source second `sec` (5 ms ramps); None when nothing is muted
+    #[inline] pub fn mute_gain(&self, sec: f64) -> Option<[f32; 4]> {
+        if self.mutes.is_empty() || self.stems.is_none() { return None; }
+        let mut g = [1.0f32; 4]; let mut any = false;
+        for &(k, a, b) in &self.mutes { if sec > a - 0.005 && sec < b + 0.005 {
+            let f = ((sec - a + 0.005) / 0.01).min((b + 0.005 - sec) / 0.01).clamp(0.0, 1.0) as f32; g[k as usize & 3] *= 1.0 - f; any = true; } }
+        if any { Some(g) } else { None }
+    }
+}
+#[inline] fn combine(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> Option<[f32; 4]> {
+    match (a, b) { (Some(x), Some(y)) => Some([x[0] * y[0], x[1] * y[1], x[2] * y[2], x[3] * y[3]]), (x, None) => x, (None, y) => y }
 }

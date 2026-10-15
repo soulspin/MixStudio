@@ -44,7 +44,7 @@ struct BmDrag { ti: usize, k: i64, i: usize, pivot: usize, span: f64, lastx: f32
 #[derive(Clone, Copy)]
 enum TlDrag { Edge { ti: usize, left: bool }, Fade { ti: usize, left: bool }, Trans { ti: usize, grab: f64, orig: f64 } }
 
-enum Msg { Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>) }
+enum Msg { Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>), Clip(Track, Audio, Analysis) }
 
 struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::AtomicU32> }
 
@@ -54,7 +54,7 @@ pub struct App {
     sel: Option<usize>, sel_in: Option<usize>, undo: Vec<String>, redo: Vec<String>,
     tx: crossbeam_channel::Sender<Msg>, rx: crossbeam_channel::Receiver<Msg>, loading: usize,
     drag: Option<(usize, f64, f64)>, loop_on: bool, bars: u32, snapping: Snapping, lock: bool,
-    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
+    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, stem_sel: Option<(usize, usize, f64, f64)>, stem_drag: bool, dl_offer: Option<usize>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
     stems: HashMap<String, Arc<crate::stems::Stems>>, stem_prog: HashMap<String, Arc<std::sync::atomic::AtomicU32>>, stem_err: HashMap<String, String>,
     stem_tx: crossbeam_channel::Sender<StemJob>, dl_prog: Arc<std::sync::atomic::AtomicU32>, ep: Arc<Mutex<String>>,
     ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
@@ -135,7 +135,7 @@ impl App {
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let mut a = App { mix: Mix::default(), store: HashMap::new(), out: crate::audio::start(), ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
-            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
+            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib: { let c = cc.egui_ctx.clone(); crate::library::Library::new(crate::library::config_dir(), crate::library::cache_dir(), Arc::new(move || c.request_repaint())) },
             lib_q: String::new(), lib_path: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
             lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_view_key: None, timeline_rect: Rect::NOTHING };
@@ -169,7 +169,7 @@ impl App {
     fn insert(&mut self, p: PathBuf, au: Audio, an: Analysis, sample: Option<(usize, f64)>) {
         let key = p.display().to_string();
         let t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0 };
+            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![] };
         self.store.insert(key, (Arc::new(au), Arc::new(an)));
         match sample { Some((lane, at)) => { let mut t = t; t.lane = lane; t.start_beat = (at / 4.0).round() * 4.0; self.mix.tracks.push(t); }
             None => self.mix.add_track(t) }
@@ -296,6 +296,26 @@ impl App {
         match self.mix.split(ti, b) { Some(n) => { self.sel = Some(n); self.status = format!("Split at bar {:.0} beat {:.0}", (b / 4.0).floor() + 1.0, b.rem_euclid(4.0).floor() + 1.0); }
             None => { self.undo.pop(); self.status = "Too close to the clip edge to split".into(); } }
     }
+    /// Render the selected stem lane range of track `ti` into a WAV and put it on a sample lane, in sync.
+    fn copy_stem_clip(&mut self, ti: usize, lane: usize, a: f64, b: f64) {
+        let t = self.mix.tracks[ti].clone();
+        let (Some(st), Some((au, _))) = (self.stems.get(&t.path).cloned(), self.store.get(&t.path).cloned()) else { self.status = "Separate the stems first".into(); return };
+        let ks = crate::model::lane_stems(t.stem_view, lane); let mut g = [0.0f32; 4]; for k in &ks { g[*k as usize] = 1.0; }
+        let (sa, sb) = (t.sec_at(a), t.sec_at(b)); let name = crate::model::lane_name(t.stem_view, lane);
+        let free = if self.mix.tracks.iter().any(|x| x.lane == 2 && x.vis_start(0.0) < b && x.end(0.0) > a) { 3 } else { 2 };
+        let tx = self.tx.clone(); self.status = format!("Rendering {name} clip…");
+        std::thread::spawn(move || {
+            let clip = crate::stems::render_clip(&au, &st, &g, sa, sb);
+            let dir = std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".cache/mixstudio/clips"); let _ = std::fs::create_dir_all(&dir);
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+            let p = dir.join(format!("{}-{}-{stamp}.wav", t.title.chars().filter(|c| c.is_alphanumeric()).take(24).collect::<String>(), name.to_lowercase()));
+            if let Err(e) = engine::write_wav(&p, &clip.l, &clip.r, clip.sr) { let _ = tx.send(Msg::Status(format!("Could not write the clip: {e}"))); return; }
+            let nt = t.clip_track(sa, sb, p.display().to_string(), format!("{} ({name})", t.title), free);
+            let an = Analysis { bpm: nt.bpm, offset: nt.offset, key: nt.key.clone(), duration: nt.duration, peaks: analysis::peaks(&clip), peak_sr: clip.sr, sections: vec![],
+                title: nt.title.clone(), artist: nt.artist.clone(), version: 0, beats: nt.map.as_ref().map(|m| m.beats.clone()).unwrap_or_default() };
+            let _ = tx.send(Msg::Clip(nt, clip, an));
+        });
+    }
     fn snap_beat(&self, b: f64) -> f64 { match self.snapping { Snapping::Off => b, Snapping::Free => b.round(), Snapping::Half => (b / 2.0).round() * 2.0, Snapping::Full => (b / 4.0).round() * 4.0 } }
 }
 
@@ -311,6 +331,7 @@ impl eframe::App for App {
                 Err(e) => self.status = format!("Could not read {}: {e}", p.display()) } }
             Msg::Stems(p, r) => { self.stem_prog.remove(&p); match r { Ok(st) => { self.stems.insert(p.clone(), st); self.stem_err.remove(&p); self.status = "Stems ready".into(); }
                 Err(e) => { self.status = format!("Stem separation failed: {e}"); self.stem_err.insert(p, e); } } }
+            Msg::Clip(t, au, an) => { self.snapshot(); let p = t.path.clone(); self.status = format!("{} copied to Sample {}", t.title, t.lane - 1); self.store.insert(p, (Arc::new(au), Arc::new(an))); self.mix.tracks.push(t); self.sel = Some(self.mix.tracks.len() - 1); }
             Msg::LibFolders(v) => { self.add_lib_folders(v); }
             Msg::Status(s) => self.status = s, Msg::Opened(p) => self.open(p), Msg::SaveTo(p) => self.save(p), Msg::ExportTo(p) => self.export(p),
         } }
@@ -396,6 +417,7 @@ impl App {
                     ui.menu_button("⚙", |ui| {
                         ui.label(egui::RichText::new("Settings").strong());
                         ui.checkbox(&mut self.mix.auto_stems, "Separate stems automatically for new tracks");
+                        ui.horizontal(|ui| { ui.label("Transition stem colours:"); for (v, n) in [(0u8, "Normal"), (1, "Dimmed"), (2, "Inverted")] { ui.radio_value(&mut self.mix.trans_stem_style, v, n); } });
                         if ui.button("Separate stems for all tracks").clicked() { for i in 0..self.mix.tracks.len() { self.request_stems(i); } ui.close_menu(); }
                         ui.separator();
                         let ep = self.ep.lock().unwrap().clone();
@@ -620,6 +642,7 @@ impl App {
         let trans = self.mix.transitions();
         let (d1, d2) = (rows[0].1, rows[1].1);
         let mut clicked_clip: Option<(usize, f64, u8)> = None;
+        let mut stem_act: Option<(usize, u8, usize, f64)> = None;
         let mut tl_act: Option<TlDrag> = None; let mut tl_hover: Option<(usize, f64)> = None;
         let mut bm_mode = self.bm_mode; let mut bm_act: Option<(usize, i64, u8)> = None; let mut bm_hover: Option<egui::Pos2> = None;
         for (ti, t) in self.mix.tracks.iter().enumerate() {
@@ -652,6 +675,7 @@ impl App {
             let overlap: Vec<(f64, f64, bool, usize)> = trans.iter().filter(|x| x.0 == ti || x.1 == ti).map(|x| (x.2, x.3, x.0 == ti, x.1)).collect();
             let partner = |o: &(f64, f64, bool, usize)| -> usize { if o.2 { o.3 } else { trans.iter().find(|x| x.1 == ti).map(|x| x.0).unwrap_or(ti) } };
             let my_stems = self.stems.get(&t.path);
+            let tstyle = self.mix.trans_stem_style; let tsc = |k: usize| { let c = STEM[k]; match tstyle { 1 => C::from_rgb(c.r() / 2 + 40, c.g() / 2 + 40, c.b() / 2 + 40), 2 => C::from_rgb(255 - c.r(), 255 - c.g(), 255 - c.b()), _ => c } };
             let grid = t.grid();
             let mut px = vis.left().floor();
             while px < vis.right() {
@@ -668,9 +692,20 @@ impl App {
                         let prog = ((bb0 - o.0) / (o.1 - o.0)) as f32;
                         let mut sm = [0u8; 4]; for c in c0..c1.min(stm.peaks.len() as i64) { let v = stm.peaks[c as usize]; for k in 0..4 { sm[k] = sm[k].max(v[k]); } }
                         for k in 0..4 { let ly = wave.top() + lh * (k as f32 + 0.5); let g = engine::stem_gain(modes[k], prog, o.2);
-                            tp.line_segment([pos2(px + 0.5, ly - lh * 0.47), pos2(px + 0.5, ly + lh * 0.47)], Stroke::new(1.0_f32, STEM[k].gamma_multiply(0.08 + 0.12 * g)));
+                            tp.line_segment([pos2(px + 0.5, ly - lh * 0.47), pos2(px + 0.5, ly + lh * 0.47)], Stroke::new(1.0_f32, tsc(k).gamma_multiply(0.08 + 0.12 * g)));
                             let a = (f(sm[k]) * lh * 0.47).max(0.5);
-                            tp.line_segment([pos2(px + 0.5, ly - a), pos2(px + 0.5, ly + a)], Stroke::new(1.0_f32, STEM[k].gamma_multiply(0.3 + 0.7 * g))); }
+                            tp.line_segment([pos2(px + 0.5, ly - a), pos2(px + 0.5, ly + a)], Stroke::new(1.0_f32, tsc(k).gamma_multiply(0.3 + 0.7 * g))); }
+                    } else if let (true, Some(stm)) = (t.stem_view > 0, my_stems) {
+                        let nl = if t.stem_view == 1 { 2 } else { 4 }; let lh = wave.height() / nl as f32; let sec = grid.sec(bb0);
+                        let mut sm = [0u8; 4]; for c in c0..c1.min(stm.peaks.len() as i64) { let v = stm.peaks[c as usize]; for k in 0..4 { sm[k] = sm[k].max(v[k]); } }
+                        for l in 0..nl {
+                            let ks = crate::model::lane_stems(t.stem_view, l); let pk = ks.iter().map(|&k| f(sm[k as usize])).fold(0.0f32, f32::max);
+                            let muted = ks.iter().all(|&k| t.muted(k, sec));
+                            let col = if t.stem_view == 1 { if l == 0 { C::from_rgb(70, 170, 150) } else { STEM[3] } } else { STEM[l] };
+                            let ly = wave.top() + lh * (l as f32 + 0.5); let a = (pk * lh * 0.47).max(0.5);
+                            if muted { tp.line_segment([pos2(px + 0.5, ly - lh * 0.5), pos2(px + 0.5, ly + lh * 0.5)], Stroke::new(1.0_f32, if (px as i32).rem_euclid(6) < 3 { C::from_rgb(40, 40, 46) } else { C::from_rgb(28, 28, 32) })); }
+                            tp.line_segment([pos2(px + 0.5, ly - a), pos2(px + 0.5, ly + a)], Stroke::new(1.0_f32, if muted { C::from_rgba_unmultiplied(150, 150, 150, 60) } else { col }));
+                        }
                     } else if sample {
                         let a = f(m[0]).max(f(m[1])) * (wave.height() - 2.0);
                         tp.line_segment([pos2(px + 0.5, wave.bottom() - a), pos2(px + 0.5, wave.bottom())], Stroke::new(1.0_f32, if t.lane == 2 { C::from_rgb(30, 50, 150) } else { C::from_rgb(150, 180, 255) }));
@@ -728,13 +763,48 @@ impl App {
             let resp = ui.interact(vis, ui.id().with(("clip", ti)), Sense::click_and_drag());
             if let Some(pp) = resp.interact_pointer_pos() {
                 let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
-                if resp.drag_started() && alt && !sample { clicked_clip = Some((ti, xb(pp.x), 2u8)); }
+                if resp.drag_started() && ui.input(|i| i.modifiers.command) && t.stem_view > 0 && !sample {}
+                else if resp.drag_started() && alt && !sample { clicked_clip = Some((ti, xb(pp.x), 2u8)); }
                 else if resp.drag_started() && alt && sample && !self.lock { clicked_clip = Some((ti, xb(pp.x), 4)); }
                 else if resp.drag_started() && !self.lock { clicked_clip = Some((ti, xb(pp.x), 1)); }
                 else if resp.clicked() && shift && !sample { clicked_clip = Some((ti, xb(pp.x), 3)); }
                 else if resp.clicked() { clicked_clip = Some((ti, xb(pp.x), 0)); }
             }
             if resp.hovered() { if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) { tl_hover = Some((ti, xb(hp.x))); } }
+            if !sample {
+                let views = [(0u8, "1"), (1, "2"), (2, "4")];
+                for (n, (v, lab)) in views.iter().enumerate() {
+                    let r = Rect::from_min_size(pos2(cr.right() - 4.0 - 16.0 * (3 - n) as f32, tr.top() + 1.5), vec2(14.0, title_h - 3.0));
+                    if r.left() < vis.left() + 60.0 || r.right() > vis.right() { continue; }
+                    let on = t.stem_view == *v;
+                    tp.rect_filled(r, 2.0, if on { ACCENT } else { C::from_rgba_unmultiplied(0, 0, 0, 90) });
+                    tp.text(r.center(), Align2::CENTER_CENTER, *lab, FontId::proportional(8.5), if on { C::BLACK } else { TXT });
+                    let rr = ui.interact(r, ui.id().with(("sv", ti, n)), Sense::click());
+                    if rr.clicked() { stem_act = Some((ti, 10 + *v, 0, 0.0)); }
+                    rr.on_hover_text(match v { 0 => "Show the full track", 1 => "Show 2 stems: instrumental / vocals", _ => "Show 4 stems: drums / bass / melody / vocals" });
+                }
+            }
+            if !sample && t.stem_view > 0 {
+                let nl = if t.stem_view == 1 { 2 } else { 4 }; let lh = wave.height() / nl as f32;
+                if my_stems.is_some() { for l in 0..nl { tp.text(pos2(vis.left() + 3.0, wave.top() + lh * l as f32 + 2.0), Align2::LEFT_TOP, crate::model::lane_name(t.stem_view, l), FontId::proportional(8.5), C::from_rgba_unmultiplied(255, 255, 255, 150)); } }
+                else { tp.text(pos2(vis.left() + 4.0, wave.top() + 16.0), Align2::LEFT_TOP, if self.stem_prog.contains_key(&t.path) { "Separating stems…" } else { "Stems not separated yet: click 2 or 4 again, or ⚙ → Separate stems" }, FontId::proportional(10.0), ACCENT); }
+                if let Some((sti, sl, sa, sb)) = self.stem_sel { if sti == ti {
+                    let r = Rect::from_min_max(pos2(bx(sa.min(sb)), wave.top() + lh * sl as f32), pos2(bx(sa.max(sb)), wave.top() + lh * (sl + 1) as f32)).intersect(vis);
+                    tp.rect_filled(r, 0.0, C::from_rgba_unmultiplied(255, 230, 0, 40)); tp.rect_stroke(r, 0.0, Stroke::new(1.0_f32, ACCENT)); } }
+                if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) { if resp.hovered() && ui.input(|i| i.modifiers.command) { ui.ctx().set_cursor_icon(egui::CursorIcon::Text); let _ = hp; } }
+                if resp.drag_started() && ui.input(|i| i.modifiers.command) { if let Some(pp) = resp.interact_pointer_pos() {
+                    let l = (((pp.y - wave.top()) / lh).floor().max(0.0) as usize).min(nl - 1); stem_act = Some((ti, 20, l, xb(pp.x))); } }
+                let has_sel = self.stem_sel.is_some_and(|s| s.0 == ti);
+                resp.context_menu(|ui| {
+                    if has_sel {
+                        if ui.button("Mute selection").clicked() { stem_act = Some((ti, 0, 0, 0.0)); ui.close_menu(); }
+                        if ui.button("Unmute selection").clicked() { stem_act = Some((ti, 1, 0, 0.0)); ui.close_menu(); }
+                        if ui.button("Copy to sample lane").clicked() { stem_act = Some((ti, 2, 0, 0.0)); ui.close_menu(); }
+                        if ui.button("Clear selection").clicked() { stem_act = Some((ti, 3, 0, 0.0)); ui.close_menu(); }
+                    } else { ui.label(egui::RichText::new("Ctrl+drag on a stem lane to select a range").color(DIM)); }
+                    if ui.button("Unmute all stems on this track").clicked() { stem_act = Some((ti, 4, 0, 0.0)); ui.close_menu(); }
+                });
+            }
             if !self.lock {
                 for left in [true, false] {
                     let x = if left { cr.left() } else { cr.right() };
@@ -871,6 +941,36 @@ impl App {
             else { self.grid_drag = None; }
         }
         self.tl_hover = tl_hover;
+        if let Some((ti, what, lane, b)) = stem_act { if ti < self.mix.tracks.len() {
+            let sel = self.stem_sel.filter(|s| s.0 == ti);
+            match what {
+                10..=12 => { let v = what - 10; self.snapshot(); self.mix.tracks[ti].stem_view = v; self.stem_sel = None;
+                    let p = self.mix.tracks[ti].path.clone();
+                    if v > 0 && !self.stems.contains_key(&p) && !self.stem_prog.contains_key(&p) {
+                        if crate::stems::model_path().exists() { self.request_stems(ti); self.status = "Separating stems…".into(); } else { self.dl_offer = Some(ti); } } }
+                20 => { self.stem_sel = Some((ti, lane, b, b)); self.stem_drag = true; }
+                0 | 1 => if let Some((_, l, a, bb)) = sel { self.snapshot(); let t = &mut self.mix.tracks[ti];
+                    let (sa, sb) = (t.sec_at(a.min(bb)), t.sec_at(a.max(bb))); let st = crate::model::lane_stems(t.stem_view, l);
+                    t.set_mute(&st, sa, sb, what == 0); self.status = format!("{} {} from {:.2} s to {:.2} s", if what == 0 { "Muted" } else { "Unmuted" }, crate::model::lane_name(t.stem_view, l), sa, sb); },
+                2 => if let Some((_, l, a, bb)) = sel { self.copy_stem_clip(ti, l, a.min(bb), a.max(bb)); },
+                3 => self.stem_sel = None,
+                _ => { self.snapshot(); self.mix.tracks[ti].stem_mutes.clear(); self.status = "All stems unmuted".into(); }
+            }
+        } }
+        if self.stem_drag {
+            if ui.input(|i| i.pointer.primary_down()) { if let (Some(pp), Some(s)) = (ui.input(|i| i.pointer.hover_pos()), self.stem_sel.as_mut()) { s.3 = xb(pp.x); } }
+            else { self.stem_drag = false; if self.stem_sel.is_some_and(|s| (s.3 - s.2).abs() < 0.05) { self.stem_sel = None; } }
+        }
+        if let Some(ti) = self.dl_offer {
+            let mut open = true; let mut go = false; let mut close = false;
+            egui::Window::new("Stem model needed").collapsible(false).resizable(false).open(&mut open).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(ui.ctx(), |ui| {
+                ui.label(format!("The stem view needs AI stem separation. MixStudio uses the HT-Demucs model (MIT license, {} MB).", crate::stems::MODEL_SIZE / 1_000_000));
+                ui.label(egui::RichText::new("It is downloaded once to ~/.local/share/mixstudio/models and verified by SHA-256.").color(DIM));
+                ui.horizontal(|ui| { if ui.button("Download and separate").clicked() { go = true; } if ui.button("Cancel").clicked() { close = true; } });
+            });
+            if go { self.dl_offer = None; if ti < self.mix.tracks.len() { self.request_stems(ti); self.status = "Downloading the stem model, then separating…".into(); } }
+            else if close || !open { self.dl_offer = None; }
+        }
         let mut snap_line: Option<f64> = None;
         if let Some(a) = tl_act { self.snapshot(); let (TlDrag::Edge { ti, .. } | TlDrag::Fade { ti, .. } | TlDrag::Trans { ti, .. }) = a; self.sel = Some(ti); self.tl_drag = Some(a); }
         if let Some(d) = self.tl_drag.clone() {

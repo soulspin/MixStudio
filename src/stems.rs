@@ -172,3 +172,9 @@ pub fn get_or_separate(key: &str, a: &Audio, dl: &AtomicU32, prog: &AtomicU32) -
     let _ = save(key, &s);
     Ok(Arc::new(s))
 }
+
+/// Render the weighted stem sum `g` of source seconds `a0..a1` as a new clip.
+pub fn render_clip(a: &Audio, s: &Stems, g: &[f32; 4], a0: f64, a1: f64) -> Audio {
+    let n = a.l.len(); let i0 = ((a0.max(0.0) * a.sr as f64) as usize).min(n); let i1 = ((a1.max(0.0) * a.sr as f64) as usize).min(n).max(i0);
+    Audio { sr: a.sr, l: (i0..i1).map(|i| s.mixed(a, 0, i, g)).collect(), r: (i0..i1).map(|i| s.mixed(a, 1, i, g)).collect() }
+}

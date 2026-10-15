@@ -36,6 +36,10 @@ pub struct Track {
     #[serde(default)] pub trim_in: f64, #[serde(default)] pub trim_out: f64,
     /// fade-in / fade-out length in beats
     #[serde(default)] pub fade_in: f64, #[serde(default)] pub fade_out: f64,
+    /// stem view on the timeline: 0 = full track, 1 = instrumental / vocals, 2 = four stems
+    #[serde(default)] pub stem_view: u8,
+    /// muted stem ranges
+    #[serde(default)] pub stem_mutes: Vec<StemMute>,
 }
 impl Track {
     pub fn grid(&self) -> Grid { Grid::new(self.map.clone(), self.bpm, self.offset, self.start_beat) }
@@ -77,11 +81,13 @@ impl Default for Deck { fn default() -> Self { Deck { vol: 0.85, hi: 0.0, mid: 0
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Mix { pub name: String, pub bpm: f64, pub tracks: Vec<Track>, pub decks: [Deck; 4], #[serde(default = "one")] pub master: f32,
-    #[serde(default = "yes")] pub key_lock: bool, #[serde(default)] pub metronome: bool, #[serde(default = "half")] pub metro_vol: f32, #[serde(default)] pub auto_stems: bool }
+    #[serde(default = "yes")] pub key_lock: bool, #[serde(default)] pub metronome: bool, #[serde(default = "half")] pub metro_vol: f32, #[serde(default)] pub auto_stems: bool,
+    /// stem colours inside transitions: 0 normal, 1 dimmed, 2 inverted
+    #[serde(default)] pub trans_stem_style: u8 }
 fn yes() -> bool { true }
 fn half() -> f32 { 0.5 }
 fn one() -> f32 { 1.0 }
-impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false } } }
+impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0 } } }
 
 impl Mix {
     /// indices of main-deck tracks sorted by start
@@ -167,5 +173,40 @@ impl Mix {
         self.tracks[ti].lane = lane.min(3);
         if lane < 2 { self.tracks[ti].trans = Default::default(); }
         let o = self.main_order(); for (k, &i) in o.iter().enumerate() { self.tracks[i].lane = k % 2; }
+    }
+}
+
+/// A muted range (source seconds) on one stem: 0 drums, 1 bass, 2 melody, 3 vocals.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub struct StemMute { pub stem: u8, pub a: f64, pub b: f64 }
+
+/// Stems shown in each lane of a 2- or 4-lane stem view.
+pub fn lane_stems(view: u8, lane: usize) -> Vec<u8> { if view == 1 { if lane == 0 { vec![0, 1, 2] } else { vec![3] } } else { vec![lane.min(3) as u8] } }
+pub fn lane_name(view: u8, lane: usize) -> &'static str { if view == 1 { ["Instrumental", "Vocals"][lane.min(1)] } else { ["Drums", "Bass", "Melody", "Vocals"][lane.min(3)] } }
+
+impl Track {
+    /// Mute (or unmute) `stems` between source seconds `a` and `b`; ranges merge and split as needed.
+    pub fn set_mute(&mut self, stems: &[u8], a: f64, b: f64, mute: bool) {
+        let (a, b) = (a.min(b), a.max(b));
+        for &k in stems {
+            let (mut na, mut nb) = (a, b); let mut out = vec![];
+            for m in self.stem_mutes.drain(..) {
+                if m.stem != k || m.b < a || m.a > b { out.push(m); continue; }
+                if mute { na = na.min(m.a); nb = nb.max(m.b); }
+                else { if m.a < a { out.push(StemMute { stem: k, a: m.a, b: a }); } if m.b > b { out.push(StemMute { stem: k, a: b, b: m.b }); } }
+            }
+            if mute { out.push(StemMute { stem: k, a: na, b: nb }); }
+            self.stem_mutes = out;
+        }
+    }
+    pub fn muted(&self, stem: u8, sec: f64) -> bool { self.stem_mutes.iter().any(|m| m.stem == stem && sec >= m.a && sec < m.b) }
+    /// A sample-lane clip of this track's audio between source seconds `a`..`b`, rendered to `path`,
+    /// placed so it plays in sync with the original.
+    pub fn clip_track(&self, a: f64, b: f64, path: String, title: String, lane: usize) -> Track {
+        let mut t = self.clone();
+        t.path = path; t.title = title; t.lane = lane; t.duration = b - a; t.offset -= a;
+        t.trim_in = 0.0; t.trim_out = 0.0; t.fade_in = 0.0; t.fade_out = 0.0; t.stem_mutes.clear(); t.stem_view = 0; t.locked = false; t.trans = Default::default();
+        t.map = self.map.as_ref().map(|m| { let mut m = (**m).clone(); m.shift(-a); Arc::new(m) });
+        t.normalize_grid(); t
     }
 }
