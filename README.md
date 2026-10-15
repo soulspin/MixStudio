@@ -2,11 +2,11 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Alpha 0.3](https://img.shields.io/badge/status-alpha%200.3.1-e8e000?style=flat-square&labelColor=24262b)
+![Status: Alpha 0.3](https://img.shields.io/badge/status-alpha%200.4-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Alpha 0.3:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Alpha 0.4:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio timeline with a transition](docs/screenshots/transition.png)
 
@@ -16,7 +16,7 @@ Live DJ software is built for performing: two decks, a crossfader, and one shot 
 
 It's native, fast, and doesn't need an account. No sign-up, no license keys, no cloud. It's your music on your machine.
 
-## Features (Alpha 0.3)
+## Features (Alpha 0.4)
 
 - **Timeline decks:** songs alternate on Deck 1 and Deck 2 as coloured clips with 3-band waveforms (low/mid/high), beat and bar lines, bar numbers and rough section tags (DOWN / CHORUS / UP). There's an overview strip, a time ruler, zoom (Ctrl+scroll), scrolling, a playhead, click-to-seek, and clip dragging with snapping (off / beat / half bar / bar).
 - **Automatic analysis:** global BPM (tempogram + full-track comb + beat regression, about 0.02 BPM), musical key (chromagram plus Krumhansl profiles) shown as **Camelot** codes, and bar 1. Results and waveforms are cached and re-analysed automatically when the analysis improves.
@@ -27,7 +27,8 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 - **Per-stem transitions:** when both tracks have stems, the overlap shows four real stem lanes, and the Drums / Bass / Melody / Vocals choices (**None / Swap / Crossfade / Full**) drive the audio in playback and export. Swap the bass at the drop, keep the incoming vocals out, or let the drums ride. Without stems, the preset's volume curve is used.
 - **Transitions:** overlaps become transition regions with presets that act on the audio: **Crossfade**, **Bass swap**, **High to low**, **Low to high** (filter sweeps) and **Echo out**. You can set the overlap length (4/8/16/32 bars), and the volume curves are drawn on the clips.
 - **Mixer:** 3-band EQ (High/Mid/Low), filter (LP ↔ HP), volume, solo and mute per deck, plus level meters and a master meter.
-- **Harmonize:** reorders the playlist by Camelot compatibility and tempo, then lays the mix out again.
+- **Auto-order:** one click reorders the playlist for smooth transitions. Every pair of tracks is scored on Camelot key (same key, ±1, relative A/B, with energy-boost moves +2 / +7 weighted lower) and tempo (including half/double time). An optional energy curve (build up, peak in the middle, or flat) is also scored. A greedy start plus simulated annealing and 2-opt finds the order, taking about 20 ms for 100 tracks. Choose *Balanced*, *Harmonic first* or *Tempo first* in the ⏷ menu next to the button. Keep the first track in place, or lock any track with 🔒 in the playlist. The layout and beat-matched transitions are rebuilt, and Undo restores the old order.
+- **Compatibility indicators:** every transition shows a green / yellow / red badge with the key move and tempo change (e.g. `8A→9A ±1 · +1.6%`), on the timeline and in the playlist's *Next transition* column.
 - **Sample lanes:** drop extra audio on Sample 1/2. It's synced to the mix tempo.
 - **Metronome:** a click on mix beats, accented on the downbeat, with its own volume. It's never exported.
 - **Undo/redo**, **save/load mixes as JSON**, **WAV export** of the whole mix, and **drag and drop** of audio files (mp3, wav, flac, ogg, m4a).
@@ -40,12 +41,15 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 
 ![Per-stem transition](docs/screenshots/stems.png)
 
+![Auto-order and compatibility badges](docs/screenshots/autoorder.png)
+
 ## Roadmap
 
 - Per-stem automation curves and stem solo/mute on clips
 - Higher-quality stem models (HT-Demucs fine-tuned bag, MDX-Net)
 - Rubber Band-quality time-stretching
-- Automix that picks transition points (phrases, energy)
+- Automix that picks transition points (phrases, energy) and transition presets
+- Auto-order across a whole library (build a set from a crate), with BPM-range and must-include constraints
 - Tempo automation in the tempo lane
 - Editing single beats in the beat map (warp markers) and non-4/4 meters
 - MIDI controller support
