@@ -389,8 +389,8 @@ fn automix_tests() -> bool {
     let v: Vec<(f64, &str)> = ks.iter().map(|(a, b)| key_score(a, b)).collect();
     chk("key scoring", v[0].0 > v[1].0 && (v[1].0 - v[2].0).abs() < 1e-9 && v[1].0 > v[3].0 && v[3].0 > v[4].0 && v[4].0 > v[5].0 && v[5].0 > v[6].0 && v[6].0 > v[7].0 && v[5].1 == "energy +2" && v[6].1 == "energy +7",
         format!("{}", ks.iter().zip(&v).map(|((a, b), s)| format!("{a}→{b} {:.2} {}", s.0, s.1)).collect::<Vec<_>>().join(", ")));
-    let (b1, p1) = bpm_score(128.0, 128.0); let (b2, p2) = bpm_score(128.0, 130.0); let (b3, p3) = bpm_score(128.0, 64.5); let (b4, _) = bpm_score(128.0, 100.0);
-    chk("tempo scoring", b1 > b2 && b2 > b3 && b3 > 0.8 && b4 < 0.01 && p3.abs() < 1.0, format!("128→128 {b1:.2} ({p1:+.1}%), 128→130 {b2:.2} ({p2:+.1}%), 128→64.5 half time {b3:.2} ({p3:+.1}%), 128→100 {b4:.3}"));
+    let (b1, p1) = bpm_score(128.0, 128.0); let (b2, p2) = bpm_score(128.0, 130.0); let (b3, p3) = bpm_score(128.0, 66.0); let (b4, _) = bpm_score(128.0, 100.0);
+    chk("tempo scoring", b1 > b2 && b2 > b3 && b3 > 0.4 && b4 < 0.01 && (p3 - 3.125).abs() < 0.01, format!("128→128 {b1:.2} ({p1:+.1}%), 128→130 {b2:.2} ({p2:+.1}%), 128→66 half time {b3:.2} ({p3:+.1}%), 128→100 {b4:.3}"));
     // known optimal chain: 12 tracks 1A..12A at 120..131 BPM, given shuffled; best order is the chain (or its reverse)
     let chain: Vec<Item> = (0..12).map(|k| Item { key: format!("{}A", k + 1), bpm: 120.0 + k as f64, energy: k as f64 }).collect();
     let shuf = [7usize, 2, 11, 0, 5, 9, 3, 10, 1, 6, 8, 4];
