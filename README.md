@@ -54,10 +54,11 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 
 ## Roadmap
 
+- AI lyrics: Whisper transcription of the vocal stem as a lyric lane (planned for v0.15, postponed: it needs a ~150 MB+ model download and an encoder/decoder + tokenizer pipeline that could not be verified on the test machine yet)
 - Per-stem automation curves and stem solo/mute on clips
 - Higher-quality stem models (HT-Demucs fine-tuned bag, MDX-Net)
 - Rubber Band-quality time-stretching
-- Automix that picks transition points (phrases, energy) and transition presets
+- Automix that picks transition presets per phrase pair (phrase-aware overlaps landed in v0.12)
 - Auto-order across a whole library (build a set from a crate), with BPM-range and must-include constraints
 - Tempo automation in the tempo lane
 - Editing single beats in the beat map (warp markers) and non-4/4 meters
@@ -65,7 +66,7 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 - Headphone cue / pre-listen
 - Library: watch folders for changes live (filesystem watcher); for now, rescan at start or with *Rescan now*
 - Video export
-- Rekordbox / Serato export
+- Rekordbox / Serato export (import landed in v0.13); Serato / Engine cue point import
 - VST effects
 
 ## Platforms
