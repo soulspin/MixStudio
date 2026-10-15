@@ -169,11 +169,13 @@ impl App {
 
     fn insert(&mut self, p: PathBuf, au: Audio, an: Analysis, sample: Option<(usize, f64)>) {
         let key = p.display().to_string();
-        let t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, beat_mult: 1.0 };
+        let mut t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
+            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, beat_mult: 1.0, grid_mode: 1, stabilize: false, flex: None, imported: None };
         if let Some((src, et)) = self.lib.ext_info(&key) { if !et.cues.is_empty() {
             let v: Vec<(f64, String)> = et.cues.iter().map(|c| (c.pos, if !c.name.is_empty() { c.name.clone() } else if c.hot >= 0 { format!("{} hot cue {}", src.name(), (b'A' + (c.hot as u8).min(25)) as char) } else { format!("{} cue", src.name()) })).collect();
             self.mix.cue_marks.insert(key.clone(), v); } }
+        t.flex = an.flex_map();
+        if let Some((_, et)) = self.lib.ext_info(&key) { if let Some(b) = crate::import::grid_beats(&et.grid, an.duration) { t.imported = Some(Arc::new(crate::beatmap::BeatMap { beats: b, bpm: t.bpm })); } }
         self.store.insert(key, (Arc::new(au), Arc::new(an)));
         match sample { Some((lane, at)) => { let mut t = t; t.lane = lane; t.start_beat = (at / 4.0).round() * 4.0; self.mix.tracks.push(t); }
             None => self.mix.add_track(t) }
@@ -324,7 +326,7 @@ impl App {
             if let Err(e) = engine::write_wav(&p, &clip.l, &clip.r, clip.sr) { let _ = tx.send(Msg::Status(format!("Could not write the clip: {e}"))); return; }
             let nt = t.clip_track(sa, sb, p.display().to_string(), format!("{} ({name})", t.title), free);
             let an = Analysis { bpm: nt.bpm, offset: nt.offset, key: nt.key.clone(), duration: nt.duration, peaks: analysis::peaks(&clip), peak_sr: clip.sr, sections: vec![],
-                title: nt.title.clone(), artist: nt.artist.clone(), version: 0, beats: nt.map.as_ref().map(|m| m.beats.clone()).unwrap_or_default() };
+                title: nt.title.clone(), artist: nt.artist.clone(), version: 0, beats: nt.map.as_ref().map(|m| m.beats.clone()).unwrap_or_default(), flex: vec![] };
             let _ = tx.send(Msg::Clip(nt, clip, an));
         });
     }
@@ -491,7 +493,13 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
+        for t in self.mix.tracks.iter_mut() { if t.flex.is_none() { if let Some((_, an)) = self.store.get(&t.path) { if an.flex.len() >= 16 { t.flex = an.flex_map(); } } } }
         self.mix.resolve_ratios();
+        if let Some((i, k)) = ctx.data_mut(|d| { let r = d.get_temp::<(usize, u8)>(egui::Id::new("grid_act")); d.remove::<(usize, u8)>(egui::Id::new("grid_act")); r }) { if i < self.mix.tracks.len() {
+            self.snapshot();
+            if k >= 100 { self.mix.tracks[i].stabilize = k == 101; self.status = if k == 101 { "Clip stabilized: plays flat at its average tempo".into() } else { "Clip keeps its groove".into() }; }
+            else { if k == 1 { if let Some((_, an)) = self.store.get(&self.mix.tracks[i].path).cloned() { self.mix.tracks[i].map = an.beat_map(); } }
+                self.mix.tracks[i].set_grid_mode(k); self.status = format!("Grid mode: {}", crate::model::GRID_MODES[k.min(4) as usize]); } } }
         while let Ok(m) = self.rx.try_recv() { match m {
             Msg::Found(v) => { self.status = if v.is_empty() { "No DJ libraries found in the usual places: use Browse… or paste the file path".into() } else { format!("Found {} DJ libraries (Library tab)", v.len()) }; self.lib_found = v; }
             Msg::ImportPick(p) => self.import_file(p),
@@ -897,10 +905,12 @@ impl App {
                 }
                 px += 1.0;
             }
-            if !sample && ppb >= 2.5 {
+            if !sample && ppb * 4.0 >= 3.0 { // bar lines red, beats yellow; bars stay visible zoomed out
                 let k0 = (xb(vis.left()) - t.start_beat).ceil() as i64; let k1 = (xb(vis.right()) - t.start_beat).floor() as i64;
-                for k in k0..=k1 { let x = bx(t.start_beat + k as f64); let down = k.rem_euclid(4) == 0;
-                    tp.line_segment([pos2(x, wave.top()), pos2(x, wave.bottom())], Stroke::new(if down { 1.2_f32 } else { 1.0 }, C::from_rgba_unmultiplied(255, 255, 255, if down { 70 } else { 16 }))); }
+                let beats_on = ppb >= 5.0; let bar_step = if ppb * 4.0 >= 6.0 { 4 } else { 16 };
+                for k in k0..=k1 { let down = k.rem_euclid(4) == 0; if !beats_on && k.rem_euclid(bar_step) != 0 { continue; } let x = bx(t.start_beat + k as f64);
+                    let (w, c) = if down { (1.3_f32, C::from_rgba_unmultiplied(235, 60, 60, 170)) } else { (1.0_f32, C::from_rgba_unmultiplied(255, 225, 120, 45)) };
+                    tp.line_segment([pos2(x, wave.top()), pos2(x, wave.bottom())], Stroke::new(w, c)); }
             }
             if !sample { for o in overlap.iter().filter(|o| !o.2) { let p = partner(o);
                 let (sc, col, lab) = crate::automix::rate(&self.ao_item(p), &self.ao_item(ti));
@@ -1089,7 +1099,7 @@ impl App {
                     let hr = Rect::from_center_size(pos2(x, wave.top() + 7.0), vec2(12.0, 14.0));
                     let r = ui.interact(hr, ui.id().with(("bm", ti, k)), Sense::click_and_drag());
                     let hot = r.hovered() || r.dragged() || self.bm_drag.as_ref().map_or(false, |d| d.ti == ti && d.k == k);
-                    let col = if hot { bm_col(bm_mode) } else if k.rem_euclid(4) == 0 { C::from_rgb(235, 235, 240) } else { C::from_rgb(150, 150, 160) };
+                    let col = if hot { bm_col(bm_mode) } else if k.rem_euclid(4) == 0 { C::from_rgb(235, 70, 70) } else { C::from_rgb(230, 210, 120) };
                     tp.add(egui::Shape::convex_polygon(vec![pos2(x - 5.0, wave.top() + 1.0), pos2(x + 5.0, wave.top() + 1.0), pos2(x, wave.top() + 9.0)], col, Stroke::NONE));
                     if hot { tp.line_segment([pos2(x, wave.top()), pos2(x, wave.bottom())], Stroke::new(1.5_f32, col)); }
                     if r.hovered() { bm_hover = Some(pos2(x, wave.top())); ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal); }
@@ -1164,13 +1174,25 @@ impl App {
         let trow = rows[4].1;
         { // tempo lane: curve, mode chips, manual points
             let curve = self.mix.tempo_curve();
-            let (lo, hi) = curve.iter().map(|p| p.1).chain([self.mix.bpm]).fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(v), b.max(v)));
+            let (lo, hi) = curve.iter().map(|p| p.1).chain([self.mix.bpm]).chain(self.mix.tracks.iter().map(|t| t.clip_avg())).fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(v), b.max(v)));
             let (lo, hi) = (lo - 2.0, hi + 2.0);
             let y_of = |v: f64| trow.bottom() - 4.0 - ((v - lo) / (hi - lo)) as f32 * (trow.height() - 8.0);
             let v_of = |y: f32| lo + ((trow.bottom() - 4.0 - y) / (trow.height() - 8.0)) as f64 * (hi - lo);
             let oc = C::from_rgb(220, 140, 30);
             let pts: Vec<egui::Pos2> = { let mut x = tl_x0; let mut v = vec![]; while x <= area.right() { v.push(pos2(x, y_of(crate::model::bpm_on(&curve, self.mix.bpm, xb(x))))); x += 3.0; } v };
-            tp.add(egui::Shape::line(pts, Stroke::new(1.5_f32, oc)));
+            tp.add(egui::Shape::line(pts, Stroke::new(1.5_f32, C::from_rgb(235, 235, 240))));
+            // per clip: average BPM (orange), local tempo (grey), drift % per beat when zoomed in
+            for t in self.mix.tracks.iter() { let (vs, ve) = (t.vis_start(0.0), t.end(0.0)); let (xa, xe) = (bx(vs).max(tl_x0), bx(ve).min(area.right())); if xe <= xa { continue; }
+                let avg = t.clip_avg(); let g = t.grid();
+                let lt = |b: f64| { let d = g.sec(b + 1.0) - g.sec(b); if d > 1e-6 { 60.0 / d } else { avg } };
+                let cy = |v: f64| y_of(v).clamp(trow.top() + 14.0, trow.bottom() - 1.0);
+                if g.dynamic() { let mut v = vec![]; let mut x = xa; while x <= xe { let b = (xb(x) - t.start_beat).floor() + t.start_beat; v.push(pos2(x, cy(lt(b.clamp(vs, (ve - 1.0).max(vs)))))); x += 2.0; }
+                    tp.add(egui::Shape::line(v, Stroke::new(1.0_f32, C::from_rgb(150, 150, 158)))); }
+                tp.line_segment([pos2(xa, cy(avg)), pos2(xe, cy(avg))], Stroke::new(1.2_f32, oc));
+                if ppb >= 40.0 && g.dynamic() { let k0 = (xb(xa) - t.start_beat).floor() as i64; let k1 = (xb(xe) - t.start_beat).ceil() as i64;
+                    for k in k0..k1 { let b = t.start_beat + k as f64; if b < vs || b + 1.0 > ve { continue; } let x = bx(b + 0.5); if x < xa + 12.0 || x > xe - 12.0 { continue; }
+                        let v = lt(b); tp.text(pos2(x, cy(v) - 6.0), Align2::CENTER_CENTER, format!("{:+.1}%", (v / avg - 1.0) * 100.0), FontId::proportional(7.5), C::from_rgb(175, 175, 182)); } }
+            }
             let now = self.mix.bpm_at(xb(tl_x0 + 4.0));
             let mut x = tl_x0 + 4.0;
             tp.text(pos2(x, trow.top() + 7.0), Align2::LEFT_CENTER, format!("{now:.1} BPM"), FontId::proportional(9.0), oc); x += 58.0;
@@ -1574,6 +1596,13 @@ impl App {
                 ui.label("Beatgrid"); if t.grid().dynamic() { let (lo, hi) = t.map.as_ref().map(|m| m.tempo_range()).unwrap_or((t.bpm, t.bpm));
                     ui.label(format!("Beat map, follows tempo {lo:.2}–{hi:.2} BPM")).on_hover_text("Every beat is tracked, so tempo drift stays locked to the mix grid. Editing the BPM by hand switches to a fixed grid; Reset to analysis brings the beat map back."); }
                 else { ui.label("Fixed (linear)"); } ui.end_row();
+                ui.label("Grid mode"); { let cur = t.grid_mode.min(4) as usize; let avail = [true, t.map.is_some(), t.flex.is_some(), t.imported.is_some(), true];
+                    let cx = ui.ctx().clone(); let set = move |k: u8| cx.data_mut(|d| d.insert_temp(egui::Id::new("grid_act"), (i, k)));
+                    egui::ComboBox::from_id_salt("grid_mode").selected_text(crate::model::GRID_MODES[cur]).show_ui(ui, |ui| { for k in 0..5 {
+                        if ui.add_enabled(avail[k], egui::SelectableLabel::new(k == cur, crate::model::GRID_MODES[k])).on_hover_text(crate::model::GRID_HELP[k]).on_disabled_hover_text(if k == 2 { "No flex map yet (re-analysed tracks get one)" } else { "No grid imported for this track (add it from a Rekordbox / Traktor import)" }).clicked() && k != cur { set(k as u8); } } })
+                        .response.on_hover_text("Per clip: split a track to use different grids on its parts. Switching Manual → Dynamic restores the analysed map."); } ui.end_row();
+                ui.label("Stabilize tempo"); { let mut st = t.stabilize; if ui.checkbox(&mut st, "flat at the clip's average tempo").on_hover_text("In Auto tempo a clip keeps its groove: the mix tempo follows its local tempo. Stabilized, it plays perfectly flat at its average tempo. Split at intro and outro and stabilize just those clips so the middle keeps its feel. (In Constant / Manual / Ramp tempo every clip already plays on the straight mix grid.)").changed() {
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("grid_act"), (i, if st { 101u8 } else { 100 }))); } } ui.end_row();
                 ui.label("File"); ui.label(egui::RichText::new(&t.path).color(DIM).size(10.0)); ui.end_row();
             });
             if ui.button("Remove track").clicked() { remove = true; }
@@ -1603,10 +1632,10 @@ impl App {
             }
             if !self.taps.is_empty() { ui.label(egui::RichText::new(format!("{} taps", self.taps.len())).color(DIM)); }
             if ui.button("Reset to analysis").clicked() { if let Some((_, an)) = self.store.get(&self.mix.tracks[i].path).cloned() { self.snapshot();
-                let t = &mut self.mix.tracks[i]; let anchor = t.start_beat - t.intro_beats(); t.bpm = an.bpm; t.offset = an.offset; t.map = an.beat_map();
+                let t = &mut self.mix.tracks[i]; let anchor = t.start_beat - t.intro_beats(); t.bpm = an.bpm; t.offset = an.offset; t.map = an.beat_map(); t.flex = an.flex_map(); t.grid_mode = 1;
                 t.start_beat = ((anchor + t.intro_beats()) / 4.0).round() * 4.0; } }
             });
-            ui.label(egui::RichText::new("On the clip: Alt+drag moves the grid, Shift+click a beat line sets the downbeat.\nDownbeats are the brighter lines.").color(DIM).size(11.0));
+            ui.label(egui::RichText::new("On the clip: Alt+drag moves the grid, Shift+click a beat line sets the downbeat.\nBar lines (downbeats) are red, beats yellow.").color(DIM).size(11.0));
         });
         });
         if sep { self.request_stems(i); }

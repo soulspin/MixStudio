@@ -15,7 +15,9 @@ pub struct Cue { pub name: String, pub pos: f64, pub hot: i32 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ExtTrack { pub raw: String, pub path: String, pub title: String, pub artist: String, pub album: String, pub genre: String,
-    pub bpm: Option<f64>, pub key: Option<String>, pub duration: f64, pub cues: Vec<Cue>, pub exists: bool }
+    pub bpm: Option<f64>, pub key: Option<String>, pub duration: f64, pub cues: Vec<Cue>, pub exists: bool,
+    /// beat grid from the other app: (start s, BPM, beat number in the bar at start)
+    pub grid: Vec<(f64, f64, i32)> }
 
 #[derive(Clone, Debug, Default)]
 pub struct Node { pub name: String, pub folder: bool, pub children: Vec<Node>, pub tracks: Vec<usize> }
@@ -134,7 +136,8 @@ pub fn rekordbox(root: &El) -> Result<(Vec<ExtTrack>, Node), String> {
         let cues = t.all("POSITION_MARK").filter_map(|m| Some(Cue { name: s(m, "Name"), pos: m.attr("Start")?.parse().ok()?, hot: m.attr("Num").and_then(|n| n.parse().ok()).unwrap_or(-1) })).collect();
         by_id.insert(s(t, "TrackID"), tracks.len()); by_loc.insert(t.attr("Location").map(url_path).unwrap_or_default(), tracks.len());
         tracks.push(ExtTrack { raw, title: s(t, "Name"), artist: s(t, "Artist"), album: s(t, "Album"), genre: s(t, "Genre"), bpm: num(t.attr("AverageBpm")), key: nonempty(t.attr("Tonality")),
-            duration: num(t.attr("TotalTime")).unwrap_or(0.0), cues, ..Default::default() });
+            duration: num(t.attr("TotalTime")).unwrap_or(0.0), cues,
+            grid: t.all("TEMPO").filter_map(|g| Some((g.attr("Inizio")?.parse().ok()?, g.attr("Bpm")?.parse().ok()?, g.attr("Battito").and_then(|b| b.parse().ok()).unwrap_or(1)))).collect(), ..Default::default() });
     } }
     fn node(e: &El, id: &HashMap<String, usize>, loc: &HashMap<String, usize>) -> Node {
         let folder = e.attr("Type") == Some("0"); let by_loc = e.attr("KeyType") == Some("1");
@@ -162,7 +165,8 @@ pub fn traktor(root: &El) -> Result<(Vec<ExtTrack>, Node), String> {
         by_key.insert(nml_key(l), tracks.len());
         tracks.push(ExtTrack { raw: nml_path(l), title: s(e, "TITLE"), artist: s(e, "ARTIST"), album: e.child("ALBUM").map(|a| s(a, "TITLE")).unwrap_or_default(),
             genre: info.map(|i| s(i, "GENRE")).unwrap_or_default(), bpm: e.child("TEMPO").and_then(|t| num(t.attr("BPM"))), key,
-            duration: info.and_then(|i| num(i.attr("PLAYTIME_FLOAT")).or(num(i.attr("PLAYTIME")))).unwrap_or(0.0), cues, ..Default::default() });
+            duration: info.and_then(|i| num(i.attr("PLAYTIME_FLOAT")).or(num(i.attr("PLAYTIME")))).unwrap_or(0.0), cues,
+            grid: match (e.all("CUE_V2").filter(|c| c.attr("TYPE") == Some("4")).find_map(|c| c.attr("START")?.parse::<f64>().ok()), e.child("TEMPO").and_then(|t| num(t.attr("BPM")))) { (Some(s), Some(b)) => vec![(s / 1000.0, b, 1)], _ => vec![] }, ..Default::default() });
     } }
     fn node(e: &El, k: &HashMap<String, usize>) -> Node {
         let folder = e.attr("TYPE") == Some("FOLDER");
@@ -365,4 +369,16 @@ pub fn mount_roots() -> Vec<PathBuf> {
     let mut v = vec![PathBuf::from("/mnt"), PathBuf::from("/media")];
     if !u.is_empty() { v.push(PathBuf::from(format!("/media/{u}"))); v.push(PathBuf::from(format!("/run/media/{u}"))); }
     v
+}
+
+/// Beat times from an imported grid (tempo segments); beat 0 is a downbeat. None without a usable grid.
+pub fn grid_beats(g: &[(f64, f64, i32)], dur: f64) -> Option<Vec<f64>> {
+    let mut g: Vec<(f64, f64, i32)> = g.iter().copied().filter(|x| x.1 > 20.0 && x.1 < 400.0 && x.0.is_finite()).collect();
+    g.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap()); if g.is_empty() { return None; }
+    let p0 = 60.0 / g[0].1; let mut pre = vec![]; let mut t = g[0].0 - p0; while t >= 0.0 { pre.push(t); t -= p0; } pre.reverse();
+    let down = pre.len() + ((5 - g[0].2.clamp(1, 4)) % 4) as usize;
+    let mut beats = pre;
+    for (k, s) in g.iter().enumerate() { let end = g.get(k + 1).map(|n| n.0).unwrap_or(dur + 60.0 / s.1); let p = 60.0 / s.1; let mut t = s.0; while t < end - 1e-6 { beats.push(t); t += p; } }
+    let drop = down % 4; if beats.len() < drop + 16 { return None; }
+    Some(beats[drop..].to_vec())
 }

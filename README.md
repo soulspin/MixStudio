@@ -183,3 +183,13 @@ Each transition has a **Beat ratio** (transition panel): *Auto*, 1:1, 1:2, 2:1, 
 incoming track spans two mix beats, so a 70 BPM track locks onto a 140 BPM mix (kicks within a millisecond in the
 selftest); 2:3 maps two track beats onto three mix beats. *Auto* (default) switches to half / double time only when it
 is clearly closer to the tempo it joins, which also fixes Auto tempo gliding 140 → 70 BPM between such tracks.
+
+### Beatgrids (v0.15)
+- **Grid mode per clip** (Track tab): *Fixed* (straight grid at the average BPM), *Dynamic* (the analysed beat map),
+  *Flex* (piecewise grid that follows tempo jumps and ramps, found by change-point detection on the tempo curve),
+  *Imported* (Rekordbox/Traktor grid, when the track came from an import) and *Manual* (set automatically when you
+  edit the grid). Split clips keep their own mode.
+- **Stabilize tempo** (Track tab): in Auto tempo a stabilized clip plays flat at its average tempo. Typical use: split
+  at the intro and outro, stabilize just those clips so they mix on a straight grid; boundaries stay seamless.
+- **Tempo lane**: per clip the average BPM (orange) and the local tempo (grey); zoom in to see drift % labels.
+- **Downbeats**: bar lines red, beats yellow, bars stay visible zoomed out; *Set downbeat* recolours them.

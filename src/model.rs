@@ -61,11 +61,40 @@ pub struct Track {
     #[serde(default)] pub stretch: u8,
     /// resolved beat ratio (mix beats per track beat), kept up to date by `Mix::resolve_ratios`
     #[serde(default = "one64")] pub beat_mult: f64,
+    /// grid mode of this clip (GRID_MODES): 0 fixed, 1 dynamic, 2 flex, 3 imported, 4 manual
+    #[serde(default = "one8")] pub grid_mode: u8,
+    /// play this clip flat at its average tempo (Auto tempo); otherwise it keeps its groove
+    #[serde(default)] pub stabilize: bool,
+    /// flex beat map (analysis) and the beat grid imported from another DJ app
+    #[serde(default)] pub flex: Option<Arc<BeatMap>>, #[serde(default)] pub imported: Option<Arc<BeatMap>>,
 }
+fn one8() -> u8 { 1 }
+pub const GRID_MODES: [&str; 5] = ["Fixed", "Dynamic", "Flex", "Imported", "Manual"];
+pub const GRID_HELP: [&str; 5] = ["Linear grid at the average BPM", "The analysed beat map (follows small tempo drift)", "Piecewise beat map that follows deliberate tempo jumps and ramps",
+    "The beat grid from Rekordbox / Traktor (when the track came from an import)", "Your own edits (beatgrid editing switches to Manual)"];
 impl Track {
     pub fn grid(&self) -> Grid { self.grid_raw().scaled(self.beat_mult) }
     /// grid without the beat ratio (the beatgrid editor works on track beats)
-    pub fn grid_raw(&self) -> Grid { Grid::new(self.map.clone(), self.bpm, self.offset, self.start_beat) }
+    pub fn grid_raw(&self) -> Grid {
+        let m = self.cur_map();
+        // flex / imported grids put the downbeat on their own nearest beat
+        let off = match (&m, self.grid_mode) { (Some(mm), 2 | 3) if mm.beats.len() >= 8 => mm.beats[mm.u_of(self.offset).round().clamp(0.0, (mm.beats.len() - 1) as f64) as usize], _ => self.offset };
+        Grid::new(m, self.bpm, off, self.start_beat)
+    }
+    /// beat map used by the grid mode (None = linear)
+    pub fn cur_map(&self) -> Option<Arc<BeatMap>> { match self.grid_mode { 0 => None, 2 => self.flex.clone().or(self.map.clone()), 3 => self.imported.clone().or(self.map.clone()), _ => self.map.clone() } }
+    /// Switch the grid mode; the downbeat stays where it is in the mix (flex / imported: their nearest beat / downbeat).
+    pub fn set_grid_mode(&mut self, mode: u8) {
+        if mode == 4 { self.ensure_map(); self.grid_mode = 4; return; }
+        let anchor = self.sec_at(self.start_beat); self.grid_mode = mode.min(4);
+        let pick = |m: &Option<Arc<BeatMap>>, bar: bool| m.as_ref().filter(|m| m.beats.len() >= 8).map(|m| { let u = m.u_of(anchor); let k = if bar { (u / 4.0).round() * 4.0 } else { u.round() }; m.beats[k.clamp(0.0, (m.beats.len() - 1) as f64) as usize] });
+        if let Some(o) = match mode { 2 => pick(&self.flex, false), 3 => pick(&self.imported, true), _ => None } { self.offset = o; }
+        self.normalize_grid();
+    }
+    /// average tempo of the clip on the mix grid (beats per minute over its visible part)
+    pub fn clip_avg(&self) -> f64 { let g = self.grid(); let (a, b) = (self.vis_start(0.0), self.end(0.0)); let s = g.sec(b) - g.sec(a); if s > 1e-6 && b > a { (b - a) * 60.0 / s } else { self.eff_bpm() } }
+    /// local tempo around mix beat `x` (mix BPM at which the clip plays at its natural speed)
+    pub fn local_bpm(&self, x: f64) -> f64 { let g = self.grid(); let d = g.sec(x + 1.0) - g.sec(x - 1.0); if d > 1e-6 { 120.0 / d } else { self.eff_bpm() } }
     /// tempo of the track on the mix grid (track BPM x beat ratio)
     pub fn eff_bpm(&self) -> f64 { self.bpm * self.beat_mult }
     /// mix beat -> source seconds
@@ -76,9 +105,9 @@ impl Track {
     pub fn intro_beats(&self) -> f64 { self.start_beat - self.grid().beat(0.0) }
     /// Make sure the track has an editable beat map that maps one track beat to one map entry.
     pub fn ensure_map(&mut self) {
-        let g = self.grid_raw(); if g.dynamic() && g.ratio() == 1.0 { return; }
+        let g = self.grid_raw(); if matches!(self.grid_mode, 1 | 4) && g.dynamic() && g.ratio() == 1.0 { return; }
         let m = BeatMap::from_grid(&g, self.start_beat, self.duration, self.bpm);
-        self.map = Some(Arc::new(m));
+        self.map = Some(Arc::new(m)); self.grid_mode = 4;
     }
     /// Map index of the track beat at mix beat `start_beat + k` (call `ensure_map` first).
     pub fn map_index(&self, k: i64) -> usize {
@@ -87,7 +116,7 @@ impl Track {
     }
     /// Edit the beat map; the downbeat stays on the same beat, so the engine and the timeline follow.
     pub fn edit_map<R>(&mut self, f: impl FnOnce(&mut BeatMap) -> R) -> R {
-        self.ensure_map();
+        self.ensure_map(); self.grid_mode = 4;
         let mut m = (**self.map.as_ref().unwrap()).clone();
         let k = (m.u_of(self.offset).round().max(0.0) as usize).min(m.beats.len() - 1);
         let r = f(&mut m);
@@ -290,11 +319,13 @@ impl Mix {
     /// Tempo curve as (mix beat, BPM) points, linear in between; empty = constant `bpm`.
     pub fn tempo_curve(&self) -> Vec<(f64, f64)> {
         match self.tempo_mode {
-            1 => { // Auto: each track at its own tempo, gliding through the transitions
-                let o = self.main_order(); let mut v: Vec<(f64, f64)> = vec![];
-                if let Some(&f) = o.first() { v.push((self.tracks[f].vis_start(self.bpm), self.tracks[f].eff_bpm())); }
-                for (a, b, s, e) in self.transitions() { v.push((s, self.tracks[a].eff_bpm())); v.push((e, self.tracks[b].eff_bpm())); }
-                if let Some(&l) = o.last() { v.push((self.tracks[l].end(self.bpm), self.tracks[l].eff_bpm())); }
+            1 => { // Auto: each clip at its own tempo (its groove, or flat when stabilized), gliding through the transitions
+                let o = self.main_order(); let tr = self.transitions(); let mut v: Vec<(f64, f64)> = vec![];
+                for &i in &o { let t = &self.tracks[i]; let (mut a, mut b) = (t.vis_start(self.bpm), t.end(self.bpm));
+                    for &(x, y, s, e) in &tr { if y == i { a = a.max(e); } if x == i { b = b.min(s); } }
+                    if b < a { let c = 0.5 * (a + b); a = c; b = c; }
+                    if t.stabilize || !t.grid().dynamic() { let avg = t.clip_avg(); let e = if b - a > 1e-3 { 1e-4 } else { 0.0 }; v.push((a + e, avg)); v.push((b - e, avg)); }
+                    else { let mut x = a; loop { v.push((x, t.local_bpm(x))); if x >= b { break; } x = (x + 2.0).min(b); } } }
                 v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap()); v.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-9); v
             }
             2 => { let mut v = self.tempo_pts.clone(); v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap()); v }

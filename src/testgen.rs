@@ -92,3 +92,22 @@ pub fn synth_structured(bpm: f32, lead_in: f32, sr: u32) -> (Vec<f32>, Vec<f32>)
     }
     (l.clone(), l)
 }
+
+/// Kicks (same sound as `synth_drift`) at the given times; every 4th accented.
+pub fn synth_kicks(times: &[f64], secs: f32, sr: u32) -> (Vec<f32>, Vec<f32>) {
+    let n = (secs * sr as f32) as usize; let mut l = vec![0f32; n];
+    for (k, &t0) in times.iter().enumerate() {
+        let acc = if k % 4 == 0 { 1.0 } else { 0.55 }; let s0 = (t0 * sr as f64).round() as usize;
+        let len = ((times.get(k + 1).map(|t| t - t0).unwrap_or(0.5)) * sr as f64) as usize;
+        for i in 0..len.min(n.saturating_sub(s0)) { let tb = i as f32 / sr as f32; let f = 50.0 + 120.0 * (-tb * 30.0).exp();
+            l[s0 + i] += 0.8 * 0.7 * acc * (2.0 * PI * f * tb).sin() * (-tb * 7.0).exp(); }
+    }
+    (l.clone(), l)
+}
+/// Beat times of a tempo jump (`bpm0` for `n0` beats, then `bpm1` for `n1` beats) and of a linear ramp in time.
+pub fn jump_times(bpm0: f64, n0: usize, bpm1: f64, n1: usize, lead: f64) -> Vec<f64> {
+    let mut v = vec![]; let mut t = lead; for _ in 0..n0 { v.push(t); t += 60.0 / bpm0; } for _ in 0..n1 { v.push(t); t += 60.0 / bpm1; } v }
+pub fn ramp_times(bpm0: f64, bpm1: f64, span: f64, lead: f64) -> Vec<f64> {
+    let c = (bpm1 - bpm0) / (2.0 * span); let mut v = vec![]; let mut k = 0.0;
+    loop { let t = if c.abs() < 1e-12 { 60.0 * k / bpm0 } else { (-bpm0 + (bpm0 * bpm0 + 4.0 * c * 60.0 * k).sqrt()) / (2.0 * c) }; if t > span { break; } v.push(lead + t); k += 1.0; }
+    v }

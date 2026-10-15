@@ -8,7 +8,7 @@ impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } 
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 7;
+pub const ANALYSIS_VERSION: u32 = 8;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -26,9 +26,14 @@ pub struct Analysis {
     #[serde(default)] pub version: u32,
     /// beat map: time (s) of every beat
     #[serde(default)] pub beats: Vec<f64>,
+    /// flex beat map (piecewise, follows deliberate tempo jumps and ramps)
+    #[serde(default)] pub flex: Vec<f64>,
 }
 
 impl Analysis {
+    pub fn flex_map(&self) -> Option<std::sync::Arc<crate::beatmap::BeatMap>> {
+        if self.flex.len() < 16 { None } else { Some(std::sync::Arc::new(crate::beatmap::BeatMap { beats: self.flex.clone(), bpm: self.bpm })) }
+    }
     pub fn beat_map(&self) -> Option<std::sync::Arc<crate::beatmap::BeatMap>> {
         if self.beats.len() < 16 { None } else { Some(std::sync::Arc::new(crate::beatmap::BeatMap { beats: self.beats.clone(), bpm: self.bpm })) }
     }
@@ -361,11 +366,12 @@ pub fn analyse(audio: &Audio, title: String, artist: String, path: &Path) -> Ana
     let m = mono(audio);
     let (bpm, offset, beats) = detect_beats(&m, audio.sr);
     let key = detect_key(&m, audio.sr);
+    let flex = flex_beats(&m, audio.sr, bpm).0;
     let peaks = peaks(audio);
     // phrases (track beat from the first downbeat, label) on the 8/16/32-bar grid
     let sections = crate::phrase::detect(&crate::phrase::bar_features(&peaks, audio.sr, PEAK_HOP, bpm, offset));
     let title = if title.is_empty() { path.file_stem().map(|s| s.to_string_lossy().replace("_", " ")).unwrap_or_default() } else { title };
-    Analysis { version: ANALYSIS_VERSION, beats, bpm, offset, key, duration: audio.secs(), peaks, peak_sr: audio.sr, sections, title, artist }
+    Analysis { version: ANALYSIS_VERSION, beats, bpm, offset, key, duration: audio.secs(), peaks, peak_sr: audio.sr, sections, title, artist, flex }
 }
 
 /// Dynamic-programming beat tracker (Ellis 2007) on the onset envelope, followed by sub-frame
@@ -508,5 +514,91 @@ fn refine_attacks(m: &[f32], sr: u32, beats: &[f64]) -> Vec<f64> {
         let den = sw * sxx - sx * sx; if den.abs() > 1e-15 { let b = (sw * sxy - sx * sy) / den; (sy - b * sx) / sw } else { beats[k] } }).collect();
     let p = (beats[n - 1] - beats[0]) / (n - 1) as f64;
     for k in 1..n { if out[k] < out[k - 1] + 0.7 * p { out[k] = out[k - 1] + 0.7 * p; } }
+    out
+}
+
+/// Flex beat map for tracks with deliberate tempo changes (jumps such as 100 -> 128 BPM, or ramps):
+/// local tempo from the onset autocorrelation every second, change-point segmentation of that tempo
+/// curve into linear pieces (dynamic programming with a per-segment penalty), dynamic-programming beat
+/// tracking with the piecewise local period, and attack refinement without any smoothing across
+/// change points. Returns beat times (s) and the change points (s).
+pub fn flex_beats(m: &[f32], sr: u32, bpm: f64) -> (Vec<f64>, Vec<f64>) {
+    let (o, fps) = onset_env(m, sr);
+    let n = o.len(); if n < (fps * 10.0) as usize || bpm <= 0.0 { return (vec![], vec![]); }
+    // 1. local tempo every second (6 s windows), lags within bpm / 1.5 .. bpm * 1.5
+    let win = (fps * 6.0) as usize; let hop = fps.round() as usize;
+    let (lmin, lmax) = ((fps * 60.0 / (bpm * 1.5)).floor().max(2.0) as usize, (fps * 60.0 / (bpm / 1.5)).ceil() as usize);
+    let mut pts: Vec<(f64, f64)> = vec![]; // (seconds, bpm)
+    let mut c = 0usize;
+    while c + win <= n {
+        let w = &o[c..c + win];
+        let ac = |l: usize| -> f64 { if l + 1 >= win { return 0.0; } (0..win - l).map(|i| (w[i] * w[i + l]) as f64).sum::<f64>() / (win - l) as f64 };
+        let sc: Vec<f64> = (lmin..=lmax + 1).map(|l| ac(l) + 0.5 * ac(2 * l)).collect();
+        let k = (1..sc.len() - 1).max_by(|&a, &b| sc[a].partial_cmp(&sc[b]).unwrap()).unwrap_or(1);
+        let (a, b, cc) = (sc[k - 1], sc[k], sc[k + 1]); let d = a - 2.0 * b + cc;
+        let lag = (lmin + k) as f64 + if d.abs() > 1e-12 { (0.5 * (a - cc) / d).clamp(-0.5, 0.5) } else { 0.0 };
+        if b > 1e-9 { pts.push(((c + win / 2) as f64 / fps, 60.0 * fps / lag)); }
+        c += hop;
+    }
+    if pts.len() < 3 { return (vec![], vec![]); }
+    // 2. piecewise-linear segmentation (optimal partition, penalty per segment)
+    let k = pts.len(); let pen = 40.0;
+    let sse = |i: usize, j: usize| -> f64 { // points i..j (exclusive), least-squares line
+        let nn = (j - i) as f64; if nn < 2.0 { return 0.0; }
+        let (mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0);
+        for p in &pts[i..j] { sx += p.0; sy += p.1; sxx += p.0 * p.0; sxy += p.0 * p.1; }
+        let den = nn * sxx - sx * sx; let b = if den.abs() > 1e-12 { (nn * sxy - sx * sy) / den } else { 0.0 }; let a = (sy - b * sx) / nn;
+        pts[i..j].iter().map(|p| (p.1 - a - b * p.0).powi(2)).sum() };
+    let mut best = vec![f64::MAX; k + 1]; let mut from = vec![0usize; k + 1]; best[0] = 0.0;
+    for j in 1..=k { for i in 0..j { let v = best[i] + sse(i, j) + pen; if v < best[j] { best[j] = v; from[j] = i; } } }
+    let mut cuts = vec![k]; let mut j = k; while j > 0 { j = from[j]; cuts.push(j); } cuts.reverse();
+    // drop the short transition segments (windows straddling a jump) and fit each remaining segment
+    let mut segs: Vec<(f64, f64, f64, f64)> = vec![]; // (t0, t1, a, b): bpm = a + b t
+    for w in cuts.windows(2) { let (i, j) = (w[0], w[1]); if j - i < 3 { continue; }
+        let nn = (j - i) as f64; let (mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0);
+        for p in &pts[i..j] { sx += p.0; sy += p.1; sxx += p.0 * p.0; sxy += p.0 * p.1; }
+        let den = nn * sxx - sx * sx; let b = if den.abs() > 1e-12 { (nn * sxy - sx * sy) / den } else { 0.0 }; let a = (sy - b * sx) / nn;
+        segs.push((pts[i].0, pts[j - 1].0, a, b)); }
+    if segs.is_empty() { return (vec![], vec![]); }
+    let changes: Vec<f64> = segs.windows(2).map(|w| 0.5 * (w[0].1 + w[1].0)).collect();
+    let tempo_at = |t: f64| -> f64 { let s = segs.iter().position(|s| t <= s.1).map(|i| if i > 0 && t < segs[i].0 { if t - segs[i - 1].1 < segs[i].0 - t { i - 1 } else { i } } else { i }).unwrap_or(segs.len() - 1);
+        let s = &segs[s]; let tt = t.clamp(s.0, s.1); (s.2 + s.3 * tt).clamp(30.0, 300.0) };
+    // 3. beat tracking with the local period
+    let sd = { let mu = o.iter().sum::<f32>() / n as f32; (o.iter().map(|x| (x - mu).powi(2)).sum::<f32>() / n as f32).sqrt().max(1e-6) };
+    let on: Vec<f64> = o.iter().map(|&x| (x / sd) as f64).collect();
+    let mut cs = on.clone(); let mut back = vec![usize::MAX; n];
+    for t in 1..n { let p = 60.0 * fps / tempo_at(t as f64 / fps);
+        let (lo, hi) = ((p * 0.7).round().max(1.0) as usize, (p * 1.4).round() as usize + 1); if t < lo { continue; }
+        let mut bst = (f64::MIN, usize::MAX);
+        for tau in t.saturating_sub(hi)..=t - lo { let d = (t - tau) as f64 / p; let s = cs[tau] - 120.0 * d.ln().powi(2); if s > bst.0 { bst = (s, tau); } }
+        if bst.1 != usize::MAX && bst.0 > 0.0 { cs[t] = on[t] + bst.0; back[t] = bst.1; } }
+    let pend = 60.0 * fps / tempo_at(n as f64 / fps);
+    let mut t = (n.saturating_sub(pend as usize + 1)..n).max_by(|&a, &b| cs[a].partial_cmp(&cs[b]).unwrap()).unwrap();
+    let mut fr = vec![t]; while back[t] != usize::MAX { t = back[t]; fr.push(t); } fr.reverse();
+    let beats: Vec<f64> = fr.iter().map(|&f| { let mut bi = f; for i in f.saturating_sub(2)..(f + 3).min(n) { if o[i] > o[bi] { bi = i; } }
+        let y = if bi > 0 && bi + 1 < n { let (a, b, c) = (o[bi - 1] as f64, o[bi] as f64, o[bi + 1] as f64); let d = a - 2.0 * b + c; if d.abs() > 1e-12 { bi as f64 + (0.5 * (a - c) / d).clamp(-0.5, 0.5) } else { bi as f64 } } else { bi as f64 };
+        y / fps }).collect();
+    (flex_attacks(m, sr, &beats), changes)
+}
+
+/// Move every beat to the steepest rise of the low-band envelope near it (one global lag, then a
+/// +-12 ms local search); no smoothing, so tempo jumps stay sharp.
+fn flex_attacks(m: &[f32], sr: u32, beats: &[f64]) -> Vec<f64> {
+    let n = beats.len(); if n < 8 { return beats.to_vec(); }
+    let a = (-2.0 * std::f32::consts::PI * 150.0 / sr as f32).exp();
+    let (mut y1, mut y2, mut prev) = (0f32, 0f32, 0f32); let wq = sr as f32 / (2.0 * std::f32::consts::PI * 60.0);
+    let env: Vec<f32> = m.iter().map(|&x| { y1 = a * y1 + (1.0 - a) * x; y2 = a * y2 + (1.0 - a) * y1; let dy = (y2 - prev) * wq; prev = y2; (y2 * y2 + dy * dy).sqrt() }).collect();
+    let d = (0.001 * sr as f64) as usize; let w = (0.012 * sr as f64) as usize;
+    let fw = (0.080 * sr as f64) as i64; let step = 8i64; let mut fold = vec![0f64; (2 * fw / step) as usize + 1];
+    for &t in beats { let c = (t * sr as f64) as i64; if c - fw < 0 || (c + fw) as usize + d >= env.len() { continue; }
+        for (i, f) in fold.iter_mut().enumerate() { let q = (c - fw + i as i64 * step) as usize; *f += (env[q + d] - env[q]) as f64; } }
+    let gi = fold.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|x| x.0).unwrap_or((fw / step) as usize);
+    let g = ((gi as i64 * step - fw) as f64) / sr as f64;
+    let mut out: Vec<f64> = beats.iter().map(|&t0| { let t = t0 + g; let c = (t * sr as f64) as i64;
+        if c - (w as i64) < 0 || (c as usize) + w + d >= env.len() { return t; }
+        let c = c as usize; let mut best = (0f32, c); for i in c - w..c + w { let r = env[i + d] - env[i]; if r > best.0 { best = (r, i); } }
+        if best.0 > 0.0 { best.1 as f64 / sr as f64 } else { t } }).collect();
+    out.retain(|&t| t >= 0.0);
+    for k in 1..out.len() { if out[k] <= out[k - 1] + 0.05 { out[k] = out[k - 1] + 0.05; } }
     out
 }
