@@ -4,6 +4,7 @@ mod automix;
 mod library;
 mod scratch;
 mod phrase;
+mod import;
 mod export;
 mod fx;
 mod dialogs;
@@ -80,6 +81,7 @@ fn selftest(dir: &Path) -> bool {
     ok &= tempo_export_tests(dir);
     ok &= scratch_tests();
     ok &= phrase_tests();
+    ok &= import_tests();
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -462,7 +464,7 @@ fn library_tests(dir: &Path) -> bool {
         format!("{} files ({:?}), {} unreadable, Kick 128 duration {:.2}s, {} ms", r.files, names, r.errors, k.map(|e| e.duration).unwrap_or(0.0), r.ms));
     chk("missing folder", st[2].1 == FolderState::Missing && st[0].1 == FolderState::Available(3) && r.missing.len() == 1, format!("{:?}", st.iter().map(|s| &s.1).collect::<Vec<_>>()));
     // index round trip
-    let idir = root.join("cfg"); save_index(&idir, &ix).unwrap(); save_config(&idir, &Config { folders: folders.clone() }).unwrap();
+    let idir = root.join("cfg"); save_index(&idir, &ix).unwrap(); save_config(&idir, &Config { folders: folders.clone(), ..Default::default() }).unwrap();
     let ix2 = load_index(&idir); let c2 = load_config(&idir);
     chk("index and config saved", ix2.entries.len() == 4 && c2.folders == folders, format!("{} entries, {} folders", ix2.entries.len(), c2.folders.len()));
     // incremental: nothing changed
@@ -824,5 +826,142 @@ fn phrase_tests() -> bool {
     let (s0, s1, s2) = (m.tracks[0].start_beat, m.tracks[1].start_beat, m.tracks[2].start_beat);
     let e1 = m.tracks[1].end(120.0);
     chk("auto-mix overlaps outro with intro", s1 - s0 == 448.0 && ((s2 - (e1 - 64.0)) / 4.0).round() == (s2 - (e1 - 64.0)) / 4.0 && (e1 - s2 - 64.0).abs() < 4.0, format!("B starts at A's outro (beat {s1}), C (no intro) falls back to 16 bars"));
+    ok
+}
+
+fn import_tests_core() -> bool {
+    use crate::import::{self, Remap, Source};
+    let mut ok = true;
+    let mut chk = |name: &str, pass: bool, info: String| { ok &= pass; println!("{} import {name}: {info}", if pass { "OK  " } else { "FAIL" }); };
+    let dir = std::env::temp_dir().join(format!("mixstudio-import-test-{}", std::process::id())); let _ = std::fs::remove_dir_all(&dir);
+    let music = dir.join("music"); std::fs::create_dir_all(music.join("sub dir")).unwrap();
+    for f in ["a.mp3", "b.flac", "sub dir/c & d.wav"] { std::fs::write(music.join(f), b"x").unwrap(); }
+    let m = music.display().to_string();
+    let fp = |p: &std::path::Path| { use std::hash::{Hash, Hasher}; let b = std::fs::read(p).unwrap_or_default(); let mut h = std::collections::hash_map::DefaultHasher::new(); b.hash(&mut h);
+        (h.finish(), std::fs::metadata(p).and_then(|m| m.modified()).ok()) };
+    let names = |n: &import::Node| n.children.iter().map(|c| format!("{}{}", c.name, if c.folder { "/" } else { "" })).collect::<Vec<_>>().join(", ");
+    // Rekordbox (Windows paths)
+    let rb = dir.join("rekordbox.xml");
+    std::fs::write(&rb, r#"<?xml version="1.0" encoding="UTF-8"?>
+<DJ_PLAYLISTS Version="1.0.0"><PRODUCT Name="rekordbox" Version="6.8.5"/>
+<COLLECTION Entries="3">
+<TRACK TrackID="11" Name="Alpha &amp; Omega" Artist="DJ A" Album="X" Genre="House" TotalTime="300" AverageBpm="124.00" Tonality="Am" Location="file://localhost/C:/Users/Mike/Music/a.mp3">
+ <TEMPO Inizio="0.025" Bpm="124.00" Metro="4/4" Battito="1"/>
+ <POSITION_MARK Name="Drop" Type="0" Start="64.512" Num="0"/><POSITION_MARK Name="" Type="0" Start="12.000" Num="-1"/></TRACK>
+<TRACK TrackID="12" Name="Beta" Artist="DJ B" AverageBpm="70.00" Tonality="8B" Location="file://localhost/C:/Users/Mike/Music/b.flac"/>
+<TRACK TrackID="13" Name="Gamma" Artist="DJ C" AverageBpm="128.00" Tonality="" Location="file://localhost/C:/Users/Mike/Music/sub%20dir/c%20&amp;%20d.wav"/>
+</COLLECTION>
+<PLAYLISTS><NODE Type="0" Name="ROOT" Count="2">
+ <NODE Type="0" Name="Club" Count="1"><NODE Name="Peak" Type="1" KeyType="0" Entries="2"><TRACK Key="12"/><TRACK Key="11"/></NODE></NODE>
+ <NODE Name="Warmup" Type="1" KeyType="1" Entries="1"><TRACK Key="file://localhost/C:/Users/Mike/Music/sub%20dir/c%20&amp;%20d.wav"/></NODE>
+</NODE></PLAYLISTS></DJ_PLAYLISTS>"#).unwrap();
+    let maps = vec![Remap { from: "C:\\Users\\Mike\\Music".into(), to: m.clone() }];
+    let before = fp(&rb);
+    match import::load(&rb, &maps) { Ok(l) => {
+        let t = &l.tracks; let peak = l.root.at(&[0, 0]);
+        let pass = l.source == Source::Rekordbox && t.len() == 3 && t[0].title == "Alpha & Omega" && t[0].bpm == Some(124.0) && t[0].key.as_deref() == Some("Am") && t[0].cues.len() == 2 && (t[0].cues[0].pos - 64.512).abs() < 1e-9 && t[0].cues[0].name == "Drop" && t[0].cues[0].hot == 0
+            && t.iter().all(|x| x.exists) && t[2].path == format!("{m}/sub dir/c & d.wav") && t[2].key.is_none()
+            && l.root.children.len() == 2 && l.root.children[0].folder && peak.is_some_and(|p| p.name == "Peak" && p.tracks == vec![1, 0]) && l.root.children[1].tracks == vec![2];
+        chk("Rekordbox XML", pass, format!("{} tracks, BPM {:?}, key {:?}, {} cues, tree: {} > {}", t.len(), t[0].bpm, t[0].key, t[0].cues.len(), names(&l.root), l.root.children.first().map(names).unwrap_or_default())); }
+        Err(e) => chk("Rekordbox XML", false, e) }
+    // remapping rules
+    let r1 = import::remap("C:\\Users\\Mike\\Music\\x\\y.mp3", &[Remap { from: "c:/users/mike/music/".into(), to: "/mnt/win/Users/Mike/Music".into() }, Remap { from: "C:/".into(), to: "/mnt/c".into() }]);
+    let r2 = import::remap("C:/Other/z.mp3", &[Remap { from: "C:/".into(), to: "/mnt/c".into() }, Remap { from: "C:/Oth".into(), to: "/bad".into() }]);
+    chk("path remapping", r1 == "/mnt/win/Users/Mike/Music/x/y.mp3" && r2 == "/mnt/c/Other/z.mp3" && import::remap("/home/a.mp3", &[]) == "/home/a.mp3", format!("{r1}, {r2}"));
+    // Traktor (macOS style volume, nested folders)
+    let nml = dir.join("collection.nml");
+    let d = m.trim_start_matches('/').replace('/', "/:");
+    std::fs::write(&nml, format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<NML VERSION="19"><HEAD COMPANY="www.native-instruments.com" PROGRAM="Traktor"/>
+<COLLECTION ENTRIES="2">
+<ENTRY TITLE="Alpha" ARTIST="DJ A"><LOCATION DIR="/:{d}/:" FILE="a.mp3" VOLUME="Macintosh HD" VOLUMEID="x"/><ALBUM TITLE="Alb"/>
+ <INFO GENRE="Techno" PLAYTIME="301" PLAYTIME_FLOAT="300.5"/><TEMPO BPM="125.000061" BPM_QUALITY="100"/><MUSICAL_KEY VALUE="21"/>
+ <CUE_V2 NAME="AutoGrid" DISPL_ORDER="0" TYPE="4" START="20.0" LEN="0" REPEATS="-1" HOTCUE="-1"/>
+ <CUE_V2 NAME="Intro" DISPL_ORDER="0" TYPE="0" START="1500.0" LEN="0" REPEATS="-1" HOTCUE="1"/></ENTRY>
+<ENTRY TITLE="Beta" ARTIST="DJ B"><LOCATION DIR="/:{d}/:" FILE="b.flac" VOLUME="Macintosh HD"/><INFO KEY="11m"/><TEMPO BPM="140"/></ENTRY>
+</COLLECTION>
+<PLAYLISTS><NODE TYPE="FOLDER" NAME="$ROOT"><SUBNODES COUNT="1">
+ <NODE TYPE="FOLDER" NAME="Gigs"><SUBNODES COUNT="1"><NODE TYPE="PLAYLIST" NAME="Berlin"><PLAYLIST ENTRIES="2" TYPE="LIST" UUID="u">
+  <ENTRY><PRIMARYKEY TYPE="TRACK" KEY="Macintosh HD/:{d}/:b.flac"/></ENTRY><ENTRY><PRIMARYKEY TYPE="TRACK" KEY="Macintosh HD/:{d}/:a.mp3"/></ENTRY></PLAYLIST></NODE></SUBNODES></NODE>
+</SUBNODES></NODE></PLAYLISTS></NML>"#)).unwrap();
+    match import::load(&nml, &[]) { Ok(l) => { let t = &l.tracks; let b = l.root.at(&[0, 0]);
+        let pass = l.source == Source::Traktor && t.len() == 2 && t[0].path == format!("{m}/a.mp3") && t[0].exists && (t[0].bpm.unwrap_or(0.0) - 125.0).abs() < 0.01 && t[0].key.as_deref() == Some("8A")
+            && t[0].cues == vec![import::Cue { name: "Intro".into(), pos: 1.5, hot: 1 }] && t[1].key.as_deref() == Some("11m") && (t[0].duration - 300.5).abs() < 1e-9 && b.is_some_and(|b| b.name == "Berlin" && b.tracks == vec![1, 0]) && l.root.children[0].folder;
+        chk("Traktor collection.nml", pass, format!("{} tracks, BPM {:?}, keys {:?}/{:?}, cues {:?}, Gigs > Berlin", t.len(), t[0].bpm, t[0].key, t[1].key, t[0].cues.len())); }
+        Err(e) => chk("Traktor collection.nml", false, e) }
+    // iTunes / Music library XML with a playlist folder
+    let it = dir.join("iTunes Music Library.xml");
+    let url = format!("file://{}", m.replace(' ', "%20"));
+    std::fs::write(&it, format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Major Version</key><integer>1</integer><key>Tracks</key><dict>
+<key>101</key><dict><key>Track ID</key><integer>101</integer><key>Name</key><string>Alpha</string><key>Artist</key><string>DJ A</string><key>BPM</key><integer>124</integer><key>Total Time</key><integer>300000</integer><key>Location</key><string>{url}/a.mp3</string></dict>
+<key>102</key><dict><key>Track ID</key><integer>102</integer><key>Name</key><string>C &amp; D</string><key>Total Time</key><integer>1000</integer><key>Location</key><string>{url}/sub%20dir/c%20&amp;%20d.wav</string></dict>
+</dict><key>Playlists</key><array>
+<dict><key>Name</key><string>Library</string><key>Master</key><true/><key>Playlist ID</key><integer>1</integer><key>Playlist Items</key><array><dict><key>Track ID</key><integer>101</integer></dict></array></dict>
+<dict><key>Name</key><string>Music</string><key>Distinguished Kind</key><integer>4</integer><key>Playlist Persistent ID</key><string>M</string></dict>
+<dict><key>Name</key><string>DJ Sets</string><key>Folder</key><true/><key>Playlist Persistent ID</key><string>F1</string></dict>
+<dict><key>Name</key><string>Friday</string><key>Playlist Persistent ID</key><string>P1</string><key>Parent Persistent ID</key><string>F1</string><key>Playlist Items</key><array><dict><key>Track ID</key><integer>102</integer></dict><dict><key>Track ID</key><integer>101</integer></dict></array></dict>
+</array></dict></plist>"#)).unwrap();
+    match import::load(&it, &[]) { Ok(l) => { let t = &l.tracks; let f = l.root.at(&[0, 0]);
+        let pass = l.source == Source::ITunes && t.len() == 2 && t[0].bpm == Some(124.0) && t[1].title == "C & D" && t.iter().all(|x| x.exists) && l.root.children.len() == 1 && l.root.children[0].folder && f.is_some_and(|f| f.name == "Friday" && f.tracks == vec![1, 0]);
+        chk("iTunes library XML", pass, format!("{} tracks, tree: {} > {}", t.len(), names(&l.root), l.root.children.first().map(names).unwrap_or_default())); }
+        Err(e) => chk("iTunes library XML", false, e) }
+    // Serato database V2 + nested crate
+    let rec = |tag: &str, body: &[u8]| { let mut v = tag.as_bytes().to_vec(); v.extend((body.len() as u32).to_be_bytes()); v.extend(body); v };
+    let u16s = |s: &str| s.encode_utf16().flat_map(|c| c.to_be_bytes()).collect::<Vec<u8>>();
+    let relm = music.strip_prefix(&dir).unwrap().display().to_string();
+    let sd = dir.join("_Serato_"); std::fs::create_dir_all(sd.join("Subcrates")).unwrap();
+    let mut db = rec("vrsn", &u16s("2.0/Serato Scratch LIVE Database"));
+    for (f, ti, bpm, key) in [("a.mp3", "Alpha", "124.00", "Am"), ("b.flac", "Beta", "70.0", "C")] {
+        let mut o = rec("ttyp", &u16s("mp3")); o.extend(rec("pfil", &u16s(&format!("{relm}/{f}")))); o.extend(rec("tsng", &u16s(ti))); o.extend(rec("tbpm", &u16s(bpm))); o.extend(rec("tkey", &u16s(key))); o.extend(rec("tlen", &u16s("05:00.00")));
+        db.extend(rec("otrk", &o)); }
+    std::fs::write(sd.join("database V2"), &db).unwrap();
+    let mut cr = rec("vrsn", &u16s("1.0/Serato ScratchLive Crate"));
+    for f in ["b.flac", "sub dir/c & d.wav"] { cr.extend(rec("otrk", &rec("ptrk", &u16s(&format!("{relm}/{f}"))))); }
+    std::fs::write(sd.join("Subcrates/House%%Deep.crate"), &cr).unwrap();
+    std::fs::write(sd.join("Subcrates/Techno.crate"), &rec("vrsn", &u16s("1.0"))).unwrap();
+    let sb = fp(&sd.join("database V2"));
+    match import::load(&sd.join("database V2"), &[]) { Ok(l) => { let t = &l.tracks; let deep = l.root.at(&[0, 0]);
+        let pass = l.source == Source::Serato && t.len() == 3 && t[0].title == "Alpha" && t[0].bpm == Some(124.0) && t[1].key.as_deref() == Some("C") && (t[0].duration - 300.0).abs() < 1e-9 && t.iter().all(|x| x.exists)
+            && l.root.children.len() == 2 && l.root.children[0].name == "House" && l.root.children[0].folder && deep.is_some_and(|d| d.name == "Deep" && d.tracks == vec![1, 2]);
+        chk("Serato database V2 + crates", pass, format!("{} tracks (1 only in a crate), crates: {} > {}", t.len(), names(&l.root), l.root.children.first().map(names).unwrap_or_default())); }
+        Err(e) => chk("Serato database V2 + crates", false, e) }
+    // Engine DJ m.db
+    let ed = dir.join("Engine Library/Database2"); std::fs::create_dir_all(&ed).unwrap(); let mdb = ed.join("m.db");
+    { let c = rusqlite::Connection::open(&mdb).unwrap();
+      c.execute_batch(&format!("CREATE TABLE Track (id INTEGER PRIMARY KEY, path TEXT, filename TEXT, title TEXT, artist TEXT, album TEXT, genre TEXT, bpm INTEGER, bpmAnalyzed REAL, key INTEGER, length REAL);
+        CREATE TABLE Playlist (id INTEGER PRIMARY KEY, title TEXT, parentListId INTEGER, isPersisted BOOLEAN, nextListId INTEGER);
+        CREATE TABLE PlaylistEntity (id INTEGER PRIMARY KEY, listId INTEGER, trackId INTEGER, databaseUuid TEXT, nextEntityId INTEGER, membershipReference INTEGER);
+        INSERT INTO Track VALUES (1, '../../{relm}/a.mp3', 'a.mp3', 'Alpha', 'DJ A', '', 'House', 124, 123.98, 1, 300.0);
+        INSERT INTO Track VALUES (2, '../../{relm}/b.flac', 'b.flac', '', 'DJ B', '', '', 70, NULL, 22, 200.0);
+        INSERT INTO Playlist VALUES (1, 'Sets', 0, 1, 3); INSERT INTO Playlist VALUES (2, 'Late', 1, 1, 0); INSERT INTO Playlist VALUES (3, 'Chill', 0, 1, 0);
+        INSERT INTO PlaylistEntity VALUES (1, 2, 2, 'u', 2, 0); INSERT INTO PlaylistEntity VALUES (2, 2, 1, 'u', 0, 0); INSERT INTO PlaylistEntity VALUES (3, 3, 1, 'u', 0, 0);")).unwrap(); }
+    let eb = fp(&mdb);
+    match import::load(&mdb, &[]) { Ok(l) => { let t = &l.tracks; let late = l.root.at(&[0, 0]);
+        let pass = l.source == Source::Engine && t.len() == 2 && t[0].bpm == Some(123.98) && t[1].bpm == Some(70.0) && t[0].key.as_deref() == Some("8A") && t[1].key.as_deref() == Some("7B") && t[1].title == "b.flac" && t.iter().all(|x| x.exists)
+            && l.root.children.iter().map(|c| c.name.as_str()).collect::<Vec<_>>() == vec!["Sets", "Chill"] && late.is_some_and(|x| x.name == "Late" && x.tracks == vec![1, 0]);
+        chk("Engine DJ m.db", pass, format!("{} tracks, keys {:?}/{:?}, tree: {} > {}", t.len(), t[0].key, t[1].key, names(&l.root), l.root.children.first().map(names).unwrap_or_default())); }
+        Err(e) => chk("Engine DJ m.db", false, e) }
+    let untouched = fp(&rb) == before && fp(&sd.join("database V2")) == sb && fp(&mdb) == eb && !ed.join("m.db-wal").exists() && !ed.join("m.db-shm").exists() && !ed.join("m.db-journal").exists();
+    chk("source files are never modified", untouched, "content and mtime unchanged, no sqlite side files".into());
+    // auto-detect usual locations (home + mounted Windows drive)
+    let home = dir.join("home"); std::fs::create_dir_all(home.join("Documents")).unwrap(); std::fs::copy(&rb, home.join("Documents/rekordbox.xml")).unwrap();
+    let mnt = dir.join("mnt"); let win = mnt.join("win/Users/Mike"); std::fs::create_dir_all(win.join("Documents/Native Instruments/Traktor 3.11.1")).unwrap(); std::fs::copy(&nml, win.join("Documents/Native Instruments/Traktor 3.11.1/collection.nml")).unwrap();
+    std::fs::create_dir_all(mnt.join("usb/_Serato_")).unwrap(); std::fs::copy(sd.join("database V2"), mnt.join("usb/_Serato_/database V2")).unwrap();
+    let found = import::detect(&home, &[mnt.clone()]);
+    let kinds: Vec<_> = found.iter().filter_map(|p| import::sniff(p)).collect();
+    chk("auto-detect locations", found.len() == 3 && kinds.contains(&Source::Rekordbox) && kinds.contains(&Source::Traktor) && kinds.contains(&Source::Serato), format!("{} found: {:?}", found.len(), kinds));
+    let _ = std::fs::remove_dir_all(&dir);
+    ok
+}
+
+fn import_tests() -> bool {
+    let mut ok = import_tests_core();
+    let mut m = model::Mix::default(); let j0 = serde_json::to_string(&m).unwrap();
+    m.cue_marks.insert("a.mp3".into(), vec![(64.5, "Drop".into())]); let j = serde_json::to_string(&m).unwrap();
+    let back: model::Mix = serde_json::from_str(&j).unwrap(); let old = serde_json::from_str::<model::Mix>(&j0.replace(",\"cue_marks\":{}", ""));
+    let pass = back.cue_marks.get("a.mp3").is_some_and(|v| v[0].1 == "Drop") && old.is_ok() && !j0.replace(",\"cue_marks\":{}", "").contains("cue_marks");
+    ok &= pass; println!("{} import cue markers saved in the project: old projects load", if pass { "OK  " } else { "FAIL" });
     ok
 }

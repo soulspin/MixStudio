@@ -35,7 +35,12 @@ pub fn cache_dir() -> PathBuf {
 }
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
-pub struct Config { pub folders: Vec<String> }
+pub struct Config { pub folders: Vec<String>,
+    /// library files of other DJ apps (read-only imports) and path prefix rewrites for them
+    #[serde(default)] pub imports: Vec<String>, #[serde(default)] pub remaps: Vec<crate::import::Remap> }
+
+/// `Entry::folder` of tracks shown from an imported library
+pub const EXT_FOLDER: &str = "@import";
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct Entry {
@@ -199,7 +204,7 @@ pub fn view(entries: &[Entry], f: &Filter, sort: SortCol, asc: bool) -> Vec<usiz
     v
 }
 
-pub enum Event { Progress(usize, usize), Scanned(Index, ScanReport, Vec<(String, FolderState)>), Analysed(String, Result<(f64, String, f64), String>), AnalysisDone }
+pub enum Event { Imported(u64, Vec<Result<crate::import::ExtLib, String>>), Progress(usize, usize), Scanned(Index, ScanReport, Vec<(String, FolderState)>), Analysed(String, Result<(f64, String, f64), String>), AnalysisDone }
 
 /// Library state owned by the UI thread; scanning and analysis run on background threads.
 pub struct Library {
@@ -207,15 +212,39 @@ pub struct Library {
     pub scanning: bool, pub progress: (usize, usize), pub analysing: (usize, usize), pub gen: u64,
     cfg_dir: PathBuf, data_dir: PathBuf, tx: crossbeam_channel::Sender<Event>, rx: crossbeam_channel::Receiver<Event>,
     cancel: Arc<AtomicBool>, repaint: Arc<dyn Fn() + Send + Sync>, rescan_pending: bool, unsaved: usize, pos: HashMap<String, usize>,
+    /// imported libraries (same order as cfg.imports) and path -> (import, track)
+    pub ext: Vec<Result<crate::import::ExtLib, String>>, ext_map: HashMap<String, (usize, usize)>, imp_seq: u64,
 }
 
 impl Library {
     pub fn new(cfg_dir: PathBuf, data_dir: PathBuf, repaint: Arc<dyn Fn() + Send + Sync>) -> Library {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut l = Library { cfg: load_config(&cfg_dir), index: load_index(&data_dir), states: HashMap::new(), report: None, scanning: false, progress: (0, 0), analysing: (0, 0), gen: 1,
-            cfg_dir, data_dir, tx, rx, cancel: Arc::new(AtomicBool::new(false)), repaint, rescan_pending: false, unsaved: 0, pos: HashMap::new() };
-        l.reindex(); l
+            cfg_dir, data_dir, tx, rx, cancel: Arc::new(AtomicBool::new(false)), repaint, rescan_pending: false, unsaved: 0, pos: HashMap::new(), ext: vec![], ext_map: HashMap::new(), imp_seq: 0 };
+        l.reindex(); l.reimport(); l
     }
+    /// (Re)read every imported library on a helper thread (each with a timeout).
+    pub fn reimport(&mut self) {
+        self.imp_seq += 1; let seq = self.imp_seq;
+        if self.cfg.imports.is_empty() { self.ext.clear(); self.ext_map.clear(); self.gen += 1; return; }
+        let (files, maps, tx, rp) = (self.cfg.imports.clone(), self.cfg.remaps.clone(), self.tx.clone(), self.repaint.clone());
+        std::thread::Builder::new().name("mixstudio-import".into()).spawn(move || {
+            let v = files.iter().map(|f| { let (p, m) = (PathBuf::from(f), maps.clone()); with_timeout(Duration::from_secs(120), move || crate::import::load(&p, &m)).unwrap_or_else(|| Err("timed out (slow or failing drive?)".into())) }).collect();
+            let _ = tx.send(Event::Imported(seq, v)); rp();
+        }).ok();
+    }
+    pub fn add_import(&mut self, p: &Path) -> Result<(), String> {
+        if !p.exists() { return Err(format!("{} not found", p.display())); }
+        if crate::import::sniff(p).is_none() { return Err(format!("{}: not a Rekordbox / Traktor / Serato / Engine DJ / iTunes library file", p.display())); }
+        let s = p.display().to_string(); if self.cfg.imports.contains(&s) { return Ok(()); }
+        self.cfg.imports.push(s); let _ = save_config(&self.cfg_dir, &self.cfg); self.reimport(); Ok(())
+    }
+    pub fn remove_import(&mut self, i: usize) { if i < self.cfg.imports.len() { self.cfg.imports.remove(i); if i < self.ext.len() { let _ = self.ext.remove(i); } let _ = save_config(&self.cfg_dir, &self.cfg); self.reimport(); } }
+    pub fn set_remaps(&mut self, r: Vec<crate::import::Remap>) { self.cfg.remaps = r; let _ = save_config(&self.cfg_dir, &self.cfg); self.reimport(); }
+    /// the imported track for a (local) path, from the first import that has it
+    pub fn ext_info(&self, path: &str) -> Option<(crate::import::Source, &crate::import::ExtTrack)> {
+        let &(l, t) = self.ext_map.get(path)?; let lib = self.ext.get(l)?.as_ref().ok()?; Some((lib.source, lib.tracks.get(t)?)) }
+    pub fn entry(&self, path: &str) -> Option<&Entry> { self.pos.get(path).and_then(|&i| self.index.entries.get(i)) }
     fn reindex(&mut self) { self.pos = self.index.entries.iter().enumerate().map(|(i, e)| (e.path.clone(), i)).collect(); self.gen += 1; }
     pub fn rescan(&mut self) {
         if self.scanning { self.rescan_pending = true; return; }
@@ -253,6 +282,10 @@ impl Library {
     /// Apply background results; call once per frame.
     pub fn poll(&mut self) {
         while let Ok(ev) = self.rx.try_recv() { match ev {
+            Event::Imported(seq, v) => if seq == self.imp_seq {
+                self.ext_map.clear();
+                for (li, l) in v.iter().enumerate() { if let Ok(l) = l { for (ti, t) in l.tracks.iter().enumerate() { self.ext_map.entry(t.path.clone()).or_insert((li, ti)); } } }
+                self.ext = v; self.gen += 1; },
             Event::Progress(d, t) => self.progress = (d, t),
             Event::Scanned(ix, rep, st) => { self.scanning = false;
                 // keep folders the user removed while the scan ran out of the result

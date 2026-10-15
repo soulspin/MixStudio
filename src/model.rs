@@ -95,11 +95,13 @@ pub struct Mix { pub name: String, pub bpm: f64, pub tracks: Vec<Track>, pub dec
     /// tempo lane (TEMPO_MODES), manual nodes (beat, BPM) and ramp (start, end BPM)
     #[serde(default)] pub tempo_mode: u8, #[serde(default)] pub tempo_pts: Vec<(f64, f64)>, #[serde(default)] pub ramp: (f64, f64),
     /// hand-edited phrase labels per file (replaces the detected phrases)
-    #[serde(default)] pub phrase_edit: std::collections::BTreeMap<String, Vec<(f64, u8)>> }
+    #[serde(default)] pub phrase_edit: std::collections::BTreeMap<String, Vec<(f64, u8)>>,
+    /// cue points imported from other DJ apps per file: (source seconds, name)
+    #[serde(default)] pub cue_marks: std::collections::BTreeMap<String, Vec<(f64, String)>> }
 fn yes() -> bool { true }
 fn half() -> f32 { 0.5 }
 fn one() -> f32 { 1.0 }
-impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![], tempo_mode: 0, tempo_pts: vec![], ramp: (0.0, 0.0), phrase_edit: Default::default() } } }
+impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![], tempo_mode: 0, tempo_pts: vec![], ramp: (0.0, 0.0), phrase_edit: Default::default(), cue_marks: Default::default() } } }
 
 impl Mix {
     /// indices of main-deck tracks sorted by start

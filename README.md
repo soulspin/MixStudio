@@ -166,3 +166,13 @@ them **Intro / Build / Drop / Breakdown / Outro** (heuristic). Coloured phrase s
 click a phrase to cycle its label, right-click to choose one or reset to the detection (edits are saved in the project).
 Clips snap to other clips' phrase boundaries. Auto-order and *Overlap outros with intros* start the next track's
 intro on the previous track's outro. (Analysis cache v7: tracks are re-analysed once.)
+
+### Import from other DJ software (v0.13)
+The Library tab has a sidebar with your MixStudio folders and **Other DJ software**: *Find libraries* looks in the
+usual places (home, Documents, Music, mounted drives incl. Windows/macOS user folders), or *Browse…* / paste a file:
+Rekordbox XML (File ▸ Export Collection in xml format), Traktor `collection.nml`, Serato `_Serato_/database V2`
+(+ crates), Engine DJ `Engine Library/Database2/m.db`, iTunes / Music `Library.xml`. Playlists and folders appear as a
+tree; the table shows the other app's BPM and key (e.g. *Key (Rekordbox)*) next to MixStudio's. Cue points
+(Rekordbox, Traktor) become orange markers on the clip when the track is added to the mix. **Path remapping** rewrites
+prefixes such as `C:\Users\Mike\Music` → `/mnt/windows/Users/Mike/Music`. Imports are strictly read-only (Engine's
+database is read from a temporary copy). Not yet: Serato / Engine cue points (stored in file tags / compressed blobs).

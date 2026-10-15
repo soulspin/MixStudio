@@ -44,7 +44,7 @@ struct BmDrag { ti: usize, k: i64, i: usize, pivot: usize, span: f64, lastx: f32
 #[derive(Clone, Copy)]
 enum TlDrag { Edge { ti: usize, left: bool }, Fade { ti: usize, left: bool }, Trans { ti: usize, grab: f64, orig: f64 } }
 
-enum Msg { Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>), Clip(Track, Audio, Analysis) }
+enum Msg { Found(Vec<PathBuf>), ImportPick(PathBuf), Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>), Clip(Track, Audio, Analysis) }
 
 struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::AtomicU32> }
 
@@ -60,6 +60,7 @@ pub struct App {
     ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
     lib: crate::library::Library, lib_q: String, lib_path: String, lib_sort: crate::library::SortCol, lib_asc: bool, lib_key: bool, lib_bpm: bool, lib_pct: f64,
     lib_sel: std::collections::HashSet<String>, lib_anchor: Option<usize>, lib_view: Vec<usize>,
+    lib_node: Option<(usize, Vec<usize>)>, lib_cur: Vec<crate::library::Entry>, lib_cur_key: Option<(u64, (usize, Vec<usize>))>, lib_found: Vec<PathBuf>, lib_imp: String, lib_remaps: Vec<crate::import::Remap>, lib_remaps_init: bool,
     lib_view_key: Option<(u64, String, crate::library::SortCol, bool, Option<String>, Option<(u64, u64)>)>, timeline_rect: Rect,
 }
 
@@ -138,7 +139,7 @@ impl App {
             file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, scratch_win: false, scratch_play: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib: { let c = cc.egui_ctx.clone(); crate::library::Library::new(crate::library::config_dir(), crate::library::cache_dir(), Arc::new(move || c.request_repaint())) },
             lib_q: String::new(), lib_path: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
-            lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_view_key: None, timeline_rect: Rect::NOTHING };
+            lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_node: None, lib_cur: vec![], lib_cur_key: None, lib_found: vec![], lib_imp: String::new(), lib_remaps: vec![], lib_remaps_init: false, lib_view_key: None, timeline_rect: Rect::NOTHING };
         if !a.lib.cfg.folders.is_empty() { a.lib.rescan(); }
         if let Some(d) = demo {
             let paths = crate::gen_demo(std::path::Path::new(&d));
@@ -170,6 +171,9 @@ impl App {
         let key = p.display().to_string();
         let t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
             key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 };
+        if let Some((src, et)) = self.lib.ext_info(&key) { if !et.cues.is_empty() {
+            let v: Vec<(f64, String)> = et.cues.iter().map(|c| (c.pos, if !c.name.is_empty() { c.name.clone() } else if c.hot >= 0 { format!("{} hot cue {}", src.name(), (b'A' + (c.hot as u8).min(25)) as char) } else { format!("{} cue", src.name()) })).collect();
+            self.mix.cue_marks.insert(key.clone(), v); } }
         self.store.insert(key, (Arc::new(au), Arc::new(an)));
         match sample { Some((lane, at)) => { let mut t = t; t.lane = lane; t.start_beat = (at / 4.0).round() * 4.0; self.mix.tracks.push(t); }
             None => self.mix.add_track(t) }
@@ -286,7 +290,8 @@ impl App {
         for (_, _, s, e) in self.mix.transitions() { c.push(s); c.push(e); }
         // phrase boundaries of the other clips
         for (i, t) in self.mix.tracks.iter().enumerate() { if i == ti { continue; } if let Some((_, an)) = self.store.get(&t.path) {
-            for &(b, _) in self.mix.phrases(&t.path, &an.sections) { let x = t.start_beat + b; if x > t.vis_start(bpm) && x < t.end(bpm) { c.push(x); } } } }
+            for &(b, _) in self.mix.phrases(&t.path, &an.sections) { let x = t.start_beat + b; if x > t.vis_start(bpm) && x < t.end(bpm) { c.push(x); } } }
+            if let Some(cs) = self.mix.cue_marks.get(&t.path) { for (s, _) in cs { c.push(t.grid().beat(*s)); } } }
         c
     }
     /// Ctrl+E: split the clip under the mouse at the mouse, otherwise the clip at the playhead.
@@ -487,6 +492,8 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
         while let Ok(m) = self.rx.try_recv() { match m {
+            Msg::Found(v) => { self.status = if v.is_empty() { "No DJ libraries found in the usual places: use Browse… or paste the file path".into() } else { format!("Found {} DJ libraries (Library tab)", v.len()) }; self.lib_found = v; }
+            Msg::ImportPick(p) => self.import_file(p),
             Msg::Picked(v, s) => self.load_files(v, s),
             Msg::Loaded(p, r, s) => { self.loading = self.loading.saturating_sub(1); match r {
                 Ok((au, an)) => { if s.is_some_and(|x| x.0 == usize::MAX) { let k = p.display().to_string(); self.store.insert(k.clone(), (Arc::new(au), Arc::new(an)));
@@ -938,6 +945,11 @@ impl App {
                         pr.on_hover_text(format!("{} · {} bars — click: next label, right-click: choose", crate::phrase::LABELS[kind], ((end - sb) / 4.0).round()));
                     }
                 }
+                if let Some(cs) = self.mix.cue_marks.get(&t.path) { let oc = C::from_rgb(255, 140, 0); for (s, name) in cs {
+                    let x = bx(t.grid().beat(*s)); if x < cr.left() || x > cr.right() { continue; }
+                    tp.line_segment([pos2(x, cr.top()), pos2(x, cr.bottom() - 8.0)], Stroke::new(1.0_f32, oc.gamma_multiply(0.8)));
+                    tp.add(egui::Shape::convex_polygon(vec![pos2(x - 4.0, cr.top()), pos2(x + 4.0, cr.top()), pos2(x, cr.top() + 6.0)], oc, Stroke::NONE));
+                    tp.text(pos2(x + 5.0, cr.top() + 5.0), Align2::LEFT_CENTER, name, FontId::proportional(8.5), oc); } }
                 for o in &overlap { let x1 = bx(o.1).min(cr.right());
                     for k in 0..4 { let r = Rect::from_min_size(pos2(x1 - 9.0 * (4 - k) as f32 - 3.0, cr.bottom() - 16.0), vec2(7.0, 6.0));
                         tp.rect_filled(r, 1.5, STEM[k].gamma_multiply(0.7)); } }
@@ -1630,7 +1642,85 @@ impl App {
             Err(e) => { let _ = tx.send(Msg::Status(format!("Add folder: {e}"))); }
         });
     }
+    fn import_file(&mut self, p: PathBuf) {
+        self.status = match self.lib.add_import(&p) { Ok(()) => format!("Importing {} (read-only)…", p.display()), Err(e) => format!("Import: {e}") };
+    }
+    fn find_libs(&self) {
+        let tx = self.tx.clone(); let _ = tx.send(Msg::Status("Looking for DJ libraries…".into()));
+        std::thread::spawn(move || { let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+            let v = crate::library::with_timeout(std::time::Duration::from_secs(20), move || crate::import::detect(&home, &crate::import::mount_roots())).unwrap_or_default(); let _ = tx.send(Msg::Found(v)); });
+    }
+    fn pick_import(&self) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || { let f = ("DJ library".to_string(), ["xml", "nml", "db", "crate"].iter().map(|s| s.to_string()).collect());
+            match crate::dialogs::run(crate::dialogs::Req::Open { title: "Import DJ library".into(), filter: f }) {
+                Ok(Some(v)) => { if let Some(p) = v.into_iter().next() { let _ = tx.send(Msg::ImportPick(p)); } } Ok(None) => {}
+                Err(e) => { let _ = tx.send(Msg::Status(format!("Import: {e}"))); } } });
+    }
+    fn lib_sidebar(&mut self, ui: &mut egui::Ui) {
+        let dim = |s: &str| egui::RichText::new(s.to_string()).color(DIM).size(11.0);
+        if ui.selectable_label(self.lib_node.is_none(), "🗀 Library folders").clicked() { self.lib_node = None; self.lib_sel.clear(); }
+        ui.separator();
+        ui.label(egui::RichText::new("Other DJ software").strong().size(12.0));
+        let mut sel: Option<Option<(usize, Vec<usize>)>> = None; let mut rm: Option<usize> = None;
+        let cur = self.lib_node.clone();
+        for (li, f) in self.lib.cfg.imports.clone().iter().enumerate() {
+            match self.lib.ext.get(li) {
+                Some(Ok(l)) => {
+                    let missing = l.tracks.iter().filter(|t| !t.exists).count();
+                    egui::CollapsingHeader::new(format!("{} ({} tracks)", l.source.name(), l.tracks.len())).id_salt(("imp", li)).default_open(true).show(ui, |ui| {
+                        ui.add(egui::Label::new(dim(f)).truncate()).on_hover_text(f);
+                        if missing > 0 { ui.label(egui::RichText::new(format!("⚠ {missing} files not found: check path remapping")).color(C::from_rgb(230, 170, 60)).size(11.0)); }
+                        let c = cur.as_ref().map(|n| (n.0, n.1.as_slice()));
+                        if ui.selectable_label(c == Some((li, &[][..])), format!("♫ All tracks ({})", l.tracks.len())).clicked() { sel = Some(Some((li, vec![]))); }
+                        let mut path = vec![]; for (ci, ch) in l.root.children.iter().enumerate() { path.push(ci); node_ui(ui, ch, li, &mut path, c, &mut sel); path.pop(); }
+                        if ui.small_button("✖ Remove import").on_hover_text("Forget this import (the other app's files are never touched)").clicked() { rm = Some(li); }
+                    });
+                }
+                Some(Err(e)) => { ui.label(egui::RichText::new(format!("⚠ {f}: {e}")).color(C::from_rgb(230, 100, 80)).size(11.0)); if ui.small_button("✖ Remove").clicked() { rm = Some(li); } }
+                None => { ui.horizontal(|ui| { ui.spinner(); ui.label(dim(&format!("Reading {f}…"))); }); }
+            }
+        }
+        if let Some(s) = sel { self.lib_node = s; self.lib_sel.clear(); self.lib_anchor = None; }
+        if let Some(i) = rm { self.lib.remove_import(i); self.lib_node = None; self.lib_sel.clear(); }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button("🔍 Find libraries").on_hover_text("Look in the usual places: home folder, Documents, Music and mounted drives (incl. Windows / macOS user folders)").clicked() { self.find_libs(); }
+            if ui.button("Browse…").clicked() { self.pick_import(); } });
+        for p in self.lib_found.clone() { let s = p.display().to_string(); let have = self.lib.cfg.imports.contains(&s);
+            ui.horizontal(|ui| { let k = crate::import::sniff(&p).map(|k| k.name()).unwrap_or("?");
+                if ui.add_enabled(!have, egui::Button::new(if have { "✔" } else { "Import" }).small()).clicked() { self.import_file(p.clone()); }
+                ui.add(egui::Label::new(dim(&format!("{k}: {s}"))).truncate()).on_hover_text(&s); }); }
+        ui.horizontal(|ui| { ui.add(egui::TextEdit::singleline(&mut self.lib_imp).hint_text("…or paste a library file path").desired_width(150.0));
+            if ui.add_enabled(!self.lib_imp.trim().is_empty(), egui::Button::new("Import")).clicked() { let p = PathBuf::from(self.lib_imp.trim()); self.lib_imp.clear(); self.import_file(p); } });
+        ui.label(dim("rekordbox.xml (File ▸ Export Collection in xml format), Traktor collection.nml, _Serato_/database V2, Engine Library/Database2/m.db, iTunes / Music Library.xml. Read-only."));
+        ui.separator();
+        egui::CollapsingHeader::new("Path remapping").id_salt("remaps").show(ui, |ui| {
+            if !self.lib_remaps_init { self.lib_remaps = self.lib.cfg.remaps.clone(); self.lib_remaps_init = true; }
+            ui.label(dim("Rewrite path prefixes of imported tracks, e.g. C:\\Users\\Mike\\Music → /mnt/windows/Users/Mike/Music"));
+            let mut del = None;
+            for (i, r) in self.lib_remaps.iter_mut().enumerate() { ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut r.from).hint_text("from").desired_width(95.0)); ui.label("→");
+                ui.add(egui::TextEdit::singleline(&mut r.to).hint_text("to").desired_width(95.0)); if ui.small_button("✖").clicked() { del = Some(i); } }); }
+            if let Some(i) = del { self.lib_remaps.remove(i); }
+            ui.horizontal(|ui| { if ui.button("＋ Add rule").clicked() { self.lib_remaps.push(Default::default()); }
+                let changed = self.lib_remaps != self.lib.cfg.remaps;
+                if ui.add_enabled(changed, egui::Button::new("Apply")).clicked() { let v: Vec<_> = self.lib_remaps.iter().filter(|r| !r.from.trim().is_empty()).cloned().collect(); self.lib_remaps = v.clone(); self.lib.set_remaps(v); self.lib_cur_key = None; } });
+        });
+    }
     fn library_tab(&mut self, ui: &mut egui::Ui) {
+        egui::SidePanel::left("lib_side").resizable(true).default_width(240.0).show_inside(ui, |ui| { egui::ScrollArea::vertical().id_salt("lib_side_scroll").show(ui, |ui| self.lib_sidebar(ui)); });
+        // rows of the selected imported playlist (MixStudio's own BPM / key when the file is in the library)
+        if let Some(node) = self.lib_node.clone() { if self.lib_cur_key.as_ref() != Some(&(self.lib.gen, node.clone())) {
+            self.lib_cur = match self.lib.ext.get(node.0).and_then(|r| r.as_ref().ok()) { Some(l) => {
+                let ids: Vec<usize> = if node.1.is_empty() { (0..l.tracks.len()).collect() } else { l.root.at(&node.1).map(|n| n.all_tracks()).unwrap_or_default() };
+                let mut seen = std::collections::HashSet::new();
+                ids.into_iter().filter(|&i| seen.insert(i)).filter_map(|i| l.tracks.get(i)).map(|t| { let ours = self.lib.entry(&t.path);
+                    crate::library::Entry { path: t.path.clone(), folder: crate::library::EXT_FOLDER.into(), title: if t.title.is_empty() { std::path::Path::new(&t.path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default() } else { t.title.clone() },
+                        artist: t.artist.clone(), album: t.album.clone(), genre: t.genre.clone(), duration: if t.duration > 0.0 { t.duration } else { ours.map(|e| e.duration).unwrap_or(0.0) },
+                        bpm: ours.and_then(|e| e.bpm), key: ours.and_then(|e| e.key.clone()), error: if t.exists { None } else { Some(format!("file not found: {} (set up path remapping)", t.path)) }, ..Default::default() } }).collect() }
+                None => { self.lib_node = None; vec![] } };
+            self.lib_cur_key = Some((self.lib.gen, node)); self.lib_view_key = None; } }
         let dim = |s: String| egui::RichText::new(s).color(DIM).size(11.0);
         let rf = self.lib_ref();
         let mut add: Option<Vec<String>> = None;
@@ -1678,30 +1768,40 @@ impl App {
         // filtered + sorted view, cached until something changes
         let key_ref = if self.lib_key { rf.as_ref().map(|r| r.1.clone()) } else { None };
         let bpm_ref = if self.lib_bpm { rf.as_ref().map(|r| (r.2, self.lib_pct)) } else { None };
-        let vk = (self.lib.gen, self.lib_q.clone(), self.lib_sort, self.lib_asc, key_ref.clone(), bpm_ref.map(|b| (b.0.to_bits(), b.1.to_bits())));
+        let gk = { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); self.lib_node.hash(&mut h); self.lib.gen ^ h.finish() };
+        let vk = (gk, self.lib_q.clone(), self.lib_sort, self.lib_asc, key_ref.clone(), bpm_ref.map(|b| (b.0.to_bits(), b.1.to_bits())));
         if self.lib_view_key.as_ref() != Some(&vk) {
-            self.lib_view = crate::library::view(&self.lib.index.entries, &crate::library::Filter { query: &self.lib_q, key_ref: key_ref.as_deref(), bpm_ref }, self.lib_sort, self.lib_asc);
+            self.lib_view = crate::library::view(if self.lib_node.is_some() { &self.lib_cur } else { &self.lib.index.entries }, &crate::library::Filter { query: &self.lib_q, key_ref: key_ref.as_deref(), bpm_ref }, self.lib_sort, self.lib_asc);
             self.lib_view_key = Some(vk);
         }
         use crate::library::SortCol;
+        let ext_name: Option<String> = match &self.lib_node { Some((li, _)) => self.lib.ext.get(*li).and_then(|r| r.as_ref().ok()).map(|l| l.source.name().to_string()),
+            None => { let v: Vec<&str> = self.lib.ext.iter().filter_map(|r| r.as_ref().ok()).map(|l| l.source.name()).collect(); if v.is_empty() { None } else if v.iter().all(|x| *x == v[0]) { Some(v[0].to_string()) } else { Some("DJ app".into()) } } };
         let cols = [(SortCol::Title, "Title"), (SortCol::Artist, "Artist"), (SortCol::Bpm, "BPM"), (SortCol::Key, "Key"), (SortCol::Duration, "Duration"), (SortCol::Genre, "Genre"), (SortCol::Folder, "Folder")];
         let mut clicked: Option<(usize, egui::Modifiers)> = None; let mut dbl: Option<usize> = None;
         let mods = ui.input(|i| i.modifiers);
         let avail = ui.available_height();
-        egui_extras::TableBuilder::new(ui).striped(true).resizable(true).max_scroll_height(avail).min_scrolled_height(0.0)
-            .column(egui_extras::Column::initial(260.0).at_least(80.0)).column(egui_extras::Column::initial(180.0)).column(egui_extras::Column::initial(56.0))
-            .column(egui_extras::Column::initial(44.0)).column(egui_extras::Column::initial(62.0)).column(egui_extras::Column::initial(110.0)).column(egui_extras::Column::remainder())
-            .header(18.0, |mut h| { for (c, n) in cols { h.col(|ui| { let arrow = if self.lib_sort == c { if self.lib_asc { " ⏶" } else { " ⏷" } } else { "" };
+        let use_cur = self.lib_node.is_some();
+        let mut tb = egui_extras::TableBuilder::new(ui).striped(true).resizable(true).max_scroll_height(avail).min_scrolled_height(0.0)
+            .column(egui_extras::Column::initial(260.0).at_least(80.0)).column(egui_extras::Column::initial(180.0)).column(egui_extras::Column::initial(56.0)).column(egui_extras::Column::initial(44.0));
+        if ext_name.is_some() { tb = tb.column(egui_extras::Column::initial(104.0)).column(egui_extras::Column::initial(104.0)); }
+        tb.column(egui_extras::Column::initial(62.0)).column(egui_extras::Column::initial(110.0)).column(egui_extras::Column::remainder())
+            .header(18.0, |mut h| { for (ci, (c, n)) in cols.into_iter().enumerate() {
+                if ci == 4 { if let Some(en) = &ext_name { for lab in ["BPM", "Key"] { h.col(|ui| { ui.label(egui::RichText::new(format!("{lab} ({en})")).size(10.5).color(DIM)).on_hover_text(format!("{lab} as stored by {en} (read-only)")); }); } } }
+                h.col(|ui| { let arrow = if self.lib_sort == c { if self.lib_asc { " ⏶" } else { " ⏷" } } else { "" };
                 if ui.add(egui::Label::new(egui::RichText::new(format!("{n}{arrow}")).size(10.5).color(if self.lib_sort == c { ACCENT } else { DIM })).sense(Sense::click())).clicked() {
                     if self.lib_sort == c { self.lib_asc = !self.lib_asc; } else { self.lib_sort = c; self.lib_asc = true; } } }); } })
-            .body(|body| { let entries = &self.lib.index.entries; let view = &self.lib_view; let sel = &self.lib_sel; let states = &self.lib.states;
+            .body(|body| { let entries = if use_cur { &self.lib_cur } else { &self.lib.index.entries }; let view = &self.lib_view; let sel = &self.lib_sel; let states = &self.lib.states; let lib = &self.lib;
                 body.rows(19.0, view.len(), |mut row| { let k = row.index(); let e = &entries[view[k]];
                     let on = sel.contains(&e.path);
-                    let gone = !states.get(&e.folder).is_some_and(|s| matches!(s, crate::library::FolderState::Available(_)));
+                    let imported = e.folder == crate::library::EXT_FOLDER;
+                    let gone = !imported && !states.get(&e.folder).is_some_and(|s| matches!(s, crate::library::FolderState::Available(_)));
                     let col = if on { ACCENT } else if e.error.is_some() || gone { DIM } else { TXT };
-                    let cells = [e.title.clone(), e.artist.clone(), e.bpm.map(|b| format!("{b:.1}")).unwrap_or_else(|| if e.analysis_error.is_some() { "–".into() } else { "…".into() }),
-                        e.key.clone().unwrap_or_default(), fmt_t(e.duration), e.genre.clone(),
-                        std::path::Path::new(&e.path).parent().and_then(|p| p.strip_prefix(&e.folder).ok()).map(|p| { let s = p.display().to_string(); if s.is_empty() { std::path::Path::new(&e.folder).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() } else { s } }).unwrap_or_default()];
+                    let folder = if imported { std::path::Path::new(&e.path).parent().map(|p| p.display().to_string()).unwrap_or_default() } else {
+                        std::path::Path::new(&e.path).parent().and_then(|p| p.strip_prefix(&e.folder).ok()).map(|p| { let s = p.display().to_string(); if s.is_empty() { std::path::Path::new(&e.folder).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() } else { s } }).unwrap_or_default() };
+                    let mut cells = vec![e.title.clone(), e.artist.clone(), e.bpm.map(|b| format!("{b:.1}")).unwrap_or_else(|| if e.analysis_error.is_some() || imported { "–".into() } else { "…".into() }), e.key.clone().unwrap_or_default()];
+                    if ext_name.is_some() { let x = lib.ext_info(&e.path).map(|(_, t)| (t.bpm.map(|b| format!("{b:.2}")).unwrap_or_default(), t.key.clone().unwrap_or_default())).unwrap_or_default(); cells.push(x.0); cells.push(x.1); }
+                    cells.extend([fmt_t(e.duration), e.genre.clone(), folder]);
                     for (ci, c) in cells.into_iter().enumerate() { row.col(|ui| {
                         let r = ui.add(egui::Label::new(egui::RichText::new(c).color(col).size(11.5)).truncate().sense(Sense::click_and_drag()));
                         let r = if ci == 0 { match (&e.error, gone) { (Some(err), _) => r.on_hover_text(format!("Unreadable: {err}")), (None, true) => r.on_hover_text("Folder not available"), _ => r.on_hover_text(&e.path) } } else { r };
@@ -1710,14 +1810,23 @@ impl App {
                             r.dnd_set_drag_payload(LibDrag(paths)); }
                     }); }
                 }); });
-        if let Some(k) = dbl { add = Some(vec![self.lib.index.entries[self.lib_view[k]].path.clone()]); }
+        if let Some(k) = dbl { add = Some(vec![(if self.lib_node.is_some() { &self.lib_cur } else { &self.lib.index.entries })[self.lib_view[k]].path.clone()]); }
         if let Some((k, m)) = clicked {
-            let p = self.lib.index.entries[self.lib_view[k]].path.clone();
+            let p = (if self.lib_node.is_some() { &self.lib_cur } else { &self.lib.index.entries })[self.lib_view[k]].path.clone();
             if m.shift { if let Some(a) = self.lib_anchor { let (x, y) = (a.min(k), a.max(k)); if !m.command { self.lib_sel.clear(); }
-                    for j in x..=y.min(self.lib_view.len().saturating_sub(1)) { self.lib_sel.insert(self.lib.index.entries[self.lib_view[j]].path.clone()); } } }
+                    for j in x..=y.min(self.lib_view.len().saturating_sub(1)) { self.lib_sel.insert((if self.lib_node.is_some() { &self.lib_cur } else { &self.lib.index.entries })[self.lib_view[j]].path.clone()); } } }
             else if m.command { if !self.lib_sel.remove(&p) { self.lib_sel.insert(p); } self.lib_anchor = Some(k); }
             else { self.lib_sel.clear(); self.lib_sel.insert(p); self.lib_anchor = Some(k); }
         }
         if let Some(v) = add { self.lib_add(v); }
     }
+}
+
+fn node_ui(ui: &mut egui::Ui, n: &crate::import::Node, li: usize, path: &mut Vec<usize>, cur: Option<(usize, &[usize])>, sel: &mut Option<Option<(usize, Vec<usize>)>>) {
+    let me = cur == Some((li, path.as_slice()));
+    if n.children.is_empty() { if ui.selectable_label(me, format!("♫ {} ({})", n.name, n.tracks.len())).clicked() { *sel = Some(Some((li, path.clone()))); } return; }
+    egui::CollapsingHeader::new(format!("🗀 {}", n.name)).id_salt(("node", li, path.clone())).show(ui, |ui| {
+        if ui.selectable_label(me, format!("♫ All in {} ({})", n.name, n.all_tracks().len())).clicked() { *sel = Some(Some((li, path.clone()))); }
+        for (ci, c) in n.children.iter().enumerate() { path.push(ci); node_ui(ui, c, li, path, cur, sel); path.pop(); }
+    });
 }
