@@ -340,6 +340,12 @@ fn cache_path(path: &Path) -> Option<std::path::PathBuf> {
     Some(Path::new(&home).join(".cache/mixstudio").join(format!("{h:016x}.json")))
 }
 
+/// Analysis only (no audio kept): from the cache when present, otherwise decode + analyse + cache.
+pub fn load_analysis(path: &Path) -> anyhow::Result<Analysis> {
+    if let Some(c) = cache_path(path) { if let Ok(s) = std::fs::read(&c) { if let Ok(a) = serde_json::from_slice::<Analysis>(&s) { if a.version == ANALYSIS_VERSION { return Ok(a); } } } }
+    Ok(load(path)?.1)
+}
+
 /// Decode + analyse, using the on-disk analysis/waveform cache when present.
 pub fn load(path: &Path) -> anyhow::Result<(Audio, Analysis)> {
     let (audio, title, artist) = decode(path)?;

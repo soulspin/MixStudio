@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod analysis;
 mod automix;
+mod library;
 mod beatmap;
 mod app;
 mod audio;
@@ -66,6 +67,7 @@ fn selftest(dir: &Path) -> bool {
     ok &= drift_test(dir);
     ok &= soft_intro_test(dir);
     ok &= automix_tests();
+    ok &= library_tests(dir);
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -422,5 +424,70 @@ fn automix_tests() -> bool {
     let (c0, c1) = (order_cost(&big, &ident, &opts), order_cost(&big, &ob, &opts));
     let greens = ob.windows(2).filter(|w| rate(&big[w[0]], &big[w[1]]).1 == 0).count();
     chk("100 tracks", ms < 2000.0 && c1 < 0.5 * c0, format!("{ms:.0} ms, cost {c0:.2} -> {c1:.2}, {greens}/99 green transitions"));
+    ok
+}
+
+fn library_tests(dir: &Path) -> bool {
+    use library::*; let mut ok = true;
+    let mut chk = |name: &str, pass: bool, info: String| { ok &= pass; println!("{} library {name}: {info}", if pass { "OK  " } else { "FAIL" }); };
+    let root = dir.join("libtest"); let _ = std::fs::remove_dir_all(&root);
+    let (a, b) = (root.join("Music"), root.join("External"));
+    std::fs::create_dir_all(a.join("House/Deep")).unwrap(); std::fs::create_dir_all(&b).unwrap();
+    let sr = 44100u32;
+    let wav = |p: &Path, bpm: f32, secs: f32| { let (l, r) = testgen::synth_drift(bpm, bpm, 45, true, secs, 0.1, sr); engine::write_wav(p, &l, &r, sr).unwrap(); };
+    wav(&a.join("House/Kick_128.wav"), 128.0, 20.0); wav(&a.join("House/Deep/Kick_124.wav"), 124.0, 20.0); wav(&b.join("Ext_126.wav"), 126.0, 2.0);
+    std::fs::write(a.join("notes.txt"), "not audio").unwrap();
+    std::fs::write(a.join("broken.mp3"), vec![0x55u8; 4096]).unwrap();
+    let folders = vec![a.display().to_string(), b.display().to_string(), root.join("Unplugged").display().to_string()];
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (ix, r, st) = scan(&folders, &Index::default(), &cancel, &|_, _| {});
+    let names: Vec<String> = ix.entries.iter().map(|e| e.title.clone()).collect();
+    let broken = ix.entries.iter().find(|e| e.path.ends_with("broken.mp3"));
+    let k = ix.entries.iter().find(|e| e.path.ends_with("Kick_128.wav"));
+    chk("first scan", r.files == 4 && r.added == 4 && broken.is_some_and(|e| e.error.is_some()) && k.is_some_and(|e| (e.duration - 20.0).abs() < 0.01 && e.title == "Kick 128"),
+        format!("{} files ({:?}), {} unreadable, Kick 128 duration {:.2}s, {} ms", r.files, names, r.errors, k.map(|e| e.duration).unwrap_or(0.0), r.ms));
+    chk("missing folder", st[2].1 == FolderState::Missing && st[0].1 == FolderState::Available(3) && r.missing.len() == 1, format!("{:?}", st.iter().map(|s| &s.1).collect::<Vec<_>>()));
+    // index round trip
+    let idir = root.join("cfg"); save_index(&idir, &ix).unwrap(); save_config(&idir, &Config { folders: folders.clone() }).unwrap();
+    let ix2 = load_index(&idir); let c2 = load_config(&idir);
+    chk("index and config saved", ix2.entries.len() == 4 && c2.folders == folders, format!("{} entries, {} folders", ix2.entries.len(), c2.folders.len()));
+    // incremental: nothing changed
+    let (ix3, r3, _) = scan(&folders, &ix2, &cancel, &|_, _| {});
+    chk("unchanged rescan skips files", r3.unchanged == 4 && r3.added == 0 && r3.updated == 0 && r3.removed == 0, format!("unchanged {}, read {}, {} ms", r3.unchanged, r3.added + r3.updated, r3.ms));
+    // add, change, remove
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    wav(&a.join("House/New_130.wav"), 130.0, 3.0); wav(&a.join("House/Deep/Kick_124.wav"), 124.0, 25.0); std::fs::remove_file(b.join("Ext_126.wav")).unwrap();
+    let (ix4, r4, _) = scan(&folders, &ix3, &cancel, &|_, _| {});
+    let k124 = ix4.entries.iter().find(|e| e.path.ends_with("Kick_124.wav")).map(|e| e.duration).unwrap_or(0.0);
+    chk("incremental changes", r4.added == 1 && r4.updated == 1 && r4.removed == 1 && r4.unchanged == 2 && ix4.entries.len() == 4 && (k124 - 25.0).abs() < 0.01,
+        format!("+{} new, {} changed (Kick 124 now {:.1}s), {} removed, {} unchanged", r4.added, r4.updated, k124, r4.removed, r4.unchanged));
+    // drive unplugged: entries of a folder that disappears are kept and the scan does not fail
+    let moved = root.join("External_offline"); std::fs::rename(&b, &moved).unwrap();
+    let mut ix5 = ix4.clone(); ix5.entries.push(Entry { path: b.join("Old.wav").display().to_string(), folder: b.display().to_string(), title: "Old".into(), ..Default::default() });
+    let (ix6, r6, st6) = scan(&folders, &ix5, &cancel, &|_, _| {});
+    chk("unplugged drive keeps its tracks", st6[1].1 == FolderState::Missing && ix6.entries.iter().any(|e| e.title == "Old") && r6.removed == 0, format!("{:?}, {} entries", st6[1].1, ix6.entries.len()));
+    std::fs::rename(&moved, &b).unwrap();
+    // analysis via the shared cache
+    let kp = a.join("House/Kick_128.wav").display().to_string();
+    let an = analyse(&kp);
+    chk("background analysis", an.as_ref().is_ok_and(|x| (x.0 - 128.0).abs() < 0.3), format!("{:?}", an.as_ref().map(|x| (x.0, x.1.clone()))));
+    // view: search, sort, key and BPM filters
+    let mut es = ix4.entries.clone();
+    for e in es.iter_mut() { if e.path.ends_with("Kick_128.wav") { e.bpm = Some(128.0); e.key = Some("8A".into()); } if e.path.ends_with("Kick_124.wav") { e.bpm = Some(124.0); e.key = Some("3B".into()); } if e.path.ends_with("New_130.wav") { e.bpm = Some(65.0); e.key = Some("9A".into()); } }
+    let t = |v: Vec<usize>| v.iter().map(|&i| es[i].title.clone()).collect::<Vec<_>>();
+    let q = t(view(&es, &Filter { query: "kick", key_ref: None, bpm_ref: None }, SortCol::Bpm, false));
+    let kf = t(view(&es, &Filter { query: "", key_ref: Some("8A"), bpm_ref: None }, SortCol::Title, true));
+    let bf = t(view(&es, &Filter { query: "", key_ref: None, bpm_ref: Some((129.0, 2.0)) }, SortCol::Title, true));
+    chk("search, sort and filters", q == ["Kick 128", "Kick 124"] && kf == ["Kick 128", "New 130"] && bf == ["Kick 128", "New 130"], format!("search {q:?}, key-compatible with 8A {kf:?}, BPM 129 ±2% (incl. half time) {bf:?}"));
+    // scale: 3000 files, first scan and incremental rescan
+    let big = root.join("Big"); for d in 0..30 { std::fs::create_dir_all(big.join(format!("d{d}"))).unwrap(); }
+    let (l, r) = testgen::synth_drift(128.0, 128.0, 45, true, 0.05, 0.0, sr);
+    for i in 0..3000 { engine::write_wav(&big.join(format!("d{}/t{i}.wav", i % 30)), &l, &r, sr).unwrap(); }
+    let bf = vec![big.display().to_string()];
+    let (bi, br, _) = scan(&bf, &Index::default(), &cancel, &|_, _| {});
+    let (_, br2, _) = scan(&bf, &bi, &cancel, &|_, _| {});
+    let t0 = std::time::Instant::now(); let n = view(&bi.entries, &Filter { query: "t29", key_ref: None, bpm_ref: None }, SortCol::Title, true).len(); let vms = t0.elapsed().as_secs_f64() * 1000.0;
+    chk("3000 files", br.files == 3000 && br2.unchanged == 3000, format!("first scan {} ms, rescan {} ms, search+sort {vms:.1} ms ({n} hits)", br.ms, br2.ms));
+    let _ = std::fs::remove_dir_all(&root);
     ok
 }

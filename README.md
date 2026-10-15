@@ -2,11 +2,11 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Alpha 0.3](https://img.shields.io/badge/status-alpha%200.4-e8e000?style=flat-square&labelColor=24262b)
+![Status: Alpha 0.5](https://img.shields.io/badge/status-alpha%200.5-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Alpha 0.4:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Alpha 0.5:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio timeline with a transition](docs/screenshots/transition.png)
 
@@ -16,7 +16,7 @@ Live DJ software is built for performing: two decks, a crossfader, and one shot 
 
 It's native, fast, and doesn't need an account. No sign-up, no license keys, no cloud. It's your music on your machine.
 
-## Features (Alpha 0.4)
+## Features (Alpha 0.5)
 
 - **Timeline decks:** songs alternate on Deck 1 and Deck 2 as coloured clips with 3-band waveforms (low/mid/high), beat and bar lines, bar numbers and rough section tags (DOWN / CHORUS / UP). There's an overview strip, a time ruler, zoom (Ctrl+scroll), scrolling, a playhead, click-to-seek, and clip dragging with snapping (off / beat / half bar / bar).
 - **Automatic analysis:** global BPM (tempogram + full-track comb + beat regression, about 0.02 BPM), musical key (chromagram plus Krumhansl profiles) shown as **Camelot** codes, and bar 1. Results and waveforms are cached and re-analysed automatically when the analysis improves.
@@ -29,6 +29,7 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 - **Mixer:** 3-band EQ (High/Mid/Low), filter (LP ↔ HP), volume, solo and mute per deck, plus level meters and a master meter.
 - **Auto-order:** one click reorders the playlist for smooth transitions. Every pair of tracks is scored on Camelot key (same key, ±1, relative A/B, with energy-boost moves +2 / +7 weighted lower) and tempo (including half/double time). An optional energy curve (build up, peak in the middle, or flat) is also scored. A greedy start plus simulated annealing and 2-opt finds the order, taking about 20 ms for 100 tracks. Choose *Balanced*, *Harmonic first* or *Tempo first* in the ⏷ menu next to the button. Keep the first track in place, or lock any track with 🔒 in the playlist. The layout and beat-matched transitions are rebuilt, and Undo restores the old order.
 - **Compatibility indicators:** every transition shows a green / yellow / red badge with the key move and tempo change (e.g. `8A→9A ±1 · +1.6%`), on the timeline and in the playlist's *Next transition* column.
+- **Library:** add your music folders once (📁 *Add folder*). They're scanned recursively in the background (mp3, wav, flac, ogg, m4a/aac, aiff), and title, artist, album, genre and duration are read from the tags. The folder list is saved in `~/.config/mixstudio/library.json` and rescanned at every start; the index is incremental (path, size and modification time), so only new or changed files are read and removed files disappear. BPM and key are analysed in the background with limited concurrency (shared with the normal analysis cache) and a progress bar. The table is sortable (Title, Artist, BPM, Key, Duration, Genre, Folder), has a search box and **key-compatible** / **BPM ±%** filters relative to the selected (or current) track, and stays fast with 10 000+ files (virtualized rows). Double-click, *Add to mix*, or drag the selection onto the timeline; Ctrl/Shift for multi-select. Unplugged or failing drives show as *not available* / *not responding*; every disk access has a timeout, so a dying disk can't hang the scan, and their tracks stay in the index until the drive is back.
 - **Sample lanes:** drop extra audio on Sample 1/2. It's synced to the mix tempo.
 - **Metronome:** a click on mix beats, accented on the downbeat, with its own volume. It's never exported.
 - **Undo/redo**, **save/load mixes as JSON**, **WAV export** of the whole mix, and **drag and drop** of audio files (mp3, wav, flac, ogg, m4a).
@@ -54,7 +55,7 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 - Editing single beats in the beat map (warp markers) and non-4/4 meters
 - MIDI controller support
 - Headphone cue / pre-listen
-- A library browser
+- Library: watch folders for changes live (filesystem watcher); for now, rescan at start or with *Rescan now*
 - Video export
 - Rekordbox / Serato export
 - VST effects
@@ -105,7 +106,7 @@ Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates
 
 ## Usage
 
-1. Click **+** (Add tracks) or drop audio files on the window. Each new song goes on the next deck and overlaps the previous one by 16 bars.
+1. Open the **Library** tab, add your music folders, and double-click or drag tracks onto the timeline. Or click **+** (Add tracks) or drop audio files on the window. Each new song goes on the next deck and overlaps the previous one by 16 bars.
 2. Drag clips to adjust overlaps, and click a blue transition bar to choose a preset in the **Transition** tab.
 3. Fix any beatgrid in the **Track** tab, and set the mix tempo and key lock in **Master**.
 4. Press **Harmonize** for a key-friendly order, then **Export** to render a WAV.
@@ -129,7 +130,7 @@ Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates
 - Beat maps follow gradual drift, not sudden tempo jumps or rubato.
 - Analysis is tuned for 4/4 dance music. Some tracks are detected at half or double tempo (use ×2 / ÷2 or tap tempo).
 - Section tags are a rough energy guess.
-- Carousel, Library, Video, effects beyond EQ/filter/echo, and headphone cue aren't implemented yet.
+- Carousel, Video, effects beyond EQ/filter/echo, and headphone cue aren't implemented yet.
 - Decoded audio is held in memory (about 100 MB per 6-minute track).
 
 ## Not affiliated

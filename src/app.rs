@@ -23,11 +23,11 @@ const SAMPLE_H: f32 = 25.0;
 const TEMPO_H: f32 = 22.0;
 
 #[derive(PartialEq, Clone, Copy)]
-enum Tab { Zoom, Playlist, Transition, Track, Video, Effects, Master, Samples }
+enum Tab { Zoom, Library, Playlist, Transition, Track, Video, Effects, Master, Samples }
 #[derive(PartialEq, Clone, Copy)]
 enum Snapping { Off, Free, Half, Full }
 
-enum Msg { Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>) }
+enum Msg { Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>) }
 
 struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::AtomicU32> }
 
@@ -41,6 +41,9 @@ pub struct App {
     stems: HashMap<String, Arc<crate::stems::Stems>>, stem_prog: HashMap<String, Arc<std::sync::atomic::AtomicU32>>, stem_err: HashMap<String, String>,
     stem_tx: crossbeam_channel::Sender<StemJob>, dl_prog: Arc<std::sync::atomic::AtomicU32>, ep: Arc<Mutex<String>>,
     ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
+    lib: crate::library::Library, lib_q: String, lib_sort: crate::library::SortCol, lib_asc: bool, lib_key: bool, lib_bpm: bool, lib_pct: f64,
+    lib_sel: std::collections::HashSet<String>, lib_anchor: Option<usize>, lib_view: Vec<usize>,
+    lib_view_key: Option<(u64, String, crate::library::SortCol, bool, Option<String>, Option<(u64, u64)>)>, timeline_rect: Rect,
 }
 
 pub fn run(demo: Option<String>) {
@@ -115,7 +118,11 @@ impl App {
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let mut a = App { mix: Mix::default(), store: HashMap::new(), out: crate::audio::start(), ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
-            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true };
+            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
+            lib: { let c = cc.egui_ctx.clone(); crate::library::Library::new(crate::library::config_dir(), crate::library::cache_dir(), Arc::new(move || c.request_repaint())) },
+            lib_q: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
+            lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_view_key: None, timeline_rect: Rect::NOTHING };
+        if !a.lib.cfg.folders.is_empty() { a.lib.rescan(); }
         if let Some(d) = demo {
             let paths = crate::gen_demo(std::path::Path::new(&d));
             for p in &paths { if let Ok((au, an)) = analysis::load(p) { a.insert(p.clone(), au, an, None); } }
@@ -157,7 +164,7 @@ impl App {
     fn pick_files(&self, sample: Option<usize>) {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            if let Some(v) = rfd::FileDialog::new().set_title("Add tracks").add_filter("Audio", &["mp3", "wav", "flac", "ogg", "m4a"]).pick_files() { let _ = tx.send(Msg::Picked(v, sample)); }
+            if let Some(v) = rfd::FileDialog::new().set_title("Add tracks").add_filter("Audio", crate::library::EXTS).pick_files() { let _ = tx.send(Msg::Picked(v, sample)); }
         });
     }
     fn load_files(&mut self, v: Vec<PathBuf>, sample: Option<usize>) {
@@ -260,8 +267,10 @@ impl eframe::App for App {
                 Err(e) => self.status = format!("Could not read {}: {e}", p.display()) } }
             Msg::Stems(p, r) => { self.stem_prog.remove(&p); match r { Ok(st) => { self.stems.insert(p.clone(), st); self.stem_err.remove(&p); self.status = "Stems ready".into(); }
                 Err(e) => { self.status = format!("Stem separation failed: {e}"); self.stem_err.insert(p, e); } } }
+            Msg::LibFolders(v) => { for p in v { self.lib.add_folder(&p); } self.tab = Tab::Library; }
             Msg::Status(s) => self.status = s, Msg::Opened(p) => self.open(p), Msg::SaveTo(p) => self.save(p), Msg::ExportTo(p) => self.export(p),
         } }
+        self.lib.poll();
         let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
         let mut files: Vec<PathBuf> = vec![];
         for f in dropped {
@@ -272,8 +281,7 @@ impl eframe::App for App {
                 let p = dir.join(name); if std::fs::write(&p, &bytes[..]).is_ok() { files.push(p); }
             }
         }
-        let exts = ["mp3", "wav", "flac", "ogg", "m4a"];
-        files.retain(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| exts.contains(&e.to_ascii_lowercase().as_str())));
+        files.retain(|p| crate::library::is_audio(p));
         if !files.is_empty() { self.load_files(files, None); }
         let _ = self.out.tx.send(Cmd::Snap(Arc::new(self.build_snap())));
         if !ctx.wants_keyboard_input() {
@@ -281,13 +289,20 @@ impl eframe::App for App {
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) { if ctx.input(|i| i.modifiers.shift) { self.do_redo() } else { self.do_undo() } }
             if ctx.input(|i| i.key_pressed(egui::Key::Delete)) { self.remove_sel(); }
         }
-        if self.playing() || self.loading > 0 { ctx.request_repaint(); } else { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
+        if self.playing() || self.loading > 0 || self.lib.scanning { ctx.request_repaint(); } else { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
         self.top_bar(ctx);
         self.tab_bar(ctx);
-        egui::TopBottomPanel::bottom("bottom").exact_height(232.0).frame(egui::Frame::none().fill(C::from_rgb(28, 29, 33)).inner_margin(10.0)).show(ctx, |ui| self.bottom(ui));
+        egui::TopBottomPanel::bottom("bottom").exact_height(if self.tab == Tab::Library { 340.0 } else { 232.0 }).frame(egui::Frame::none().fill(C::from_rgb(28, 29, 33)).inner_margin(10.0)).show(ctx, |ui| self.bottom(ui));
         self.transport(ctx);
         egui::SidePanel::right("master").exact_width(42.0).resizable(false).frame(egui::Frame::none().fill(BG)).show(ctx, |ui| self.master_meter(ui));
-        egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| self.timeline(ui));
+        self.timeline_rect = egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| self.timeline(ui)).response.rect;
+        // drag from the library onto the timeline (or the tab bar / playlist area) adds the tracks to the mix
+        if let Some(p) = egui::DragAndDrop::payload::<LibDrag>(ctx) {
+            let pos = ctx.pointer_latest_pos();
+            egui::show_tooltip_at_pointer(ctx, egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("libdrag")), egui::Id::new("libdrag_tip"), |ui| { ui.label(format!("Add {} track(s) to the mix", p.0.len())); });
+            if ctx.input(|i| i.pointer.any_released()) { egui::DragAndDrop::clear_payload(ctx);
+                if pos.is_some_and(|q| self.timeline_rect.contains(q)) { self.lib_add(p.0.clone()); } }
+        }
         let hovering = ctx.input(|i| i.raw.hovered_files.len());
         if hovering > 0 {
             let r = ctx.screen_rect(); let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop")));
@@ -328,7 +343,7 @@ impl App {
                 let mid = ui.max_rect().center().x; let cur = ui.cursor().min.x; ui.add_space((mid - 200.0 - cur).max(10.0));
                 egui::Frame::none().fill(C::from_rgb(28, 29, 33)).rounding(8.0).inner_margin(3.0).show(ui, |ui| { ui.horizontal(|ui| {
                     for (k, n) in ["▭ Carousel", "☰ Playlist", "|||\\ Library", "〰 Studio"].iter().enumerate() {
-                        if seg_button(ui, n, self.top == k).on_hover_text(if k == 0 || k == 2 { "Coming in v2" } else { "" }).clicked() { self.top = k; if k == 1 || k == 2 { self.tab = Tab::Playlist; } }
+                        if seg_button(ui, n, self.top == k).on_hover_text(if k == 0 { "Coming in v2" } else { "" }).clicked() { self.top = k; if k == 1 { self.tab = Tab::Playlist; } if k == 2 { self.tab = Tab::Library; } }
                     } }); });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("⚙", |ui| {
@@ -352,7 +367,7 @@ impl App {
     fn tab_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("tabs").exact_height(40.0).frame(egui::Frame::none().fill(PANEL).inner_margin(6.0)).show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
-                let tabs = [(Tab::Zoom, "🔍 Zoom"), (Tab::Playlist, "☰ Playlist"), (Tab::Transition, "🔀 Transition"), (Tab::Track, "♫ Track"), (Tab::Video, "🎥 Video"), (Tab::Effects, "✨ Effects"), (Tab::Master, "🔊 Master"), (Tab::Samples, "⚙ Samples")];
+                let tabs = [(Tab::Zoom, "🔍 Zoom"), (Tab::Library, "📚 Library"), (Tab::Playlist, "☰ Playlist"), (Tab::Transition, "🔀 Transition"), (Tab::Track, "♫ Track"), (Tab::Video, "🎥 Video"), (Tab::Effects, "✨ Effects"), (Tab::Master, "🔊 Master"), (Tab::Samples, "⚙ Samples")];
                 ui.add_space((ui.available_width() / 2.0 - 320.0).max(0.0));
                 egui::Frame::none().fill(C::from_rgb(28, 29, 33)).rounding(8.0).inner_margin(3.0).show(ui, |ui| { ui.horizontal(|ui| {
                     for (t, n) in tabs { if seg_button(ui, n, self.tab == t).clicked() { self.tab = t; } } }); });
@@ -773,6 +788,7 @@ impl App {
         let dim = |s: &str| egui::RichText::new(s.to_string()).color(DIM);
         match self.tab {
             Tab::Playlist => self.playlist(ui),
+            Tab::Library => self.library_tab(ui),
             Tab::Transition => self.transition_tab(ui),
             Tab::Track => self.track_tab(ui),
             Tab::Zoom => { ui.heading("Zoom"); ui.add(egui::Slider::new(&mut self.ppb, 0.3..=80.0).logarithmic(true).text("pixels per beat"));
@@ -948,3 +964,106 @@ impl App {
 }
 
 fn compat_col(c: u8) -> C { match c { 0 => C::from_rgb(90, 200, 110), 1 => C::from_rgb(230, 200, 60), _ => C::from_rgb(230, 80, 70) } }
+
+#[derive(Clone)]
+struct LibDrag(Vec<String>);
+
+impl App {
+    /// reference track for the key / BPM filters: the selected mix track, else the last one in the mix
+    fn lib_ref(&self) -> Option<(String, String, f64)> {
+        let i = self.sel.filter(|&i| i < self.mix.tracks.len()).or_else(|| self.mix.main_order().last().copied())?;
+        let t = &self.mix.tracks[i]; Some((t.title.clone(), t.key.clone(), t.bpm))
+    }
+    fn lib_add(&mut self, paths: Vec<String>) {
+        let v: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).filter(|p| p.exists()).collect();
+        if v.is_empty() { self.status = "File not available (drive missing?)".into(); return; }
+        self.status = format!("Adding {} track(s) from the library…", v.len()); self.load_files(v, None);
+    }
+    fn pick_folder(&self) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || { if let Some(v) = rfd::FileDialog::new().set_title("Add music folder").pick_folders() { let _ = tx.send(Msg::LibFolders(v)); } });
+    }
+    fn library_tab(&mut self, ui: &mut egui::Ui) {
+        let dim = |s: String| egui::RichText::new(s).color(DIM).size(11.0);
+        let rf = self.lib_ref();
+        let mut add: Option<Vec<String>> = None;
+        ui.horizontal(|ui| {
+            if ui.button("＋ Add folder…").on_hover_text("Add a music folder; it is scanned recursively and kept up to date at every start").clicked() { self.pick_folder(); }
+            if ui.add_enabled(!self.lib.cfg.folders.is_empty(), egui::Button::new("⟳ Rescan now")).clicked() { self.lib.rescan(); }
+            ui.separator();
+            ui.add(egui::TextEdit::singleline(&mut self.lib_q).hint_text("Search title, artist, album, genre…").desired_width(220.0));
+            ui.checkbox(&mut self.lib_key, "Key-compatible").on_hover_text("Same key, ±1 or relative (Camelot) to the reference track");
+            ui.checkbox(&mut self.lib_bpm, "BPM ±"); ui.add(egui::DragValue::new(&mut self.lib_pct).range(1.0..=30.0).speed(0.2).suffix(" %"));
+            match &rf { Some((t, k, b)) => ui.label(dim(format!("relative to: {t} ({k}, {b:.1} BPM)"))), None => ui.label(dim("no reference track (add one to the mix)".into())) };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let n = self.lib_sel.len();
+                if ui.add_enabled(n > 0, egui::Button::new(egui::RichText::new(format!("Add to mix ({n})")).color(if n > 0 { C::BLACK } else { DIM })).fill(if n > 0 { ACCENT } else { PANEL })).clicked() {
+                    let mut v: Vec<String> = self.lib_sel.iter().cloned().collect(); v.sort(); add = Some(v); }
+                let l = &self.lib;
+                if l.scanning { ui.spinner(); ui.label(dim(if l.progress.1 > 0 { format!("Scanning: reading tags {}/{}", l.progress.0, l.progress.1) } else { "Scanning folders…".into() })); }
+                else if l.analysing.1 > 0 { ui.add(egui::ProgressBar::new(l.analysing.0 as f32 / l.analysing.1 as f32).desired_width(120.0).text(format!("BPM/key {}/{}", l.analysing.0, l.analysing.1))); }
+                else if let Some(r) = &l.report { ui.label(dim(format!("{} tracks · last scan: +{} new, {} changed, {} removed, {} unreadable{} in {:.1} s", r.files, r.added, r.updated, r.removed, r.errors + r.timed_out,
+                    if r.timed_out > 0 { format!(" ({} timed out)", r.timed_out) } else { String::new() }, r.ms as f64 / 1000.0))); }
+            });
+        });
+        // folders
+        let mut remove: Option<String> = None;
+        ui.horizontal_wrapped(|ui| {
+            if self.lib.cfg.folders.is_empty() { ui.label(dim("No music folders yet. Click \"Add folder…\" to build your library.".into())); }
+            for f in &self.lib.cfg.folders {
+                let (txt, col) = match self.lib.states.get(f) { Some(crate::library::FolderState::Available(n)) => (format!("✔ {n}"), C::from_rgb(120, 200, 140)),
+                    Some(crate::library::FolderState::Missing) => ("⚠ not available".to_string(), C::from_rgb(230, 170, 60)),
+                    Some(crate::library::FolderState::NotResponding) => ("⚠ not responding".to_string(), C::from_rgb(230, 100, 80)), None => ("…".to_string(), DIM) };
+                egui::Frame::none().fill(C::from_rgb(40, 42, 47)).rounding(4.0).inner_margin(egui::Margin::symmetric(6.0, 2.0)).show(ui, |ui| { ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(f).size(11.0)); ui.label(egui::RichText::new(txt).color(col).size(11.0))
+                        .on_hover_text("Not available: the folder or drive is missing (its tracks are kept). Not responding: the drive did not answer in time."); 
+                    if ui.small_button("✖").on_hover_text("Remove this folder from the library").clicked() { remove = Some(f.clone()); } }); });
+            }
+        });
+        if let Some(f) = remove { self.lib.remove_folder(&f); self.lib_sel.clear(); }
+        // filtered + sorted view, cached until something changes
+        let key_ref = if self.lib_key { rf.as_ref().map(|r| r.1.clone()) } else { None };
+        let bpm_ref = if self.lib_bpm { rf.as_ref().map(|r| (r.2, self.lib_pct)) } else { None };
+        let vk = (self.lib.gen, self.lib_q.clone(), self.lib_sort, self.lib_asc, key_ref.clone(), bpm_ref.map(|b| (b.0.to_bits(), b.1.to_bits())));
+        if self.lib_view_key.as_ref() != Some(&vk) {
+            self.lib_view = crate::library::view(&self.lib.index.entries, &crate::library::Filter { query: &self.lib_q, key_ref: key_ref.as_deref(), bpm_ref }, self.lib_sort, self.lib_asc);
+            self.lib_view_key = Some(vk);
+        }
+        use crate::library::SortCol;
+        let cols = [(SortCol::Title, "Title"), (SortCol::Artist, "Artist"), (SortCol::Bpm, "BPM"), (SortCol::Key, "Key"), (SortCol::Duration, "Duration"), (SortCol::Genre, "Genre"), (SortCol::Folder, "Folder")];
+        let mut clicked: Option<(usize, egui::Modifiers)> = None; let mut dbl: Option<usize> = None;
+        let mods = ui.input(|i| i.modifiers);
+        let avail = ui.available_height();
+        egui_extras::TableBuilder::new(ui).striped(true).resizable(true).max_scroll_height(avail).min_scrolled_height(0.0)
+            .column(egui_extras::Column::initial(260.0).at_least(80.0)).column(egui_extras::Column::initial(180.0)).column(egui_extras::Column::initial(56.0))
+            .column(egui_extras::Column::initial(44.0)).column(egui_extras::Column::initial(62.0)).column(egui_extras::Column::initial(110.0)).column(egui_extras::Column::remainder())
+            .header(18.0, |mut h| { for (c, n) in cols { h.col(|ui| { let arrow = if self.lib_sort == c { if self.lib_asc { " ⏶" } else { " ⏷" } } else { "" };
+                if ui.add(egui::Label::new(egui::RichText::new(format!("{n}{arrow}")).size(10.5).color(if self.lib_sort == c { ACCENT } else { DIM })).sense(Sense::click())).clicked() {
+                    if self.lib_sort == c { self.lib_asc = !self.lib_asc; } else { self.lib_sort = c; self.lib_asc = true; } } }); } })
+            .body(|body| { let entries = &self.lib.index.entries; let view = &self.lib_view; let sel = &self.lib_sel; let states = &self.lib.states;
+                body.rows(19.0, view.len(), |mut row| { let k = row.index(); let e = &entries[view[k]];
+                    let on = sel.contains(&e.path);
+                    let gone = !states.get(&e.folder).is_some_and(|s| matches!(s, crate::library::FolderState::Available(_)));
+                    let col = if on { ACCENT } else if e.error.is_some() || gone { DIM } else { TXT };
+                    let cells = [e.title.clone(), e.artist.clone(), e.bpm.map(|b| format!("{b:.1}")).unwrap_or_else(|| if e.analysis_error.is_some() { "–".into() } else { "…".into() }),
+                        e.key.clone().unwrap_or_default(), fmt_t(e.duration), e.genre.clone(),
+                        std::path::Path::new(&e.path).parent().and_then(|p| p.strip_prefix(&e.folder).ok()).map(|p| { let s = p.display().to_string(); if s.is_empty() { std::path::Path::new(&e.folder).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() } else { s } }).unwrap_or_default()];
+                    for (ci, c) in cells.into_iter().enumerate() { row.col(|ui| {
+                        let r = ui.add(egui::Label::new(egui::RichText::new(c).color(col).size(11.5)).truncate().sense(Sense::click_and_drag()));
+                        let r = if ci == 0 { match (&e.error, gone) { (Some(err), _) => r.on_hover_text(format!("Unreadable: {err}")), (None, true) => r.on_hover_text("Folder not available"), _ => r.on_hover_text(&e.path) } } else { r };
+                        if r.double_clicked() { dbl = Some(k); } else if r.clicked() { clicked = Some((k, mods)); }
+                        if r.drag_started() { let paths: Vec<String> = if on { let mut v: Vec<String> = sel.iter().cloned().collect(); v.sort(); v } else { vec![e.path.clone()] };
+                            r.dnd_set_drag_payload(LibDrag(paths)); }
+                    }); }
+                }); });
+        if let Some(k) = dbl { add = Some(vec![self.lib.index.entries[self.lib_view[k]].path.clone()]); }
+        if let Some((k, m)) = clicked {
+            let p = self.lib.index.entries[self.lib_view[k]].path.clone();
+            if m.shift { if let Some(a) = self.lib_anchor { let (x, y) = (a.min(k), a.max(k)); if !m.command { self.lib_sel.clear(); }
+                    for j in x..=y.min(self.lib_view.len().saturating_sub(1)) { self.lib_sel.insert(self.lib.index.entries[self.lib_view[j]].path.clone()); } } }
+            else if m.command { if !self.lib_sel.remove(&p) { self.lib_sel.insert(p); } self.lib_anchor = Some(k); }
+            else { self.lib_sel.clear(); self.lib_sel.insert(p); self.lib_anchor = Some(k); }
+        }
+        if let Some(v) = add { self.lib_add(v); }
+    }
+}
