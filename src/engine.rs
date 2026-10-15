@@ -432,3 +432,38 @@ mod section_audio_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod saved_mix_diagnostics {
+    use super::*;
+    #[test]
+    #[ignore = "requires MIXSTUDIO_DIAGNOSTIC_PROJECT pointing to local audio"]
+    fn compare_static_and_live_snapshots_in_saved_transition() {
+        let path=std::env::var("MIXSTUDIO_DIAGNOSTIC_PROJECT").unwrap();
+        let mix:Mix=serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let audio:Vec<_>=mix.tracks.iter().map(|t|Some(Arc::new(crate::analysis::load(std::path::Path::new(&t.path)).unwrap().0))).collect();
+        let (_,_,s,e)=mix.transitions()[0];
+        println!("Transition {s:.3}..{e:.3}, {:.2}s, mix BPM {} mode {}",mix.secs(s,e),mix.bpm,mix.tempo_mode);
+        for mode in [1,0] {
+            let mut compare=mix.clone(); for t in &mut compare.tracks { t.grid_mode=mode; }
+            println!("Alignment grid {mode}: {:?}",crate::overlap_alignment(&compare,&audio,44100,true));
+        }
+        for sr in [44100,48000] {
+            let snap=Arc::new(Snap::build(&mix,&audio));
+            let t0=std::time::Instant::now(); let (l,r)=render_offline(snap.clone(),sr,s-8.0,e+8.0);
+            println!("Static {sr}: {:.3}s CPU for {:.3}s audio",t0.elapsed().as_secs_f64(),l.len() as f64/sr as f64);
+            let mut engine=Engine::new(sr as f32,Arc::new(Shared::new()));engine.handle(Cmd::Snap(snap));engine.handle(Cmd::Seek(s-8.0));engine.handle(Cmd::Play(true));
+            let mut buf=vec![0.0;1024];let mut rendered=0;let mut maxdiff=0.0f32; let mut maxcost=0.0f64; let mut ids=vec![];let t0=std::time::Instant::now();
+            while rendered<l.len() {
+                if rendered % (512*4)==0 { engine.handle(Cmd::Snap(Arc::new(Snap::build(&mix.clone(),&audio)))); }
+                let start=std::time::Instant::now();engine.render(&mut buf,2);maxcost=maxcost.max(start.elapsed().as_secs_f64());
+                let next:Vec<_>=engine.ws.iter().take(2).map(|w|w.id).collect();if ids!=next {println!("WSOLA identity changed at beat {:.3}: {:?}",engine.beat,next);ids=next;}
+                for i in 0..512.min(l.len()-rendered) {maxdiff=maxdiff.max((buf[i*2]-l[rendered+i]).abs()).max((buf[i*2+1]-r[rendered+i]).abs());} rendered+=512;
+            }
+            println!("Live {sr}: {:.3}s CPU, max callback {:.3}ms, static/live diff {maxdiff}",t0.elapsed().as_secs_f64(),maxcost*1000.0);
+            assert!(maxdiff<1e-6);
+            let dir=std::env::temp_dir().join("mixstudio-current-audio-check");std::fs::create_dir_all(&dir).unwrap();
+            write_wav(&dir.join(format!("current-{sr}.wav")),&l,&r,sr).unwrap();
+        }
+    }
+}

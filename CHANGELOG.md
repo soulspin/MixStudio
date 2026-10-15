@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.16.1-beta
+
+- Use the audio backend's default buffer instead of forcing a 512-frame buffer. On Linux/ALSA the forced buffer implied 128-frame periods (about 2.9 ms at 44.1 kHz), which produced an observed underrun with the native editor running. The backend's default provided a larger scheduling margin and passed the same native playback check without an underrun.
+- Add optional saved-project diagnostics comparing offline rendering with live snapshot updates at 44.1/48 kHz, and checking audio-device clock progression. These checks read local audio and are ignored by the normal test suite.
+
 ## 0.16.0-beta
 
 ### Section editing
