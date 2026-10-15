@@ -57,8 +57,40 @@ impl Grid {
         Grid { map, r, u0, bpm, offset, start }
     }
     pub fn dynamic(&self) -> bool { self.map.is_some() }
+    pub fn ratio(&self) -> f64 { self.r }
     /// Mix beat -> source seconds.
     #[inline] pub fn sec(&self, b: f64) -> f64 { let x = b - self.start; match &self.map { Some(m) => m.t_of(self.u0 + x * self.r), None => self.offset + x * 60.0 / self.bpm } }
     /// Source seconds -> mix beat.
     pub fn beat(&self, s: f64) -> f64 { self.start + match &self.map { Some(m) => (m.u_of(s) - self.u0) / self.r, None => (s - self.offset) * self.bpm / 60.0 } }
+}
+
+/// Beatgrid editor operations. Every edit keeps the beats strictly increasing.
+impl BeatMap {
+    /// Build an explicit beat map (one entry per track beat) from any grid, so a fixed grid or
+    /// a x2 / /2 map can be edited beat by beat. `start` is the track's start beat.
+    pub fn from_grid(g: &Grid, start: f64, dur: f64, bpm: f64) -> BeatMap {
+        let lo = (g.beat(0.0) - start).floor() as i64 - 1; let hi = (g.beat(dur) - start).ceil() as i64 + 1;
+        BeatMap { beats: (lo..=hi).map(|k| g.sec(start + k as f64)).collect(), bpm }
+    }
+    /// Shift every beat by `d` seconds.
+    pub fn shift(&mut self, d: f64) { for b in &mut self.beats { *b += d; } }
+    /// Move beat `i` alone by `d` seconds, clamped 5 ms inside its neighbours. Returns the applied shift.
+    pub fn move_single(&mut self, i: usize, d: f64) -> f64 {
+        let n = self.beats.len(); if i >= n { return 0.0; }
+        let lo = if i > 0 { self.beats[i - 1] + 0.005 } else { f64::MIN };
+        let hi = if i + 1 < n { self.beats[i + 1] - 0.005 } else { f64::MAX };
+        let old = self.beats[i]; self.beats[i] = (old + d).clamp(lo, hi); self.beats[i] - old
+    }
+    /// Move beat `i` by `d` seconds and stretch everything after the pivot (`pivot` < i stays put,
+    /// as do all beats before it). Returns the stretch factor applied to the beat spacing.
+    pub fn stretch_following(&mut self, pivot: usize, i: usize, d: f64) -> f64 {
+        let n = self.beats.len(); if i >= n { return 1.0; }
+        if pivot >= i { for b in &mut self.beats[i..] { *b += d; } return 1.0; }
+        let tp = self.beats[pivot]; let span = self.beats[i] - tp;
+        let s = ((span + d) / span).clamp(0.25, 4.0);
+        for b in &mut self.beats[pivot + 1..] { *b = tp + (*b - tp) * s; }
+        s
+    }
+    /// Drop the beats before `i` (the grid extrapolates backwards from the new first beat).
+    pub fn trim_before(&mut self, i: usize) { if i > 0 && self.beats.len() - i >= 8 { self.beats.drain(..i); } }
 }

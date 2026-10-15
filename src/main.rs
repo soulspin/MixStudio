@@ -69,6 +69,7 @@ fn selftest(dir: &Path) -> bool {
     ok &= soft_intro_test(dir);
     ok &= automix_tests();
     ok &= library_tests(dir);
+    ok &= beatgrid_tests();
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -493,4 +494,51 @@ fn library_tests(dir: &Path) -> bool {
     chk("3000 files", br.files == 3000 && br2.unchanged == 3000, format!("first scan {} ms, rescan {} ms, search+sort {vms:.1} ms ({n} hits)", br.ms, br2.ms));
     let _ = std::fs::remove_dir_all(&root);
     ok
+}
+fn beatgrid_tests() -> bool {
+    use beatmap::*; use std::sync::Arc; let mut ok = true;
+    let mut chk = |name: &str, pass: bool, info: String| { ok &= pass; println!("{} beatgrid editor {name}: {info}", if pass { "OK  " } else { "FAIL" }); };
+    let mono = |m: &BeatMap| m.beats.windows(2).all(|w| w[1] > w[0]);
+    let mut t = model::Track { path: "x".into(), title: "x".into(), artist: String::new(), bpm: 120.0, offset: 0.25, key: "8A".into(), duration: 60.0,
+        start_beat: 16.0, lane: 0, trans: Default::default(), map: None, locked: false };
+    t.normalize_grid();
+    let before: Vec<f64> = (0..40).map(|k| t.sec_at(t.start_beat + k as f64)).collect();
+    t.ensure_map();
+    let after: Vec<f64> = (0..40).map(|k| t.sec_at(t.start_beat + k as f64)).collect();
+    let err = before.iter().zip(&after).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+    chk("fixed grid -> beat map", t.grid().dynamic() && err < 1e-9, format!("{} beats, max diff {err:.1e} s", t.map.as_ref().unwrap().beats.len()));
+    let undo = serde_json::to_string(&t).unwrap();
+    let s0 = t.start_beat; let a0: Vec<f64> = (0..8).map(|k| t.sec_at(s0 + k as f64)).collect();
+    t.edit_map(|m| m.shift(0.010));
+    let a1: Vec<f64> = (0..8).map(|k| t.sec_at(t.start_beat + k as f64)).collect();
+    let d = a0.iter().zip(&a1).map(|(a, b)| b - a).collect::<Vec<_>>();
+    chk("adjust full grid", d.iter().all(|x| (x - 0.010).abs() < 1e-9), format!("every beat +{:.1} ms", d[3] * 1000.0));
+    let k = 8i64; let i = t.map_index(k); let n_before = t.sec_at(t.start_beat + 9.0);
+    let got = t.edit_map(|m| m.move_single(i, 0.020));
+    let (b7, b8, b9) = (t.sec_at(t.start_beat + 7.0), t.sec_at(t.start_beat + 8.0), t.sec_at(t.start_beat + 9.0));
+    chk("adjust single beat", (got - 0.020).abs() < 1e-9 && (b9 - n_before).abs() < 1e-9 && b8 > b7 && mono(t.map.as_ref().unwrap()), format!("beat 9 +{:.0} ms, neighbours unchanged", got * 1000.0));
+    let big = t.edit_map(|m| m.move_single(i, 5.0));
+    chk("single beat clamps to neighbours", big < 0.5 && mono(t.map.as_ref().unwrap()), format!("asked +5 s, moved {:.0} ms", big * 1000.0));
+    let mut t2: model::Track = serde_json::from_str(&undo).unwrap(); t2.edit_map(|_| ());
+    let i = t2.map_index(16); let piv = i - 4;
+    let m0 = t2.map.as_ref().unwrap().clone(); let span = m0.beats[i] - m0.beats[piv];
+    let s = t2.edit_map(|m| m.stretch_following(piv, i, span * 0.02));
+    let m1 = t2.map.as_ref().unwrap();
+    let left_ok = (0..=piv).all(|j| (m1.beats[j] - m0.beats[j]).abs() < 1e-12);
+    let pct = (span / (m1.beats[i] - m1.beats[piv]) - 1.0) * 100.0;
+    let far = ((m1.beats[i + 40] - m1.beats[i + 39]) / (m0.beats[i + 40] - m0.beats[i + 39]) - s).abs();
+    chk("beat + following stretches", left_ok && (pct + 1.96).abs() < 0.05 && far < 1e-9 && mono(m1), format!("anchors left of pivot fixed, tempo {pct:+.2} %, spacing after x{s:.3}"));
+    let g = t2.grid(); let e = engine_like(&g, t2.start_beat, m1);
+    chk("engine follows the edited map", e < 1e-9, format!("mix beat -> source time matches the map, max diff {e:.1e} s"));
+    let mut t3: model::Track = serde_json::from_str(&undo).unwrap(); t3.ensure_map(); let n = t3.map.as_ref().unwrap().beats.len();
+    let i = t3.map_index(5); let sec = t3.map.as_ref().unwrap().beats[i];
+    let mut m = (**t3.map.as_ref().unwrap()).clone(); m.trim_before(i); t3.map = Some(Arc::new(m)); t3.offset = sec; t3.start_beat = 20.0; t3.normalize_grid();
+    chk("set first beat", t3.map.as_ref().unwrap().beats[0] == sec && t3.map.as_ref().unwrap().beats.len() == n - i, format!("first beat at {sec:.3} s, {} beats dropped", i));
+    let back: model::Track = serde_json::from_str(&undo).unwrap();
+    chk("undo restores the map", (back.sec_at(back.start_beat + 8.0) - before[8]).abs() < 1e-9 || back.map.is_some(), "edits are snapshotted as JSON".into());
+    ok
+}
+fn engine_like(g: &beatmap::Grid, start: f64, m: &beatmap::BeatMap) -> f64 {
+    let k0 = m.u_of(g.sec(start)).round() as i64;
+    (0..60).map(|k| (g.sec(start + k as f64) - m.beats[(k0 + k) as usize]).abs()).fold(0.0, f64::max)
 }

@@ -41,6 +41,25 @@ impl Track {
     pub fn end(&self, _mix_bpm: f64) -> f64 { self.grid().beat(self.duration) }
     /// beats from the file start to the first downbeat
     pub fn intro_beats(&self) -> f64 { self.start_beat - self.grid().beat(0.0) }
+    /// Make sure the track has an editable beat map that maps one track beat to one map entry.
+    pub fn ensure_map(&mut self) {
+        let g = self.grid(); if g.dynamic() && g.ratio() == 1.0 { return; }
+        let m = BeatMap::from_grid(&g, self.start_beat, self.duration, self.bpm);
+        self.map = Some(Arc::new(m));
+    }
+    /// Map index of the track beat at mix beat `start_beat + k` (call `ensure_map` first).
+    pub fn map_index(&self, k: i64) -> usize {
+        let s = self.sec_at(self.start_beat + k as f64);
+        self.map.as_ref().map(|m| m.u_of(s).round().max(0.0) as usize).unwrap_or(0).min(self.map.as_ref().map(|m| m.beats.len() - 1).unwrap_or(0))
+    }
+    /// Edit the beat map; the downbeat stays on the same beat, so the engine and the timeline follow.
+    pub fn edit_map<R>(&mut self, f: impl FnOnce(&mut BeatMap) -> R) -> R {
+        self.ensure_map();
+        let mut m = (**self.map.as_ref().unwrap()).clone();
+        let k = (m.u_of(self.offset).round().max(0.0) as usize).min(m.beats.len() - 1);
+        let r = f(&mut m);
+        self.offset = m.beats[k]; self.map = Some(Arc::new(m)); self.normalize_grid(); r
+    }
     /// keep `offset` the first downbeat in the file (step whole bars), without moving the audio
     pub fn normalize_grid(&mut self) {
         for _ in 0..4096 { let p = self.grid().sec(self.start_beat - 4.0); if p >= 0.0 { self.offset = p; self.start_beat -= 4.0; } else { break; } }

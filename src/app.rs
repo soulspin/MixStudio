@@ -27,6 +27,20 @@ enum Tab { Zoom, Library, Playlist, Transition, Track, Video, Effects, Master, S
 #[derive(PartialEq, Clone, Copy)]
 enum Snapping { Off, Free, Half, Full }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BmMode { Grid, Following, Single }
+impl BmMode {
+    pub const ALL: [BmMode; 3] = [BmMode::Grid, BmMode::Following, BmMode::Single];
+    pub fn name(self) -> &'static str { match self { BmMode::Grid => "⇔ Adjust full grid", BmMode::Following => "⇥ Beat + following", BmMode::Single => "• Single beat" } }
+    pub fn help(self) -> &'static str { match self {
+        BmMode::Grid => "Drag a beat marker to shift the whole beat grid",
+        BmMode::Following => "Drag a beat marker: beats up to one bar to the left stay anchored, the following beats stretch (tempo change in %)",
+        BmMode::Single => "Drag a beat marker to move only that beat" } }
+}
+fn bm_col(m: BmMode) -> C { match m { BmMode::Grid => C::from_rgb(90, 200, 255), BmMode::Following => C::from_rgb(255, 170, 40), BmMode::Single => C::from_rgb(120, 230, 120) } }
+#[derive(Clone)]
+struct BmDrag { ti: usize, k: i64, i: usize, pivot: usize, span: f64, lastx: f32, mode: BmMode }
+
 enum Msg { Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>) }
 
 struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::AtomicU32> }
@@ -37,7 +51,7 @@ pub struct App {
     sel: Option<usize>, sel_in: Option<usize>, undo: Vec<String>, redo: Vec<String>,
     tx: crossbeam_channel::Sender<Msg>, rx: crossbeam_channel::Receiver<Msg>, loading: usize,
     drag: Option<(usize, f64, f64)>, loop_on: bool, bars: u32, snapping: Snapping, lock: bool,
-    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, taps: Vec<std::time::Instant>,
+    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
     stems: HashMap<String, Arc<crate::stems::Stems>>, stem_prog: HashMap<String, Arc<std::sync::atomic::AtomicU32>>, stem_err: HashMap<String, String>,
     stem_tx: crossbeam_channel::Sender<StemJob>, dl_prog: Arc<std::sync::atomic::AtomicU32>, ep: Arc<Mutex<String>>,
     ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
@@ -118,7 +132,7 @@ impl App {
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let mut a = App { mix: Mix::default(), store: HashMap::new(), out: crate::audio::start(), ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
-            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
+            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib: { let c = cc.egui_ctx.clone(); crate::library::Library::new(crate::library::config_dir(), crate::library::cache_dir(), Arc::new(move || c.request_repaint())) },
             lib_q: String::new(), lib_path: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
             lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_view_key: None, timeline_rect: Rect::NOTHING };
@@ -581,6 +595,7 @@ impl App {
         let trans = self.mix.transitions();
         let (d1, d2) = (rows[0].1, rows[1].1);
         let mut clicked_clip: Option<(usize, f64, u8)> = None;
+        let mut bm_mode = self.bm_mode; let mut bm_act: Option<(usize, i64, u8)> = None; let mut bm_hover: Option<egui::Pos2> = None;
         for (ti, t) in self.mix.tracks.iter().enumerate() {
             let Some((_, an)) = self.store.get(&t.path) else { continue };
             let row = rows[t.lane.min(3)].1;
@@ -692,6 +707,26 @@ impl App {
                 else if resp.clicked() && shift && !sample { clicked_clip = Some((ti, xb(pp.x), 3)); }
                 else if resp.clicked() { clicked_clip = Some((ti, xb(pp.x), 0)); }
             }
+            if !sample && ppb >= 22.0 {
+                let k0 = (xb(vis.left()) - t.start_beat).ceil() as i64; let k1 = (xb(vis.right()) - t.start_beat).floor() as i64;
+                for k in k0..=k1 {
+                    let x = bx(t.start_beat + k as f64);
+                    let hr = Rect::from_center_size(pos2(x, wave.top() + 7.0), vec2(12.0, 14.0));
+                    let r = ui.interact(hr, ui.id().with(("bm", ti, k)), Sense::click_and_drag());
+                    let hot = r.hovered() || r.dragged() || self.bm_drag.as_ref().map_or(false, |d| d.ti == ti && d.k == k);
+                    let col = if hot { bm_col(bm_mode) } else if k.rem_euclid(4) == 0 { C::from_rgb(235, 235, 240) } else { C::from_rgb(150, 150, 160) };
+                    tp.add(egui::Shape::convex_polygon(vec![pos2(x - 5.0, wave.top() + 1.0), pos2(x + 5.0, wave.top() + 1.0), pos2(x, wave.top() + 9.0)], col, Stroke::NONE));
+                    if hot { tp.line_segment([pos2(x, wave.top()), pos2(x, wave.bottom())], Stroke::new(1.5_f32, col)); }
+                    if r.hovered() { bm_hover = Some(pos2(x, wave.top())); ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal); }
+                    if r.drag_started() { bm_act = Some((ti, k, 0)); }
+                    r.context_menu(|ui| {
+                        if ui.button("Set downbeat here").clicked() { bm_act = Some((ti, k, 1)); ui.close_menu(); }
+                        if ui.button("Set first beat here").clicked() { bm_act = Some((ti, k, 2)); ui.close_menu(); }
+                        ui.separator();
+                        for m in BmMode::ALL { ui.radio_value(&mut bm_mode, m, m.name()); }
+                    });
+                }
+            }
         }
         // transition boxes spanning both decks
         let mut clicked_trans = None;
@@ -729,6 +764,47 @@ impl App {
             else if drag == 2 { self.snapshot(); self.grid_drag = Some((ti, ui.input(|i| i.pointer.hover_pos()).map(|p| p.x).unwrap_or(0.0))); }
             else if drag == 3 { self.snapshot(); let t = &self.mix.tracks[ti]; let line = t.start_beat + (b - t.start_beat).round(); self.set_downbeat_at(ti, line); self.status = "Downbeat set".into(); }
             else { self.seek(b); if let Some(x) = trans.iter().find(|x| x.1 == ti || x.0 == ti) { self.sel_in = Some(x.1); } }
+        }
+        self.bm_mode = bm_mode;
+        if let Some(p) = bm_hover { self.bm_pop = Some((p, std::time::Instant::now())); }
+        if let Some((p, at)) = self.bm_pop {
+            let a = egui::Area::new(egui::Id::new("bm_pop")).order(egui::Order::Foreground).fixed_pos(pos2(p.x - 120.0, p.y - 30.0)).show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| { ui.horizontal(|ui| { for m in BmMode::ALL { ui.selectable_value(&mut self.bm_mode, m, m.name()).on_hover_text(m.help()); } }); });
+            });
+            let keep = a.response.rect.expand(6.0).contains(ui.input(|i| i.pointer.hover_pos()).unwrap_or_default());
+            if keep || self.bm_drag.is_some() { self.bm_pop = Some((p, if keep { std::time::Instant::now() } else { at })); }
+            else if at.elapsed().as_secs_f32() > 0.7 { self.bm_pop = None; }
+        }
+        if let Some((ti, k, what)) = bm_act {
+            self.snapshot(); self.sel = Some(ti);
+            match what {
+                0 => { let t = &mut self.mix.tracks[ti]; t.ensure_map(); let i = t.map_index(k); let m = t.map.as_ref().unwrap();
+                    let pivot = i.saturating_sub(4); let span = m.beats[i] - m.beats[pivot];
+                    self.bm_drag = Some(BmDrag { ti, k, i, pivot, span, lastx: ui.input(|i| i.pointer.hover_pos()).map(|p| p.x).unwrap_or(0.0), mode: self.bm_mode }); }
+                1 => { let b = self.mix.tracks[ti].start_beat + k as f64; self.set_downbeat_at(ti, b); self.status = "Downbeat set".into(); }
+                _ => { let t = &mut self.mix.tracks[ti]; t.ensure_map(); let i = t.map_index(k); let mb = t.start_beat + k as f64;
+                    let sec = t.map.as_ref().unwrap().beats[i];
+                    let mut m = (**t.map.as_ref().unwrap()).clone(); m.trim_before(i); t.map = Some(Arc::new(m));
+                    t.offset = sec; t.start_beat = (mb / 4.0).round() * 4.0; t.normalize_grid(); self.status = "First beat set".into(); }
+            }
+        }
+        if let Some(d) = self.bm_drag.clone() {
+            if ui.input(|i| i.pointer.primary_down()) && d.ti < self.mix.tracks.len() {
+                if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) { if pp.x != d.lastx {
+                    let t = &mut self.mix.tracks[d.ti];
+                    let m = t.map.as_ref().unwrap(); let per = if d.i + 1 < m.beats.len() { m.beats[d.i + 1] - m.beats[d.i] } else { 60.0 / t.bpm };
+                    let dsec = ((pp.x - d.lastx) / ppb) as f64 * per;
+                    let msg = match d.mode {
+                        BmMode::Grid => { t.edit_map(|m| m.shift(dsec)); let off = t.map.as_ref().unwrap().beats[d.i] - (d.span + 0.0) * 0.0; format!("Grid moved (beat at {off:.3} s)") }
+                        BmMode::Single => { t.edit_map(|m| m.move_single(d.i, dsec)); format!("Beat moved to {:.3} s", t.map.as_ref().unwrap().beats[d.i]) }
+                        BmMode::Following => { t.edit_map(|m| m.stretch_following(d.pivot, d.i, dsec)); let m = t.map.as_ref().unwrap();
+                            let pct = if d.pivot < d.i { (d.span / (m.beats[d.i] - m.beats[d.pivot]) - 1.0) * 100.0 } else { 0.0 };
+                            ui.painter().text(pp + vec2(12.0, -14.0), Align2::LEFT_BOTTOM, format!("{pct:+.2} %"), FontId::proportional(12.0), bm_col(BmMode::Following));
+                            format!("Following beats stretched: tempo {pct:+.2} % (anchored 1 bar to the left)") }
+                    };
+                    self.status = msg; self.bm_drag = Some(BmDrag { lastx: pp.x, ..d });
+                } }
+            } else { self.bm_drag = None; }
         }
         if let Some((ti, lastx)) = self.grid_drag {
             if ui.input(|i| i.pointer.primary_down()) { if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) {
