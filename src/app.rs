@@ -1,6 +1,6 @@
 use crate::analysis::{self, Analysis, Audio, PEAK_HOP};
 use crate::engine::{self, Cmd, Shared, Snap};
-use crate::model::{camelot_dist, Mix, Preset, StemMode, Track};
+use crate::model::{Mix, Preset, StemMode, Track};
 use eframe::egui::{self, pos2, vec2, Align2, Color32 as C, FontId, Rect, Rounding, Sense, Stroke};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -40,6 +40,7 @@ pub struct App {
     file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, taps: Vec<std::time::Instant>,
     stems: HashMap<String, Arc<crate::stems::Stems>>, stem_prog: HashMap<String, Arc<std::sync::atomic::AtomicU32>>, stem_err: HashMap<String, String>,
     stem_tx: crossbeam_channel::Sender<StemJob>, dl_prog: Arc<std::sync::atomic::AtomicU32>, ep: Arc<Mutex<String>>,
+    ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
 }
 
 pub fn run(demo: Option<String>) {
@@ -114,7 +115,7 @@ impl App {
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let mut a = App { mix: Mix::default(), store: HashMap::new(), out: crate::audio::start(), ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
-            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep };
+            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true };
         if let Some(d) = demo {
             let paths = crate::gen_demo(std::path::Path::new(&d));
             for p in &paths { if let Ok((au, an)) = analysis::load(p) { a.insert(p.clone(), au, an, None); } }
@@ -144,7 +145,7 @@ impl App {
     fn insert(&mut self, p: PathBuf, au: Audio, an: Analysis, sample: Option<(usize, f64)>) {
         let key = p.display().to_string();
         let t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map() };
+            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false };
         self.store.insert(key, (Arc::new(au), Arc::new(an)));
         match sample { Some((lane, at)) => { let mut t = t; t.lane = lane; t.start_beat = (at / 4.0).round() * 4.0; self.mix.tracks.push(t); }
             None => self.mix.add_track(t) }
@@ -201,17 +202,26 @@ impl App {
         std::thread::spawn(move || { let (l, r) = engine::render_offline(snap, 44100, 0.0, len);
             let _ = tx.send(Msg::Status(match engine::write_wav(&p, &l, &r, 44100) { Ok(_) => format!("Exported: {}", p.display()), Err(e) => format!("Export error: {e}") })); });
     }
-    fn harmonize(&mut self) {
-        let o = self.mix.main_order(); if o.len() < 3 { return; }
+    fn ao_item(&self, i: usize) -> crate::automix::Item {
+        let t = &self.mix.tracks[i];
+        let energy = self.store.get(&t.path).map(|(_, an)| an.peaks.iter().map(|p| (p[0] as f64 + p[1] as f64) / 510.0).sum::<f64>() / an.peaks.len().max(1) as f64).unwrap_or(0.5);
+        crate::automix::Item { key: t.key.clone(), bpm: t.bpm, energy }
+    }
+    /// Reorder the main-deck tracks for key and tempo flow (and the chosen energy curve); undoable.
+    fn auto_order(&mut self) {
+        let o = self.mix.main_order(); if o.len() < 3 { self.status = "Auto-order needs at least 3 tracks".into(); return; }
+        let items: Vec<_> = o.iter().map(|&i| self.ao_item(i)).collect();
+        let locked: Vec<bool> = o.iter().enumerate().map(|(k, &i)| self.mix.tracks[i].locked || (k == 0 && self.ao_keep_first)).collect();
+        let opts = crate::automix::Opts { mode: self.ao_mode, curve: self.ao_curve };
+        let t0 = std::time::Instant::now();
+        let ord = crate::automix::optimize(&items, &locked, &opts);
+        let (c0, c1) = (crate::automix::order_cost(&items, &(0..o.len()).collect::<Vec<_>>(), &opts), crate::automix::order_cost(&items, &ord, &opts));
+        let new: Vec<usize> = ord.iter().map(|&k| o[k]).collect();
+        if new == o { self.status = "Auto-order: the current order is already the best one found".into(); return; }
         self.snapshot();
-        let mut left: Vec<usize> = o[1..].to_vec(); let mut ord = vec![o[0]];
-        while !left.is_empty() {
-            let cur = &self.mix.tracks[*ord.last().unwrap()];
-            let (bi, _) = left.iter().enumerate().map(|(k, &i)| { let t = &self.mix.tracks[i]; (k, camelot_dist(&cur.key, &t.key) as f64 * 10.0 + (cur.bpm - t.bpm).abs()) })
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
-            ord.push(left.remove(bi));
-        }
-        self.mix.relayout(&ord, 16.0); self.status = "Harmonize: tracks ordered by key (Camelot) and tempo".into();
+        let bars = self.bars as f64; self.mix.relayout(&new, bars);
+        let greens = ord.windows(2).filter(|w| crate::automix::rate(&items[w[0]], &items[w[1]]).1 == 0).count();
+        self.status = format!("Auto-order ({}): {greens}/{} smooth transitions, score {:.2} → {:.2} in {} ms. Undo restores the old order.", self.ao_mode.name(), ord.len() - 1, c0, c1, t0.elapsed().as_millis());
     }
     fn remove_sel(&mut self) {
         if let Some(i) = self.sel { self.snapshot(); self.mix.tracks.remove(i); self.sel = None; self.sel_in = None;
@@ -355,7 +365,14 @@ impl App {
             ui.horizontal_centered(|ui| {
                 let circ = |ui: &mut egui::Ui, t: &str, fill: C, fg: C, tip: &str| ui.add(egui::Button::new(egui::RichText::new(t).color(fg).size(16.0)).fill(fill).rounding(16.0).min_size(vec2(32.0, 32.0)).stroke(Stroke::new(1.0_f32, if fg == ACCENT { ACCENT } else { LINE }))).on_hover_text(tip);
                 if circ(ui, "+", PANEL, ACCENT, "Add tracks (mp3, wav, flac, ogg, m4a)").clicked() { self.pick_files(None); }
-                if ui.add(egui::Button::new(egui::RichText::new("Harmonize").color(C::BLACK).size(14.0)).fill(ACCENT).rounding(16.0).min_size(vec2(90.0, 30.0))).on_hover_text("Automix: order tracks by key (Camelot) and tempo").clicked() { self.harmonize(); }
+                if ui.add(egui::Button::new(egui::RichText::new("Auto-order").color(C::BLACK).size(14.0)).fill(ACCENT).rounding(16.0).min_size(vec2(96.0, 30.0))).on_hover_text("Reorder the playlist for smooth key (Camelot) and tempo transitions. Locked tracks stay put. Undo restores the old order.").clicked() { self.auto_order(); }
+                ui.menu_button("⏷", |ui| { ui.label(egui::RichText::new("Auto-order").strong());
+                    for m in crate::automix::Mode::ALL { ui.radio_value(&mut self.ao_mode, m, m.name()); }
+                    ui.separator(); ui.label(egui::RichText::new("Energy").color(DIM));
+                    for c in crate::automix::Curve::ALL { ui.radio_value(&mut self.ao_curve, c, c.name()); }
+                    ui.separator(); ui.checkbox(&mut self.ao_keep_first, "Keep first track in place");
+                    ui.label(egui::RichText::new("Lock tracks with 🔒 in the playlist.").color(DIM).size(11.0));
+                    if ui.button("Auto-order now").clicked() { self.auto_order(); ui.close_menu(); } }).response.on_hover_text("Auto-order options");
                 if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("⟲").rounding(16.0).min_size(vec2(30.0, 30.0))).on_hover_text("Undo (Ctrl+Z)").clicked() { self.do_undo(); }
                 if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("⟳").rounding(16.0).min_size(vec2(30.0, 30.0))).on_hover_text("Redo (Ctrl+Shift+Z)").clicked() { self.do_redo(); }
                 if ui.add(egui::Button::new("✂").rounding(16.0).min_size(vec2(30.0, 30.0))).on_hover_text("Remove selected track").clicked() { self.remove_sel(); }
@@ -607,6 +624,11 @@ impl App {
                 for k in k0..=k1 { let x = bx(t.start_beat + k as f64); let down = k.rem_euclid(4) == 0;
                     tp.line_segment([pos2(x, wave.top()), pos2(x, wave.bottom())], Stroke::new(if down { 1.2_f32 } else { 1.0 }, C::from_rgba_unmultiplied(255, 255, 255, if down { 70 } else { 16 }))); }
             }
+            if !sample { for o in overlap.iter().filter(|o| !o.2) { let p = partner(o);
+                let (sc, col, lab) = crate::automix::rate(&self.ao_item(p), &self.ao_item(ti));
+                let x0 = bx(o.0).max(vis.left()) + 4.0; let r = Rect::from_min_size(pos2(x0, wave.top() + 2.0), vec2(8.0 + 5.6 * lab.chars().count() as f32, 13.0));
+                if r.right() < vis.right() { tp.rect_filled(r, 3.0, C::from_rgba_unmultiplied(20, 21, 24, 210)); tp.circle_filled(pos2(r.left() + 6.0, r.center().y), 3.5, compat_col(col));
+                    tp.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &lab, FontId::proportional(9.5), TXT); let _ = sc; } } }
             if !sample { for o in &overlap {
                 if my_stems.is_some() && self.stems.contains_key(&self.mix.tracks[partner(o)].path) { continue; }
                 let preset = self.mix.tracks[o.3].trans.preset;
@@ -777,17 +799,21 @@ impl App {
         let order = self.mix.main_order();
         let mut act: Option<(usize, i32)> = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            egui::Grid::new("pl").striped(true).num_columns(9).spacing(vec2(22.0, 6.0)).show(ui, |ui| {
-                for h in ["#", "TITLE", "ARTIST", "BPM", "KEY", "LENGTH", "DECK", "START", ""] { ui.label(egui::RichText::new(h).size(10.0).color(DIM)); }
+            egui::Grid::new("pl").striped(true).num_columns(11).spacing(vec2(22.0, 6.0)).show(ui, |ui| {
+                for h in ["#", "", "TITLE", "ARTIST", "BPM", "KEY", "LENGTH", "DECK", "START", "NEXT TRANSITION", ""] { ui.label(egui::RichText::new(h).size(10.0).color(DIM)); }
                 ui.end_row();
                 for (k, &i) in order.iter().enumerate() {
                     let t = &self.mix.tracks[i]; let sel = self.sel == Some(i);
                     ui.label(format!("{}", k + 1));
+                    if ui.selectable_label(t.locked, if t.locked { "🔒" } else { "🔓" }).on_hover_text("Lock: Auto-order keeps this track at its position").clicked() { act = Some((i, 7)); }
                     if ui.selectable_label(sel, egui::RichText::new(&t.title).color(if sel { ACCENT } else { TXT })).clicked() { act = Some((i, 0)); }
                     ui.label(&t.artist); ui.label(format!("{:.1}", t.bpm));
                     let kc = key_col(&t.key); let (r, _) = ui.allocate_exact_size(vec2(30.0, 16.0), Sense::hover());
                     ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0_f32, kc)); ui.painter().text(r.center(), Align2::CENTER_CENTER, &t.key, FontId::proportional(11.0), kc);
                     ui.label(fmt_t(t.duration)); ui.label(format!("{}", t.lane + 1)); ui.label(format!("bar {:.0}", t.start_beat / 4.0 + 1.0));
+                    if let Some(&nx) = order.get(k + 1) { let (sc, col, lab) = crate::automix::rate(&self.ao_item(i), &self.ao_item(nx));
+                        ui.horizontal(|ui| { let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover()); ui.painter().circle_filled(r.center(), 4.5, compat_col(col));
+                            ui.label(egui::RichText::new(lab).size(11.0)).on_hover_text(format!("Compatibility {:.0}%", sc * 100.0)); }); } else { ui.label(""); }
                     ui.horizontal(|ui| { if ui.small_button("⏶").clicked() { act = Some((i, -1)); } if ui.small_button("⏷").clicked() { act = Some((i, 1)); } if ui.small_button("✖").clicked() { act = Some((i, 9)); } });
                     ui.end_row();
                 }
@@ -797,6 +823,7 @@ impl App {
         if let Some((i, a)) = act { match a {
             0 => { self.sel = Some(i); self.seek(self.mix.tracks[i].vis_start(self.mix.bpm)); }
             9 => { self.sel = Some(i); self.remove_sel(); }
+            7 => { self.snapshot(); self.mix.tracks[i].locked = !self.mix.tracks[i].locked; }
             d => { let k = order.iter().position(|&x| x == i).unwrap() as i32; let n = k + d;
                 if n >= 0 && (n as usize) < order.len() { self.snapshot(); let mut o = order.clone(); o.swap(k as usize, n as usize); self.mix.relayout(&o, 16.0); } }
         } }
@@ -919,3 +946,5 @@ impl App {
         if remove { self.remove_sel(); }
     }
 }
+
+fn compat_col(c: u8) -> C { match c { 0 => C::from_rgb(90, 200, 110), 1 => C::from_rgb(230, 200, 60), _ => C::from_rgb(230, 80, 70) } }

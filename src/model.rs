@@ -30,6 +30,8 @@ pub struct Track {
     pub trans: Transition,
     /// dynamic beat map from analysis (absent in projects saved before v0.3: linear grid)
     #[serde(default)] pub map: Option<Arc<BeatMap>>,
+    /// Auto-order keeps a locked track at its playlist position
+    #[serde(default)] pub locked: bool,
 }
 impl Track {
     pub fn grid(&self) -> Grid { Grid::new(self.map.clone(), self.bpm, self.offset, self.start_beat) }
@@ -105,6 +107,7 @@ impl Mix {
 }
 
 /// Camelot distance (0 = same, 1 = adjacent/relative)
+#[allow(dead_code)]
 pub fn camelot_dist(a: &str, b: &str) -> i32 {
     let p = |s: &str| -> Option<(i32, char)> { let (n, l) = s.split_at(s.len().checked_sub(1)?); Some((n.parse().ok()?, l.chars().next()?)) };
     match (p(a), p(b)) {

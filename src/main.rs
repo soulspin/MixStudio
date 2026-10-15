@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod analysis;
+mod automix;
 mod beatmap;
 mod app;
 mod audio;
@@ -34,7 +35,7 @@ fn selftest(dir: &Path) -> bool {
         ok &= pass;
         println!("{} {}: bpm {:.2} (exp {eb}) key {} (exp {ek}) offset {:.3}s (err {:.3}s, exp {eo}) dur {:.1}s peaks {} [{} ms]",
             if pass { "OK  " } else { "FAIL" }, an.title, an.bpm, an.key, an.offset, od, an.duration, an.peaks.len(), t0.elapsed().as_millis());
-        mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "Test".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map() });
+        mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "Test".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false });
         auds.push(Some(Arc::new(a)));
     }
     let presets = [model::Preset::Crossfade, model::Preset::BassSwap, model::Preset::EchoOut, model::Preset::HighToLow];
@@ -64,6 +65,7 @@ fn selftest(dir: &Path) -> bool {
     ok &= alignment_test(dir);
     ok &= drift_test(dir);
     ok &= soft_intro_test(dir);
+    ok &= automix_tests();
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -71,7 +73,7 @@ fn selftest(dir: &Path) -> bool {
 fn one_track_mix(a: analysis::Audio, bpm: f64, mix_bpm: f64, key_lock: bool) -> (Arc<engine::Snap>, f64) {
     let dur = a.secs();
     let mut mix = model::Mix::default();
-    mix.tracks.push(model::Track { path: "t".into(), title: "t".into(), artist: "t".into(), bpm, offset: 0.0, key: "8A".into(), duration: dur, start_beat: 0.0, lane: 0, trans: Default::default(), map: Option::None });
+    mix.tracks.push(model::Track { path: "t".into(), title: "t".into(), artist: "t".into(), bpm, offset: 0.0, key: "8A".into(), duration: dur, start_beat: 0.0, lane: 0, trans: Default::default(), map: Option::None, locked: false });
     mix.bpm = mix_bpm; mix.key_lock = key_lock; mix.metronome = true; // metronome must stay out of offline renders
     let len = mix.length_beats();
     (Arc::new(engine::Snap::build(&mix, &[Some(Arc::new(a))])), len)
@@ -134,7 +136,7 @@ fn stem_tests() -> bool {
     let mut res = vec![];
     for (dm, vm) in [(Full, None), (None, Full)] {
         let mut mix = model::Mix::default(); mix.bpm = 120.0;
-        for (k, lane) in [(0usize, 0usize), (1, 1)] { mix.tracks.push(model::Track { path: format!("{k}"), title: "t".into(), artist: "t".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 40.0, start_beat: if k == 0 { 0.0 } else { 40.0 }, lane, trans: Default::default(), map: Option::None }); }
+        for (k, lane) in [(0usize, 0usize), (1, 1)] { mix.tracks.push(model::Track { path: format!("{k}"), title: "t".into(), artist: "t".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 40.0, start_beat: if k == 0 { 0.0 } else { 40.0 }, lane, trans: Default::default(), map: Option::None, locked: false }); }
         mix.tracks[1].trans.stems = [dm, Crossfade, Crossfade, vm];
         let auds = vec![Some(Arc::new(analysis::Audio { sr, l: ta.clone(), r: ta.clone() })), Some(Arc::new(analysis::Audio { sr, l: tb.clone(), r: tb.clone() }))];
         let st = vec![Some(mk(&ta, 0)), Some(mk(&tb, 3))];
@@ -223,7 +225,7 @@ fn alignment_test(dir: &Path) -> bool {
             let p = dir.join(format!("align_{}.wav", bpm as i32));
             let (l, r) = testgen::synth(bpm, 45 + i as i32 * 3, true, 90.0, lead, sr); engine::write_wav(&p, &l, &r, sr).unwrap();
             let (a, an) = analysis::load(&p).unwrap();
-            mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map() });
+            mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false });
             auds.push(Some(Arc::new(a)));
         }
         mix.bpm = 126.0; mix.key_lock = key_lock;
@@ -245,7 +247,7 @@ fn alignment_test(dir: &Path) -> bool {
 }
 
 fn track_of(p: &Path, an: &analysis::Analysis) -> model::Track {
-    model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map() }
+    model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false }
 }
 
 
@@ -377,5 +379,48 @@ fn soft_intro_test(dir: &Path) -> bool {
         println!("{} soft-intro regression (hard 125.2 -> soft-intro 124 at 124.6), key lock {}: {} kick pairs, median {med:+.2} ms, max {max:.2} ms (attack-shape bias {:.2} ms removed; limits 2.5 / 10 ms)",
             if pass { "OK  " } else { "FAIL" }, if key_lock { "on " } else { "off" }, d.len(), shape * 1000.0);
     }
+    ok
+}
+
+fn automix_tests() -> bool {
+    use automix::*; let mut ok = true;
+    let mut chk = |name: &str, pass: bool, info: String| { ok &= pass; println!("{} auto-order {name}: {info}", if pass { "OK  " } else { "FAIL" }); };
+    let ks = [("8A", "8A"), ("8A", "9A"), ("8A", "7A"), ("8A", "8B"), ("8A", "9B"), ("8A", "10A"), ("8A", "3A"), ("8A", "2B")];
+    let v: Vec<(f64, &str)> = ks.iter().map(|(a, b)| key_score(a, b)).collect();
+    chk("key scoring", v[0].0 > v[1].0 && (v[1].0 - v[2].0).abs() < 1e-9 && v[1].0 > v[3].0 && v[3].0 > v[4].0 && v[4].0 > v[5].0 && v[5].0 > v[6].0 && v[6].0 > v[7].0 && v[5].1 == "energy +2" && v[6].1 == "energy +7",
+        format!("{}", ks.iter().zip(&v).map(|((a, b), s)| format!("{a}→{b} {:.2} {}", s.0, s.1)).collect::<Vec<_>>().join(", ")));
+    let (b1, p1) = bpm_score(128.0, 128.0); let (b2, p2) = bpm_score(128.0, 130.0); let (b3, p3) = bpm_score(128.0, 64.5); let (b4, _) = bpm_score(128.0, 100.0);
+    chk("tempo scoring", b1 > b2 && b2 > b3 && b3 > 0.8 && b4 < 0.01 && p3.abs() < 1.0, format!("128→128 {b1:.2} ({p1:+.1}%), 128→130 {b2:.2} ({p2:+.1}%), 128→64.5 half time {b3:.2} ({p3:+.1}%), 128→100 {b4:.3}"));
+    // known optimal chain: 12 tracks 1A..12A at 120..131 BPM, given shuffled; best order is the chain (or its reverse)
+    let chain: Vec<Item> = (0..12).map(|k| Item { key: format!("{}A", k + 1), bpm: 120.0 + k as f64, energy: k as f64 }).collect();
+    let shuf = [7usize, 2, 11, 0, 5, 9, 3, 10, 1, 6, 8, 4];
+    let items: Vec<Item> = shuf.iter().map(|&k| chain[k].clone()).collect();
+    let opts = Opts { mode: Mode::Balanced, curve: Curve::Off };
+    let ord = optimize(&items, &vec![false; 12], &opts);
+    let got: Vec<usize> = ord.iter().map(|&i| shuf[i]).collect();
+    let fwd: Vec<usize> = (0..12).collect(); let rev: Vec<usize> = (0..12).rev().collect();
+    chk("finds known optimal chain", got == fwd || got == rev, format!("{:?}", got.iter().map(|&k| chain[k].key.clone()).collect::<Vec<_>>()));
+    // build-up curve picks the ascending direction
+    let ob = optimize(&items, &vec![false; 12], &Opts { mode: Mode::Balanced, curve: Curve::Build });
+    let gb: Vec<usize> = ob.iter().map(|&i| shuf[i]).collect();
+    chk("energy build-up direction", gb == fwd, format!("{:?}", gb));
+    // locks: first track fixed at position 0 (7 = "8A") and position 6 locked; they must stay
+    let mut lk = vec![false; 12]; lk[0] = true; lk[6] = true;
+    let ol = optimize(&items, &lk, &opts);
+    let rest_ok = { let mut s = ol.clone(); s.sort(); s == (0..12).collect::<Vec<_>>() };
+    chk("respects locks", ol[0] == 0 && ol[6] == 6 && rest_ok, format!("pos0 {} pos6 {} (kept {} / {}), cost {:.3} vs unlocked {:.3}", items[ol[0]].key, items[ol[6]].key, items[0].key, items[6].key, order_cost(&items, &ol, &opts), order_cost(&items, &ord, &opts)));
+    // modes: A=8A@128, choices B=8A@134 (same key, +4.7%) and C=3B@128 (clash, same tempo)
+    let tri = vec![Item { key: "8A".into(), bpm: 128.0, energy: 0.0 }, Item { key: "8A".into(), bpm: 134.0, energy: 0.0 }, Item { key: "3B".into(), bpm: 128.0, energy: 0.0 }];
+    let lk3 = [true, false, false];
+    let h = optimize(&tri, &lk3, &Opts { mode: Mode::Harmonic, curve: Curve::Off }); let t = optimize(&tri, &lk3, &Opts { mode: Mode::Tempo, curve: Curve::Off });
+    chk("harmonic vs tempo mode", h[1] == 1 && t[1] == 2, format!("harmonic picks {} {:.0} next, tempo picks {} {:.0} next", tri[h[1]].key, tri[h[1]].bpm, tri[t[1]].key, tri[t[1]].bpm));
+    // speed: 100 random tracks
+    let mut s = 12345u64; let mut r = move || { s ^= s << 13; s ^= s >> 7; s ^= s << 17; s };
+    let big: Vec<Item> = (0..100).map(|_| Item { key: format!("{}{}", r() % 12 + 1, if r() % 2 == 0 { 'A' } else { 'B' }), bpm: 118.0 + (r() % 1500) as f64 / 100.0, energy: (r() % 100) as f64 }).collect();
+    let t0 = std::time::Instant::now(); let ob = optimize(&big, &vec![false; 100], &opts); let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let ident: Vec<usize> = (0..100).collect();
+    let (c0, c1) = (order_cost(&big, &ident, &opts), order_cost(&big, &ob, &opts));
+    let greens = ob.windows(2).filter(|w| rate(&big[w[0]], &big[w[1]]).1 == 0).count();
+    chk("100 tracks", ms < 2000.0 && c1 < 0.5 * c0, format!("{ms:.0} ms, cost {c0:.2} -> {c1:.2}, {greens}/99 green transitions"));
     ok
 }
