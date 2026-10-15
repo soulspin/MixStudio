@@ -8,7 +8,7 @@ impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } 
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 6;
+pub const ANALYSIS_VERSION: u32 = 7;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -20,7 +20,7 @@ pub struct Analysis {
     pub duration: f64,
     pub peaks: Vec<[u8; 3]>, // low, mid, high (0..255), one per PEAK_HOP samples
     pub peak_sr: u32,
-    pub sections: Vec<(f64, u8)>, // (track beat, 0=DOWN 1=CHORUS 2=UP)
+    pub sections: Vec<(f64, u8)>, // phrases: (track beat, crate::phrase::LABELS index)
     pub title: String,
     pub artist: String,
     #[serde(default)] pub version: u32,
@@ -306,6 +306,7 @@ pub fn peaks(a: &Audio) -> Vec<[u8; 3]> {
     out
 }
 
+#[allow(dead_code)]
 /// Very rough sections per 16 bars from low-band energy.
 fn sections(p: &[[u8; 3]], peak_sr: u32, bpm: f64, off: f64) -> Vec<(f64, u8)> {
     let cols_per_beat = 60.0 / bpm * peak_sr as f64 / PEAK_HOP as f64;
@@ -361,7 +362,8 @@ pub fn analyse(audio: &Audio, title: String, artist: String, path: &Path) -> Ana
     let (bpm, offset, beats) = detect_beats(&m, audio.sr);
     let key = detect_key(&m, audio.sr);
     let peaks = peaks(audio);
-    let sections = sections(&peaks, audio.sr, bpm, offset);
+    // phrases (track beat from the first downbeat, label) on the 8/16/32-bar grid
+    let sections = crate::phrase::detect(&crate::phrase::bar_features(&peaks, audio.sr, PEAK_HOP, bpm, offset));
     let title = if title.is_empty() { path.file_stem().map(|s| s.to_string_lossy().replace("_", " ")).unwrap_or_default() } else { title };
     Analysis { version: ANALYSIS_VERSION, beats, bpm, offset, key, duration: audio.secs(), peaks, peak_sr: audio.sr, sections, title, artist }
 }

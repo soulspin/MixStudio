@@ -63,3 +63,32 @@ pub fn synth_soft_intro(bpm: f32, secs: f32, lead_in: f32, soft_until: f32, sr: 
     }
     (l.clone(), l)
 }
+
+/// Structured test track (bars from `lead_in`): intro 16 (hats + pad), build 16 (hats, snare, riser),
+/// drop 32 (kick, bass, hats, lead), breakdown 16 (pad), drop 32, outro 16 (soft kick + hats).
+pub fn synth_structured(bpm: f32, lead_in: f32, sr: u32) -> (Vec<f32>, Vec<f32>) {
+    let beat = 60.0 / bpm; let bars = 128.0; let secs = lead_in + bars * 4.0 * beat + 1.0;
+    let n = (secs * sr as f32) as usize; let mut l = vec![0f32; n];
+    let mut seed = 7u32; let mut hp = 0f32; let mut prev = 0f32;
+    for i in 0..n {
+        let t = i as f32 / sr as f32 - lead_in;
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let nz = (seed >> 9) as f32 / 4194304.0 - 1.0; hp = 0.6 * (hp + nz - prev); prev = nz;
+        if t < 0.0 || t >= bars * 4.0 * beat { continue; }
+        let bar = (t / (beat * 4.0)) as i32; let tb = t % beat; let hh = (t + beat * 0.5) % (beat * 0.5);
+        let sec = match bar { 0..=15 => 0, 16..=31 => 1, 32..=63 => 2, 64..=79 => 3, 80..=111 => 2, _ => 4 };
+        let pad = (2.0 * PI * 220.0 * t).sin() + (2.0 * PI * 277.2 * t).sin() + (2.0 * PI * 329.6 * t).sin();
+        let kick = { let f = 50.0 + 120.0 * (-tb * 30.0).exp(); (2.0 * PI * f * tb).sin() * (-tb * 7.0).exp() };
+        let hat = hp * (-hh * 60.0).exp();
+        let mut s = 0.0;
+        match sec {
+            0 => { s += 0.12 * hat + 0.05 * pad; }
+            1 => { let p = (bar - 16) as f32 / 16.0; s += 0.12 * hat + 0.05 * pad + 0.35 * hp * (-(t % (beat * 2.0) - beat).abs() * 25.0).exp() + (0.08 + 0.03 * p) * (2.0 * PI * 1200.0 * t).sin(); }
+            2 => { let off = (t + beat * 0.5) % beat; s += 0.8 * kick + 0.3 * (2.0 * PI * 55.0 * t).sin().signum() * (-off * 9.0).exp() + 0.15 * hat + 0.06 * pad + 0.1 * (2.0 * PI * 880.0 * t).sin(); }
+            3 => { s += 0.1 * pad; }
+            _ => { s += 0.4 * kick + 0.12 * hat; }
+        }
+        l[i] = s * 0.7;
+    }
+    (l.clone(), l)
+}

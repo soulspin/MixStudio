@@ -251,9 +251,9 @@ impl App {
         let new: Vec<usize> = ord.iter().map(|&k| o[k]).collect();
         if new == o { self.status = "Auto-order: the current order is already the best one found".into(); return; }
         self.snapshot();
-        let bars = self.bars as f64; self.mix.relayout(&new, bars);
+        let bars = self.bars as f64; let ph = self.phrase_list(); let np = self.mix.relayout_phrases(&new, bars, &ph);
         let greens = ord.windows(2).filter(|w| crate::automix::rate(&items[w[0]], &items[w[1]]).1 == 0).count();
-        self.status = format!("Auto-order ({}): {greens}/{} smooth transitions, score {:.2} → {:.2} in {} ms. Undo restores the old order.", self.ao_mode.name(), ord.len() - 1, c0, c1, t0.elapsed().as_millis());
+        self.status = format!("Auto-order ({}): {greens}/{} smooth transitions, score {:.2} → {:.2} in {} ms, {np} outro→intro phrase overlaps. Undo restores the old order.", self.ao_mode.name(), ord.len() - 1, c0, c1, t0.elapsed().as_millis());
     }
     fn remove_sel(&mut self) {
         if let Some(i) = self.sel { self.snapshot(); self.mix.tracks.remove(i); self.sel = None; self.sel_in = None;
@@ -278,10 +278,15 @@ impl App {
         let _ = self.stem_tx.send(StemJob { path: p, audio: au.clone(), prog });
     }
     /// Snap targets for clip `ti`: playhead, other clips' edges, transition boundaries.
+    /// phrases of every track in the mix (empty while not analysed)
+    fn phrase_list(&self) -> Vec<Vec<(f64, u8)>> { self.mix.tracks.iter().map(|t| self.store.get(&t.path).map(|(_, a)| self.mix.phrases(&t.path, &a.sections).to_vec()).unwrap_or_default()).collect() }
     fn magnet_cands(&self, ti: usize) -> Vec<f64> {
         let bpm = self.mix.bpm; let mut c = vec![self.beat()];
         for (i, t) in self.mix.tracks.iter().enumerate() { if i != ti { c.push(t.vis_start(bpm)); c.push(t.end(bpm)); } }
         for (_, _, s, e) in self.mix.transitions() { c.push(s); c.push(e); }
+        // phrase boundaries of the other clips
+        for (i, t) in self.mix.tracks.iter().enumerate() { if i == ti { continue; } if let Some((_, an)) = self.store.get(&t.path) {
+            for &(b, _) in self.mix.phrases(&t.path, &an.sections) { let x = t.start_beat + b; if x > t.vis_start(bpm) && x < t.end(bpm) { c.push(x); } } } }
         c
     }
     /// Ctrl+E: split the clip under the mouse at the mouse, otherwise the clip at the playhead.
@@ -497,6 +502,8 @@ impl eframe::App for App {
         } }
         self.lib.poll();
         self.scratch_window(ctx);
+        if let Some((p, v)) = ctx.data_mut(|d| { let r = d.get_temp::<(String, Option<Vec<(f64, u8)>>)>(egui::Id::new("phr_act")); d.remove::<(String, Option<Vec<(f64, u8)>>)>(egui::Id::new("phr_act")); r }) {
+            self.snapshot(); match v { Some(v) => { self.mix.phrase_edit.insert(p, v); } None => { self.mix.phrase_edit.remove(&p); } } self.status = "Phrase labels updated".into(); }
         let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
         let mut files: Vec<PathBuf> = vec![];
         for f in dropped {
@@ -626,6 +633,7 @@ impl App {
                     if ui.button("Add tracks…").clicked() { self.pick_files(None); ui.close_menu(); }
                     if ui.button("Remove selected track").clicked() { self.remove_sel(); ui.close_menu(); }
                     if ui.button(format!("Set all overlaps to {} bars", self.bars)).clicked() { self.snapshot(); let o = self.mix.main_order(); self.mix.relayout(&o, self.bars as f64); ui.close_menu(); }
+                    if ui.button("Overlap outros with intros (phrases)").clicked() { self.snapshot(); let o = self.mix.main_order(); let ph = self.phrase_list(); let n = self.mix.relayout_phrases(&o, self.bars as f64, &ph); self.status = format!("{n} transitions placed outro → intro, the rest at {} bars", self.bars); ui.close_menu(); }
                     if ui.button("Open mix…").clicked() { self.dialog(false, 0); ui.close_menu(); }
                     if ui.button("Save mix as…").clicked() { self.dialog(true, 1); ui.close_menu(); }
                     if ui.button("Export mix…").clicked() { self.dialog(true, 2); ui.close_menu(); }
@@ -910,12 +918,25 @@ impl App {
                     tp.line_segment([pos2(x, tr.bottom()), pos2(x, tr.bottom() + 10.0)], Stroke::new(1.0_f32, DIM));
                     tp.text(pos2(x + 2.0, tr.bottom() + 5.0), Align2::LEFT_CENTER, format!("{bar}"), FontId::proportional(8.5), DIM); } }
                     b += 4.0; bar += 1; }
-                let names = ["DOWN", "CHORUS", "UP"]; let cols = [C::from_rgb(150, 110, 40), C::from_rgb(40, 170, 60), C::from_rgb(140, 70, 200)];
-                for (k, &(sb, kind)) in an.sections.iter().enumerate() {
-                    let end = an.sections.get(k + 1).map(|x| x.0).unwrap_or(ve - t.start_beat);
+                let phr = self.mix.phrases(&t.path, &an.sections);
+                for (k, &(sb, kind)) in phr.iter().enumerate() {
+                    let end = phr.get(k + 1).map(|x| x.0).unwrap_or(ve - t.start_beat);
                     let r = Rect::from_min_max(pos2(bx(t.start_beat + sb), cr.bottom() - 8.0), pos2(bx(t.start_beat + end) - 1.0, cr.bottom())).intersect(cr); if r.width() <= 0.0 { continue; }
-                    tp.rect_filled(r, 0.0, cols[kind as usize]);
-                    if r.width() > 40.0 { tp.text(pos2(r.left().max(tl_x0) + 3.0, r.center().y), Align2::LEFT_CENTER, names[kind as usize], FontId::proportional(7.5), C::BLACK); }
+                    let pc = crate::phrase::colour(kind); let kind = (kind as usize).min(4);
+                    tp.rect_filled(r, 0.0, C::from_rgb(pc[0], pc[1], pc[2]));
+                    let xm = bx(t.start_beat + sb); if xm >= cr.left() && xm <= cr.right() { tp.line_segment([pos2(xm, cr.top()), pos2(xm, cr.bottom())], Stroke::new(1.0_f32, C::from_rgba_unmultiplied(pc[0], pc[1], pc[2], 150))); }
+                    if r.width() > 40.0 { tp.text(pos2(r.left().max(tl_x0) + 3.0, r.center().y), Align2::LEFT_CENTER, crate::phrase::LABELS[kind], FontId::proportional(7.5), C::BLACK); }
+                    if !self.lock {
+                        let pr = ui.interact(r, ui.id().with(("phrase", ti, k)), Sense::click());
+                        let set = |v: Option<Vec<(f64, u8)>>| ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("phr_act"), (t.path.clone(), v)));
+                        if pr.clicked() { let mut v = phr.to_vec(); v[k].1 = ((kind + 1) % 5) as u8; set(Some(v)); }
+                        pr.context_menu(|ui| {
+                            for (li, ln) in crate::phrase::LABELS.iter().enumerate() { if ui.selectable_label(li == kind, *ln).clicked() { let mut v = phr.to_vec(); v[k].1 = li as u8; set(Some(v)); ui.close_menu(); } }
+                            ui.separator();
+                            if ui.button("Reset to detected phrases").clicked() { set(None); ui.close_menu(); }
+                        });
+                        pr.on_hover_text(format!("{} · {} bars — click: next label, right-click: choose", crate::phrase::LABELS[kind], ((end - sb) / 4.0).round()));
+                    }
                 }
                 for o in &overlap { let x1 = bx(o.1).min(cr.right());
                     for k in 0..4 { let r = Rect::from_min_size(pos2(x1 - 9.0 * (4 - k) as f32 - 3.0, cr.bottom() - 16.0), vec2(7.0, 6.0));

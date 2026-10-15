@@ -159,3 +159,10 @@ Add a **Scratch** block in the effects grid on a deck or sample lane. It drives 
 Presets: Baby scratch, Downer, Transformer, Reverse, Chirp. **✎ Pattern editor…** opens the syntax editor:
 `A`–`E` position targets within the beat (A = start, E = end), `.` next beat, `r` release (mute), `>` open, `-` hold;
 with live graph, Easing, Preview, Save as preset and Delete. Applies in playback and export.
+
+### Phrase detection (v0.12)
+Analysis finds phrase boundaries on the 8/16/32-bar grid from energy, spectrum (3 bands) and novelty, and labels
+them **Intro / Build / Drop / Breakdown / Outro** (heuristic). Coloured phrase strips and markers sit on every clip:
+click a phrase to cycle its label, right-click to choose one or reset to the detection (edits are saved in the project).
+Clips snap to other clips' phrase boundaries. Auto-order and *Overlap outros with intros* start the next track's
+intro on the previous track's outro. (Analysis cache v7: tracks are re-analysed once.)

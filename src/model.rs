@@ -93,11 +93,13 @@ pub struct Mix { pub name: String, pub bpm: f64, pub tracks: Vec<Track>, pub dec
     /// effect blocks on the timeline
     #[serde(default)] pub fx: Vec<crate::fx::FxBlock>,
     /// tempo lane (TEMPO_MODES), manual nodes (beat, BPM) and ramp (start, end BPM)
-    #[serde(default)] pub tempo_mode: u8, #[serde(default)] pub tempo_pts: Vec<(f64, f64)>, #[serde(default)] pub ramp: (f64, f64) }
+    #[serde(default)] pub tempo_mode: u8, #[serde(default)] pub tempo_pts: Vec<(f64, f64)>, #[serde(default)] pub ramp: (f64, f64),
+    /// hand-edited phrase labels per file (replaces the detected phrases)
+    #[serde(default)] pub phrase_edit: std::collections::BTreeMap<String, Vec<(f64, u8)>> }
 fn yes() -> bool { true }
 fn half() -> f32 { 0.5 }
 fn one() -> f32 { 1.0 }
-impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![], tempo_mode: 0, tempo_pts: vec![], ramp: (0.0, 0.0) } } }
+impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![], tempo_mode: 0, tempo_pts: vec![], ramp: (0.0, 0.0), phrase_edit: Default::default() } } }
 
 impl Mix {
     /// indices of main-deck tracks sorted by start
@@ -117,6 +119,22 @@ impl Mix {
             if e > s + 0.5 { r.push((w[0], w[1], s, e)); }
         }
         r
+    }
+    /// phrases of a file: hand edits when present, otherwise the detected ones
+    pub fn phrases<'a>(&'a self, path: &str, det: &'a [(f64, u8)]) -> &'a [(f64, u8)] { self.phrase_edit.get(path).map(|v| v.as_slice()).unwrap_or(det) }
+    /// Like `relayout`, but when the previous track has an Outro phrase and the next one an Intro,
+    /// the intro starts exactly on the outro (`ph[i]`: phrases of track i, may be empty).
+    pub fn relayout_phrases(&mut self, order: &[usize], overlap_bars: f64, ph: &[Vec<(f64, u8)>]) -> usize {
+        self.relayout(order, overlap_bars); let mut n = 0;
+        for k in 1..order.len() {
+            let (p, i) = (order[k - 1], order[k]);
+            let outro = ph.get(p).and_then(|v| if v.len() > 1 && v.last().unwrap().1 == 4 { Some(v.last().unwrap().0) } else { None });
+            let intro = ph.get(i).is_some_and(|v| v.len() > 1 && v[0].1 == 0);
+            let delta = if let (Some(ob), true) = (outro, intro) { let ns = self.tracks[p].start_beat + ob; let d = ns - self.tracks[i].start_beat; n += 1; d } else { 0.0 };
+            // shift this and all later tracks so later overlaps stay as laid out
+            if delta != 0.0 { for &j in &order[k..] { self.tracks[j].start_beat += delta; } }
+        }
+        n
     }
     pub fn length_beats(&self) -> f64 { self.tracks.iter().map(|t| t.end(self.bpm)).fold(0.0, f64::max) }
     /// lay main tracks out in current order with `overlap_bars` overlap, alternating decks

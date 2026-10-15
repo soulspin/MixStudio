@@ -3,6 +3,7 @@ mod analysis;
 mod automix;
 mod library;
 mod scratch;
+mod phrase;
 mod export;
 mod fx;
 mod dialogs;
@@ -78,6 +79,7 @@ fn selftest(dir: &Path) -> bool {
     ok &= fx_tests();
     ok &= tempo_export_tests(dir);
     ok &= scratch_tests();
+    ok &= phrase_tests();
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -784,5 +786,43 @@ fn scratch_tests() -> bool {
     chk("transformer gating mutes", on > 0.25 && off < 1e-3, format!("open slots rms {on:.3}, released slots {off:.1e}"));
     let mut v = serde_json::to_value(FxBlock::new(FxKind::Reverb, 0, 0.0)).unwrap(); for k in ["pattern", "ease"] { v.as_object_mut().unwrap().remove(k); }
     chk("old effect blocks load", serde_json::from_value::<FxBlock>(v).is_ok(), "ok".into());
+    ok
+}
+
+fn phrase_tests() -> bool {
+    use crate::phrase;
+    let mut ok = true;
+    let mut chk = |name: &str, pass: bool, info: String| { ok &= pass; println!("{} phrase {name}: {info}", if pass { "OK  " } else { "FAIL" }); };
+    let sr = 22050u32;
+    let names = |v: &[(f64, u8)]| v.iter().map(|x| format!("{}:{}", x.0 / 4.0, phrase::LABELS[x.1 as usize])).collect::<Vec<_>>().join(" ");
+    let want: Vec<(f64, u8)> = vec![(0.0, 0), (64.0, 1), (128.0, 2), (256.0, 3), (320.0, 2), (448.0, 4)];
+    for (bpm, li) in [(128.0f32, 0.0f32), (124.0, 1.3), (140.0, 0.5)] {
+        let (l, r) = crate::testgen::synth_structured(bpm, li, sr); let a = analysis::Audio { sr, l, r };
+        let p = analysis::peaks(&a); let f = phrase::bar_features(&p, sr, analysis::PEAK_HOP, bpm as f64, li as f64);
+        let d = phrase::detect(&f);
+        chk(&format!("synthetic structure at {bpm} BPM"), d == want, format!("bars {}", names(&d)));
+    }
+    // full analysis path (beat + downbeat detection) at 44.1 kHz
+    { let (l, r) = crate::testgen::synth_structured(126.0, 0.0, 44100); let a = analysis::Audio { sr: 44100, l, r };
+      let an = analysis::analyse(&a, "s".into(), "s".into(), Path::new("s.wav"));
+      let bar = |b: f64| (b + an.offset * an.bpm / 60.0) / 4.0;
+      let drops: Vec<f64> = an.sections.iter().filter(|x| x.1 == 2).map(|x| bar(x.0)).collect();
+      let pass = an.version == analysis::ANALYSIS_VERSION && drops.len() == 2 && (drops[0] - 32.0).abs() <= 1.0 && (drops[1] - 80.0).abs() <= 1.0 && an.sections.first().map(|x| x.1) == Some(0);
+      chk("detected in the analysis", pass, format!("BPM {:.1}, cache v{}, phrases {}", an.bpm, an.version, names(&an.sections))); }
+    chk("cache version bumped", analysis::ANALYSIS_VERSION >= 7, format!("v{}", analysis::ANALYSIS_VERSION));
+    // editable labels, persisted in the project
+    let mut m = model::Mix::default();
+    let det = want.clone(); let mut ed = det.clone(); ed[3].1 = 1; m.phrase_edit.insert("x.wav".into(), ed.clone());
+    let j = serde_json::to_string(&m).unwrap(); let m2: model::Mix = serde_json::from_str(&j).unwrap();
+    let old: Result<model::Mix, _> = serde_json::from_str(&j.replace(&format!(",\"phrase_edit\":{}", serde_json::to_string(&m.phrase_edit).unwrap()), ""));
+    chk("labels editable and saved", m2.phrases("x.wav", &det)[3].1 == 1 && m2.phrases("y.wav", &det)[3].1 == 3 && old.is_ok(), "override kept, other files use detection, old projects load".into());
+    // auto-mix: next intro starts on the previous outro
+    let tr = |p: &str| model::Track { path: p.into(), title: "a".into(), artist: "a".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 260.0, start_beat: 0.0, lane: 0, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 };
+    let mut m = model::Mix::default(); m.bpm = 120.0; m.tracks = vec![tr("a"), tr("b"), tr("c")];
+    let ph = vec![want.clone(), want.clone(), vec![(0.0, 2)]];
+    m.relayout_phrases(&[0, 1, 2], 16.0, &ph);
+    let (s0, s1, s2) = (m.tracks[0].start_beat, m.tracks[1].start_beat, m.tracks[2].start_beat);
+    let e1 = m.tracks[1].end(120.0);
+    chk("auto-mix overlaps outro with intro", s1 - s0 == 448.0 && ((s2 - (e1 - 64.0)) / 4.0).round() == (s2 - (e1 - 64.0)) / 4.0 && (e1 - s2 - 64.0).abs() < 4.0, format!("B starts at A's outro (beat {s1}), C (no intro) falls back to 16 bars"));
     ok
 }
