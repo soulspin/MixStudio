@@ -41,6 +41,9 @@ fn bm_col(m: BmMode) -> C { match m { BmMode::Grid => C::from_rgb(90, 200, 255),
 #[derive(Clone)]
 struct BmDrag { ti: usize, k: i64, i: usize, pivot: usize, span: f64, lastx: f32, mode: BmMode }
 
+#[derive(Clone, Copy)]
+enum TlDrag { Edge { ti: usize, left: bool }, Fade { ti: usize, left: bool }, Trans { ti: usize, grab: f64, orig: f64 } }
+
 enum Msg { Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>) }
 
 struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::AtomicU32> }
@@ -51,7 +54,7 @@ pub struct App {
     sel: Option<usize>, sel_in: Option<usize>, undo: Vec<String>, redo: Vec<String>,
     tx: crossbeam_channel::Sender<Msg>, rx: crossbeam_channel::Receiver<Msg>, loading: usize,
     drag: Option<(usize, f64, f64)>, loop_on: bool, bars: u32, snapping: Snapping, lock: bool,
-    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
+    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
     stems: HashMap<String, Arc<crate::stems::Stems>>, stem_prog: HashMap<String, Arc<std::sync::atomic::AtomicU32>>, stem_err: HashMap<String, String>,
     stem_tx: crossbeam_channel::Sender<StemJob>, dl_prog: Arc<std::sync::atomic::AtomicU32>, ep: Arc<Mutex<String>>,
     ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
@@ -132,7 +135,7 @@ impl App {
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let mut a = App { mix: Mix::default(), store: HashMap::new(), out: crate::audio::start(), ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
-            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
+            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib: { let c = cc.egui_ctx.clone(); crate::library::Library::new(crate::library::config_dir(), crate::library::cache_dir(), Arc::new(move || c.request_repaint())) },
             lib_q: String::new(), lib_path: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
             lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_view_key: None, timeline_rect: Rect::NOTHING };
@@ -166,7 +169,7 @@ impl App {
     fn insert(&mut self, p: PathBuf, au: Audio, an: Analysis, sample: Option<(usize, f64)>) {
         let key = p.display().to_string();
         let t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false };
+            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0 };
         self.store.insert(key, (Arc::new(au), Arc::new(an)));
         match sample { Some((lane, at)) => { let mut t = t; t.lane = lane; t.start_beat = (at / 4.0).round() * 4.0; self.mix.tracks.push(t); }
             None => self.mix.add_track(t) }
@@ -272,6 +275,27 @@ impl App {
         let prog = Arc::new(std::sync::atomic::AtomicU32::new(0)); self.stem_prog.insert(p.clone(), prog.clone()); self.stem_err.remove(&p);
         let _ = self.stem_tx.send(StemJob { path: p, audio: au.clone(), prog });
     }
+    /// Snap targets for clip `ti`: playhead, other clips' edges, transition boundaries.
+    fn magnet_cands(&self, ti: usize) -> Vec<f64> {
+        let bpm = self.mix.bpm; let mut c = vec![self.beat()];
+        for (i, t) in self.mix.tracks.iter().enumerate() { if i != ti { c.push(t.vis_start(bpm)); c.push(t.end(bpm)); } }
+        for (_, _, s, e) in self.mix.transitions() { c.push(s); c.push(e); }
+        c
+    }
+    /// Ctrl+E: split the clip under the mouse at the mouse, otherwise the clip at the playhead.
+    fn split_here(&mut self) {
+        let bpm = self.mix.bpm;
+        let (ti, b) = match self.tl_hover {
+            Some((ti, b)) => (ti, if self.snapping == Snapping::Off { b } else { b.round() }),
+            None => { let b = self.beat();
+                let inside = |i: usize| { let t = &self.mix.tracks[i]; b > t.vis_start(bpm) && b < t.end(bpm) };
+                match self.sel.filter(|&i| i < self.mix.tracks.len() && inside(i)).or_else(|| (0..self.mix.tracks.len()).find(|&i| self.mix.tracks[i].lane < 2 && inside(i))).or_else(|| (0..self.mix.tracks.len()).find(|&i| inside(i))) {
+                    Some(i) => (i, b), None => { self.status = "Nothing to split here".into(); return; } } }
+        };
+        self.snapshot();
+        match self.mix.split(ti, b) { Some(n) => { self.sel = Some(n); self.status = format!("Split at bar {:.0} beat {:.0}", (b / 4.0).floor() + 1.0, b.rem_euclid(4.0).floor() + 1.0); }
+            None => { self.undo.pop(); self.status = "Too close to the clip edge to split".into(); } }
+    }
     fn snap_beat(&self, b: f64) -> f64 { match self.snapping { Snapping::Off => b, Snapping::Free => b.round(), Snapping::Half => (b / 2.0).round() * 2.0, Snapping::Full => (b / 4.0).round() * 4.0 } }
 }
 
@@ -310,6 +334,7 @@ impl eframe::App for App {
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) { let _ = self.out.tx.send(Cmd::Play(!self.playing())); }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) { if ctx.input(|i| i.modifiers.shift) { self.do_redo() } else { self.do_undo() } }
             if ctx.input(|i| i.key_pressed(egui::Key::Delete)) { self.remove_sel(); }
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::E)) { self.split_here(); }
         }
         if self.playing() || self.loading > 0 || self.lib.scanning { ctx.request_repaint(); } else { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
         self.top_bar(ctx);
@@ -595,6 +620,7 @@ impl App {
         let trans = self.mix.transitions();
         let (d1, d2) = (rows[0].1, rows[1].1);
         let mut clicked_clip: Option<(usize, f64, u8)> = None;
+        let mut tl_act: Option<TlDrag> = None; let mut tl_hover: Option<(usize, f64)> = None;
         let mut bm_mode = self.bm_mode; let mut bm_act: Option<(usize, i64, u8)> = None; let mut bm_hover: Option<egui::Pos2> = None;
         for (ti, t) in self.mix.tracks.iter().enumerate() {
             let Some((_, an)) = self.store.get(&t.path) else { continue };
@@ -689,7 +715,7 @@ impl App {
                 let names = ["DOWN", "CHORUS", "UP"]; let cols = [C::from_rgb(150, 110, 40), C::from_rgb(40, 170, 60), C::from_rgb(140, 70, 200)];
                 for (k, &(sb, kind)) in an.sections.iter().enumerate() {
                     let end = an.sections.get(k + 1).map(|x| x.0).unwrap_or(ve - t.start_beat);
-                    let r = Rect::from_min_max(pos2(bx(t.start_beat + sb), cr.bottom() - 8.0), pos2(bx(t.start_beat + end) - 1.0, cr.bottom()));
+                    let r = Rect::from_min_max(pos2(bx(t.start_beat + sb), cr.bottom() - 8.0), pos2(bx(t.start_beat + end) - 1.0, cr.bottom())).intersect(cr); if r.width() <= 0.0 { continue; }
                     tp.rect_filled(r, 0.0, cols[kind as usize]);
                     if r.width() > 40.0 { tp.text(pos2(r.left().max(tl_x0) + 3.0, r.center().y), Align2::LEFT_CENTER, names[kind as usize], FontId::proportional(7.5), C::BLACK); }
                 }
@@ -703,9 +729,39 @@ impl App {
             if let Some(pp) = resp.interact_pointer_pos() {
                 let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
                 if resp.drag_started() && alt && !sample { clicked_clip = Some((ti, xb(pp.x), 2u8)); }
+                else if resp.drag_started() && alt && sample && !self.lock { clicked_clip = Some((ti, xb(pp.x), 4)); }
                 else if resp.drag_started() && !self.lock { clicked_clip = Some((ti, xb(pp.x), 1)); }
                 else if resp.clicked() && shift && !sample { clicked_clip = Some((ti, xb(pp.x), 3)); }
                 else if resp.clicked() { clicked_clip = Some((ti, xb(pp.x), 0)); }
+            }
+            if resp.hovered() { if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) { tl_hover = Some((ti, xb(hp.x))); } }
+            if !self.lock {
+                for left in [true, false] {
+                    let x = if left { cr.left() } else { cr.right() };
+                    if x < vis.left() - 1.0 || x > vis.right() + 1.0 { continue; }
+                    let hr = Rect::from_min_max(pos2(if left { x } else { x - 6.0 }, wave.top() + if sample { 10.0 } else { 15.0 }), pos2(if left { x + 6.0 } else { x }, wave.bottom()));
+                    let r = ui.interact(hr, ui.id().with(("edge", ti, left)), Sense::drag());
+                    if r.hovered() || r.dragged() { ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal); tp.rect_filled(hr, 1.0, ACCENT.gamma_multiply(0.7)); }
+                    if r.drag_started() { tl_act = Some(TlDrag::Edge { ti, left }); }
+                    r.on_hover_text(if left { "Drag to trim or extend the start of the clip" } else { "Drag to trim or extend the end of the clip (snaps to the next clip to close gaps)" });
+                }
+                if t.fade_in > 0.0 || t.fade_out > 0.0 || sample {
+                    let (fi, fo) = (bx(vs + t.fade_in), bx(ve - t.fade_out));
+                    let fc = C::from_rgba_unmultiplied(255, 255, 255, 170);
+                    if t.fade_in > 0.0 { tp.line_segment([pos2(cr.left(), wave.bottom()), pos2(fi, wave.top())], Stroke::new(1.2_f32, fc)); }
+                    if t.fade_out > 0.0 { tp.line_segment([pos2(fo, wave.top()), pos2(cr.right(), wave.bottom())], Stroke::new(1.2_f32, fc)); }
+                }
+                if sample {
+                    for left in [true, false] {
+                        let x = if left { bx(vs + t.fade_in) } else { bx(ve - t.fade_out) };
+                        let hr = Rect::from_center_size(pos2(x + if left { 4.0 } else { -4.0 }, wave.top() + 4.0), vec2(8.0, 8.0));
+                        if !vis.contains(hr.center()) { continue; }
+                        let r = ui.interact(hr, ui.id().with(("fade", ti, left)), Sense::drag());
+                        tp.rect_filled(hr, 1.5, if r.hovered() || r.dragged() { ACCENT } else { C::WHITE });
+                        if r.drag_started() { tl_act = Some(TlDrag::Fade { ti, left }); }
+                        r.on_hover_text(if left { "Drag to set the fade-in" } else { "Drag to set the fade-out" });
+                    }
+                }
             }
             if !sample && ppb >= 22.0 {
                 let k0 = (xb(vis.left()) - t.start_beat).ceil() as i64; let k1 = (xb(vis.right()) - t.start_beat).floor() as i64;
@@ -749,9 +805,11 @@ impl App {
                 let lr = Rect::from_min_size(pos2(bar.right() - 90.0, bar.top() + 2.0), vec2(12.0, 10.0)); tp.rect_filled(lr, 2.0, C::WHITE);
                 tp.text(lr.center(), Align2::CENTER_CENTER, "≡", FontId::proportional(8.0), BLUE);
             }
-            let resp = ui.interact(clip(bar), ui.id().with(("tr", k)), Sense::click());
+            let resp = ui.interact(clip(bar), ui.id().with(("tr", k)), Sense::click_and_drag());
             if resp.clicked() { clicked_trans = Some(i); }
-            resp.on_hover_text(format!("Transition {}: {} ({} bars). Click for settings.", k + 1, tt.preset.name(), ((e - s) / 4.0).round()));
+            if resp.drag_started() && !self.lock { if let Some(pp) = resp.interact_pointer_pos() { tl_act = Some(TlDrag::Trans { ti: i, grab: xb(pp.x), orig: self.mix.tracks[i].start_beat }); } }
+            if resp.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::Grab); }
+            resp.on_hover_text(format!("Transition {}: {} ({} bars). Click for settings, drag to move the incoming track.", k + 1, tt.preset.name(), ((e - s) / 4.0).round()));
         }
         let trow = rows[4].1;
         tp.line_segment([pos2(tl_x0, trow.center().y + 3.0), pos2(area.right(), trow.center().y + 3.0)], Stroke::new(1.5_f32, C::from_rgb(220, 140, 30)));
@@ -762,6 +820,7 @@ impl App {
             self.sel = Some(ti);
             if drag == 1 { self.snapshot(); self.drag = Some((ti, b, self.mix.tracks[ti].start_beat)); }
             else if drag == 2 { self.snapshot(); self.grid_drag = Some((ti, ui.input(|i| i.pointer.hover_pos()).map(|p| p.x).unwrap_or(0.0))); }
+            else if drag == 4 { self.snapshot(); let n = self.mix.duplicate(ti); self.sel = Some(n); self.drag = Some((n, b, self.mix.tracks[n].start_beat)); self.status = "Sample duplicated".into(); }
             else if drag == 3 { self.snapshot(); let t = &self.mix.tracks[ti]; let line = t.start_beat + (b - t.start_beat).round(); self.set_downbeat_at(ti, line); self.status = "Downbeat set".into(); }
             else { self.seek(b); if let Some(x) = trans.iter().find(|x| x.1 == ti || x.0 == ti) { self.sel_in = Some(x.1); } }
         }
@@ -811,11 +870,56 @@ impl App {
                 let db = ((pp.x - lastx) / ppb) as f64; if ti < self.mix.tracks.len() { let bpm_t = self.mix.tracks[ti].bpm; self.nudge(ti, db * 60.0 / bpm_t); } self.grid_drag = Some((ti, pp.x)); } }
             else { self.grid_drag = None; }
         }
+        self.tl_hover = tl_hover;
+        let mut snap_line: Option<f64> = None;
+        if let Some(a) = tl_act { self.snapshot(); let (TlDrag::Edge { ti, .. } | TlDrag::Fade { ti, .. } | TlDrag::Trans { ti, .. }) = a; self.sel = Some(ti); self.tl_drag = Some(a); }
+        if let Some(d) = self.tl_drag.clone() {
+            let pp = ui.input(|i| i.pointer.hover_pos());
+            if ui.input(|i| i.pointer.primary_down()) { if let Some(pp) = pp {
+                let tol = 8.0 / ppb as f64; let b = xb(pp.x);
+                match d {
+                    TlDrag::Edge { ti, left } => if ti < self.mix.tracks.len() {
+                        let c = self.magnet_cands(ti); let nb = match crate::model::magnet(b, &c, tol) { Some(m) => { snap_line = Some(m); m } None => if self.snapping == Snapping::Off { b } else { b.round() } };
+                        self.mix.set_edge(ti, left, nb); },
+                    TlDrag::Fade { ti, left } => if ti < self.mix.tracks.len() {
+                        let t = &mut self.mix.tracks[ti]; let (vs, ve) = (t.vis_start(bpm), t.end(bpm)); let len = ve - vs;
+                        let snapb = |x: f64| if self.snapping == Snapping::Off { x } else { (x * 2.0).round() / 2.0 };
+                        if left { t.fade_in = snapb(b - vs).clamp(0.0, len - t.fade_out); } else { t.fade_out = snapb(ve - b).clamp(0.0, len - t.fade_in); } },
+                    TlDrag::Trans { ti, grab, orig } => if ti < self.mix.tracks.len() {
+                        let raw = orig + b - grab; let vs0 = self.mix.tracks[ti].vis_start(bpm) - self.mix.tracks[ti].start_beat;
+                        let c = self.magnet_cands(ti);
+                        let nb = match crate::model::magnet(raw + vs0, &c, tol) { Some(m) => { snap_line = Some(m); (m - vs0).round() } None => self.snap_beat(raw) };
+                        self.mix.tracks[ti].start_beat = nb; },
+                }
+            } } else {
+                self.tl_drag = None;
+                if self.undo.last().is_some_and(|u| *u == serde_json::to_string(&self.mix).unwrap()) { self.undo.pop(); }
+            }
+        }
         if let Some((ti, grab, orig)) = self.drag {
             if ui.input(|i| i.pointer.primary_down()) { if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) {
-                let nb = self.snap_beat(orig + xb(pp.x) - grab); if ti < self.mix.tracks.len() { self.mix.tracks[ti].start_beat = nb; } } }
-            else { self.drag = None; if self.undo.last().is_some_and(|u| *u == serde_json::to_string(&self.mix).unwrap()) { self.undo.pop(); } }
+                let raw = orig + xb(pp.x) - grab; let mut nb = self.snap_beat(raw);
+                if ti < self.mix.tracks.len() {
+                    let t = &self.mix.tracks[ti]; let (dv, de) = (t.vis_start(bpm) - t.start_beat, t.end(bpm) - t.start_beat);
+                    let c = self.magnet_cands(ti); let tol = 8.0 / ppb as f64;
+                    let hit = [(raw + dv, dv), (raw + de, de)].into_iter().filter_map(|(e, d)| crate::model::magnet(e, &c, tol).map(|m| (m, d, (m - e).abs())))
+                        .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+                    if let Some((m, d, _)) = hit { nb = if self.snapping == Snapping::Off { m - d } else { (m - d).round() }; snap_line = Some(m); }
+                    self.mix.tracks[ti].start_beat = nb;
+                    if let Some(&(l, r)) = rows.iter().find(|(l, r)| *l < 4 && r.contains(pp)) { if (l >= 2) != (self.mix.tracks[ti].lane >= 2) || (l >= 2 && l != self.mix.tracks[ti].lane) {
+                        tp.rect_stroke(r, 0.0, Stroke::new(2.0_f32, ACCENT)); } }
+                } } }
+            else {
+                if let (Some(pp), true) = (ui.input(|i| i.pointer.hover_pos()), ti < self.mix.tracks.len()) {
+                    if let Some(&(l, _)) = rows.iter().find(|(l, r)| *l < 4 && r.contains(pp)) {
+                        let cur = self.mix.tracks[ti].lane;
+                        if (l >= 2 && l != cur) || (l < 2 && cur >= 2) { self.mix.move_to_lane(ti, l); self.status = if l >= 2 { format!("Moved to Sample {}", l - 1) } else { "Moved to the decks".into() }; }
+                    }
+                }
+                self.drag = None; if self.undo.last().is_some_and(|u| *u == serde_json::to_string(&self.mix).unwrap()) { self.undo.pop(); } }
         }
+        if let Some(b) = snap_line { let x = bx(b); if x > tl_x0 && x < area.right() {
+            tp.line_segment([pos2(x, rows[0].1.top()), pos2(x, rows[3].1.bottom())], Stroke::new(1.5_f32, C::from_rgb(255, 225, 0))); } }
         // zoom buttons on top of timeline
         let mut zx = area.right() - 6.0;
         for (t, act) in [("»", 0), ("«", 1), ("+", 2), ("−", 3), ("⤢", 4)] {

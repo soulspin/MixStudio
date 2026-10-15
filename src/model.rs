@@ -32,13 +32,17 @@ pub struct Track {
     #[serde(default)] pub map: Option<Arc<BeatMap>>,
     /// Auto-order keeps a locked track at its playlist position
     #[serde(default)] pub locked: bool,
+    /// seconds cut from the start / end of the file (split and trim keep the source offsets)
+    #[serde(default)] pub trim_in: f64, #[serde(default)] pub trim_out: f64,
+    /// fade-in / fade-out length in beats
+    #[serde(default)] pub fade_in: f64, #[serde(default)] pub fade_out: f64,
 }
 impl Track {
     pub fn grid(&self) -> Grid { Grid::new(self.map.clone(), self.bpm, self.offset, self.start_beat) }
     /// mix beat -> source seconds
     pub fn sec_at(&self, b: f64) -> f64 { self.grid().sec(b) }
-    pub fn vis_start(&self, _mix_bpm: f64) -> f64 { self.grid().beat(0.0) }
-    pub fn end(&self, _mix_bpm: f64) -> f64 { self.grid().beat(self.duration) }
+    pub fn vis_start(&self, _mix_bpm: f64) -> f64 { self.grid().beat(self.trim_in) }
+    pub fn end(&self, _mix_bpm: f64) -> f64 { self.grid().beat(self.duration - self.trim_out) }
     /// beats from the file start to the first downbeat
     pub fn intro_beats(&self) -> f64 { self.start_beat - self.grid().beat(0.0) }
     /// Make sure the track has an editable beat map that maps one track beat to one map entry.
@@ -83,7 +87,7 @@ impl Mix {
     /// indices of main-deck tracks sorted by start
     pub fn main_order(&self) -> Vec<usize> {
         let mut v: Vec<usize> = (0..self.tracks.len()).filter(|&i| self.tracks[i].lane < 2).collect();
-        v.sort_by(|&a, &b| self.tracks[a].start_beat.partial_cmp(&self.tracks[b].start_beat).unwrap());
+        v.sort_by(|&a, &b| (self.tracks[a].start_beat, self.tracks[a].trim_in).partial_cmp(&(self.tracks[b].start_beat, self.tracks[b].trim_in)).unwrap());
         v
     }
     /// (out idx, in idx, start beat, end beat)
@@ -132,5 +136,36 @@ pub fn camelot_dist(a: &str, b: &str) -> i32 {
     match (p(a), p(b)) {
         (Some((na, la)), Some((nb, lb))) => { let d = (na - nb).rem_euclid(12); let d = d.min(12 - d); d + if la != lb { 1 } else { 0 } }
         _ => 6,
+    }
+}
+
+/// Magnetic snapping: the candidate closest to `b` within `tol` beats.
+pub fn magnet(b: f64, cands: &[f64], tol: f64) -> Option<f64> {
+    cands.iter().copied().filter(|c| (c - b).abs() <= tol).min_by(|x, y| (x - b).abs().partial_cmp(&(y - b).abs()).unwrap())
+}
+
+impl Mix {
+    /// Split track `ti` at mix beat `b`. Both clips keep the source offsets; returns the new clip index.
+    pub fn split(&mut self, ti: usize, b: f64) -> Option<usize> {
+        let t = self.tracks.get(ti)?; let s = t.sec_at(b);
+        if s <= t.trim_in + 0.05 || s >= t.duration - t.trim_out - 0.05 { return None; }
+        let mut right = t.clone();
+        right.trim_in = s; right.fade_in = 0.0; right.trans = Default::default(); right.locked = false;
+        let left = &mut self.tracks[ti]; left.trim_out = left.duration - s; left.fade_out = 0.0;
+        self.tracks.push(right); Some(self.tracks.len() - 1)
+    }
+    /// Move the left or right edge of a clip to mix beat `b` (trim or extend, at least one beat long).
+    pub fn set_edge(&mut self, ti: usize, left: bool, b: f64) {
+        let t = &mut self.tracks[ti]; let s = t.sec_at(b); let min = 60.0 / t.bpm;
+        if left { t.trim_in = s.clamp(0.0, (t.duration - t.trim_out - min).max(0.0)); t.fade_in = t.fade_in.min(t.end(0.0) - t.vis_start(0.0)); }
+        else { t.trim_out = (t.duration - s).clamp(0.0, (t.duration - t.trim_in - min).max(0.0)); t.fade_out = t.fade_out.min(t.end(0.0) - t.vis_start(0.0)); }
+    }
+    /// Copy a clip (Alt+drag on a sample); returns the copy's index.
+    pub fn duplicate(&mut self, ti: usize) -> usize { let mut c = self.tracks[ti].clone(); c.locked = false; self.tracks.push(c); self.tracks.len() - 1 }
+    /// Put a clip on `lane` (0/1 = decks, 2/3 = sample lanes); deck clips alternate Deck 1 / Deck 2 in time order.
+    pub fn move_to_lane(&mut self, ti: usize, lane: usize) {
+        self.tracks[ti].lane = lane.min(3);
+        if lane < 2 { self.tracks[ti].trans = Default::default(); }
+        let o = self.main_order(); for (k, &i) in o.iter().enumerate() { self.tracks[i].lane = k % 2; }
     }
 }

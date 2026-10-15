@@ -11,7 +11,12 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid }
+pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64 }
+impl SnapTrack {
+    /// clip gate and fades: 0 outside [vis, end), linear fades in beats
+    #[inline] fn edge(&self, b: f64) -> f32 { if b < self.vis || b >= self.end { return 0.0; } let mut g = 1.0;
+        if self.fade_in > 0.0 { g *= ((b - self.vis) / self.fade_in).min(1.0); } if self.fade_out > 0.0 { g *= ((self.end - b) / self.fade_out).min(1.0); } g as f32 }
+}
 pub struct Snap { pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset, [StemMode; 4])>, pub decks: [Deck; 4], pub master: f32 }
 
 impl Snap {
@@ -21,7 +26,7 @@ impl Snap {
         for (i, t) in mix.tracks.iter().enumerate() {
             if let Some(Some(a)) = audio.get(i) {
                 map[i] = tracks.len();
-                tracks.push(SnapTrack { stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.bpm, vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid() });
+                tracks.push(SnapTrack { stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.bpm, vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out });
             }
         }
         let trans = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX)
@@ -231,7 +236,7 @@ impl Engine {
                 for i in 0..n {
                     if w.rd >= WH { let gb = w.next_beat; w.grain(a, gb, t, rs, m0.stem.as_ref()); }
                     let f = w.fifo[w.rd]; w.rd += 1; w.next_beat += bpb;
-                    let g = m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32);
+                    let g = (m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32)) * t.edge(b0 + bpb * i as f64);
                     dst[i][0] += f[0] * g; dst[i][1] += f[1] * g;
                 }
                 continue;
@@ -241,7 +246,7 @@ impl Engine {
                 let sec = t.grid.sec(b);
                 let pos = sec * srt;
                 if pos < 1.0 || pos as usize + 2 >= a.l.len() { continue; }
-                let g = m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32);
+                let g = (m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32)) * t.edge(b);
                 if g <= 0.0 { continue; }
                 let k = pos as usize; let f = (pos - k as f64) as f32;
                 let sg = m0.stem; let st = t.stems.as_deref();
