@@ -16,7 +16,9 @@ impl StemMode { pub const ALL: [StemMode; 4] = [StemMode::None, StemMode::Swap, 
     pub fn name(self) -> &'static str { match self { StemMode::None => "None", StemMode::Swap => "Swap", StemMode::Crossfade => "Crossfade", StemMode::Full => "Full" } } }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
-pub struct Transition { pub preset: Preset, pub stems: [StemMode; 4] }
+pub struct Transition { pub preset: Preset, pub stems: [StemMode; 4],
+    /// custom volume curves over the transition (progress 0..1, gain); empty = preset curve
+    #[serde(default)] pub curve_out: Vec<(f32, f32)>, #[serde(default)] pub curve_in: Vec<(f32, f32)> }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Track {
@@ -40,6 +42,8 @@ pub struct Track {
     #[serde(default)] pub stem_view: u8,
     /// muted stem ranges
     #[serde(default)] pub stem_mutes: Vec<StemMute>,
+    /// automation lanes (see AUTO_PARAMS): (beat relative to the downbeat, value)
+    #[serde(default)] pub auto: Vec<Vec<(f64, f32)>>,
 }
 impl Track {
     pub fn grid(&self) -> Grid { Grid::new(self.map.clone(), self.bpm, self.offset, self.start_beat) }
@@ -83,11 +87,13 @@ impl Default for Deck { fn default() -> Self { Deck { vol: 0.85, hi: 0.0, mid: 0
 pub struct Mix { pub name: String, pub bpm: f64, pub tracks: Vec<Track>, pub decks: [Deck; 4], #[serde(default = "one")] pub master: f32,
     #[serde(default = "yes")] pub key_lock: bool, #[serde(default)] pub metronome: bool, #[serde(default = "half")] pub metro_vol: f32, #[serde(default)] pub auto_stems: bool,
     /// stem colours inside transitions: 0 normal, 1 dimmed, 2 inverted
-    #[serde(default)] pub trans_stem_style: u8 }
+    #[serde(default)] pub trans_stem_style: u8,
+    /// effect blocks on the timeline
+    #[serde(default)] pub fx: Vec<crate::fx::FxBlock> }
 fn yes() -> bool { true }
 fn half() -> f32 { 0.5 }
 fn one() -> f32 { 1.0 }
-impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0 } } }
+impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![] } } }
 
 impl Mix {
     /// indices of main-deck tracks sorted by start
@@ -208,5 +214,28 @@ impl Track {
         t.trim_in = 0.0; t.trim_out = 0.0; t.fade_in = 0.0; t.fade_out = 0.0; t.stem_mutes.clear(); t.stem_view = 0; t.locked = false; t.trans = Default::default();
         t.map = self.map.as_ref().map(|m| { let mut m = (**m).clone(); m.shift(-a); Arc::new(m) });
         t.normalize_grid(); t
+    }
+}
+
+/// Automation parameters per track: volume (0..1), low / mid / high EQ and filter (-1..1).
+pub const AUTO_PARAMS: [&str; 5] = ["Volume", "Low", "Mid", "High", "Filter"];
+/// Linear interpolation through automation points (x sorted); None when the lane is empty.
+pub fn interp(p: &[(f64, f32)], x: f64) -> Option<f32> {
+    let (f, l) = (p.first()?, p.last()?);
+    if x <= f.0 { return Some(f.1); } if x >= l.0 { return Some(l.1); }
+    let i = p.partition_point(|q| q.0 <= x); let (a, b) = (p[i - 1], p[i]);
+    Some(a.1 + (b.1 - a.1) * ((x - a.0) / (b.0 - a.0).max(1e-9)) as f32)
+}
+pub fn interp32(p: &[(f32, f32)], x: f32) -> f32 {
+    let v: Vec<(f64, f32)> = p.iter().map(|q| (q.0 as f64, q.1)).collect(); interp(&v, x as f64).unwrap_or(1.0)
+}
+impl Track {
+    /// Automation value of parameter `k` at mix beat `b` (points are stored relative to the downbeat).
+    #[allow(dead_code)]
+    pub fn auto_at(&self, k: usize, b: f64) -> Option<f32> { self.auto.get(k).and_then(|p| interp(p, b - self.start_beat)) }
+    /// Insert or replace a point (track-relative beat x) keeping the lane sorted; returns its index.
+    pub fn auto_set(&mut self, k: usize, x: f64, v: f32) -> usize {
+        while self.auto.len() < AUTO_PARAMS.len() { self.auto.push(vec![]); }
+        let p = &mut self.auto[k]; let i = p.partition_point(|q| q.0 < x); p.insert(i, (x, v)); i
     }
 }

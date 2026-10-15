@@ -54,7 +54,7 @@ pub struct App {
     sel: Option<usize>, sel_in: Option<usize>, undo: Vec<String>, redo: Vec<String>,
     tx: crossbeam_channel::Sender<Msg>, rx: crossbeam_channel::Receiver<Msg>, loading: usize,
     drag: Option<(usize, f64, f64)>, loop_on: bool, bars: u32, snapping: Snapping, lock: bool,
-    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, stem_sel: Option<(usize, usize, f64, f64)>, stem_drag: bool, dl_offer: Option<usize>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
+    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, auto_track: Option<usize>, auto_param: usize, auto_solo: bool, auto_drag: Option<(usize, usize)>, auto_rect: Rect, vzoom: bool, tc_side: usize, tc_drag: Option<usize>, fx_sel: Option<usize>, fx_drag: Option<(usize, u8, f64, f64, f64)>, fx_kind: crate::fx::FxKind, fx_target: usize, fx_name: String, fx_presets: Vec<crate::fx::FxPreset>, live_fx: Option<crate::fx::FxBlock>, live_start: f64, live_last: Option<(f64, f64, crate::fx::FxBlock)>, stem_sel: Option<(usize, usize, f64, f64)>, stem_drag: bool, dl_offer: Option<usize>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
     stems: HashMap<String, Arc<crate::stems::Stems>>, stem_prog: HashMap<String, Arc<std::sync::atomic::AtomicU32>>, stem_err: HashMap<String, String>,
     stem_tx: crossbeam_channel::Sender<StemJob>, dl_prog: Arc<std::sync::atomic::AtomicU32>, ep: Arc<Mutex<String>>,
     ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
@@ -135,7 +135,7 @@ impl App {
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let mut a = App { mix: Mix::default(), store: HashMap::new(), out: crate::audio::start(), ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
-            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
+            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib: { let c = cc.egui_ctx.clone(); crate::library::Library::new(crate::library::config_dir(), crate::library::cache_dir(), Arc::new(move || c.request_repaint())) },
             lib_q: String::new(), lib_path: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
             lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_view_key: None, timeline_rect: Rect::NOTHING };
@@ -169,7 +169,7 @@ impl App {
     fn insert(&mut self, p: PathBuf, au: Audio, an: Analysis, sample: Option<(usize, f64)>) {
         let key = p.display().to_string();
         let t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![] };
+            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![] };
         self.store.insert(key, (Arc::new(au), Arc::new(an)));
         match sample { Some((lane, at)) => { let mut t = t; t.lane = lane; t.start_beat = (at / 4.0).round() * 4.0; self.mix.tracks.push(t); }
             None => self.mix.add_track(t) }
@@ -224,7 +224,7 @@ impl App {
     fn build_snap(&self) -> Snap {
         let auds: Vec<Option<Arc<Audio>>> = self.mix.tracks.iter().map(|t| self.store.get(&t.path).map(|x| x.0.clone())).collect();
         let st: Vec<Option<Arc<crate::stems::Stems>>> = self.mix.tracks.iter().map(|t| self.stems.get(&t.path).cloned()).collect();
-        Snap::build_with(&self.mix, &auds, &st)
+        let mut s = Snap::build_with(&self.mix, &auds, &st); s.live = self.live_fx.clone(); s
     }
     fn export(&mut self, p: PathBuf) {
         let snap = Arc::new(self.build_snap()); let len = self.mix.length_beats() + 16.0; let tx = self.tx.clone();
@@ -316,6 +316,111 @@ impl App {
             let _ = tx.send(Msg::Clip(nt, clip, an));
         });
     }
+    fn effects_tab(&mut self, ui: &mut egui::Ui) {
+        use crate::fx::*;
+        let dim = |s: &str| egui::RichText::new(s).color(DIM).size(11.0);
+        let targets = ["Deck 1", "Deck 2", "Sample 1", "Sample 2", "Master"];
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Effect blocks").strong());
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("fxk").selected_text(self.fx_kind.name()).show_ui(ui, |ui| { for k in FxKind::ALL { ui.selectable_value(&mut self.fx_kind, k, k.name()); } });
+                    egui::ComboBox::from_id_salt("fxt").selected_text(targets[self.fx_target]).show_ui(ui, |ui| { for (i, n) in targets.iter().enumerate() { ui.selectable_value(&mut self.fx_target, i, *n); } });
+                    if ui.button("＋ Add at playhead").clicked() { self.snapshot(); let b = self.beat().round(); self.mix.fx.push(FxBlock::new(self.fx_kind, self.fx_target, b)); self.fx_sel = Some(self.mix.fx.len() - 1); }
+                });
+                let mut del = false; let mut save = false;
+                if let Some(k) = self.fx_sel.filter(|&k| k < self.mix.fx.len()) {
+                    let before = self.mix.fx[k].clone();
+                    let f = &mut self.mix.fx[k];
+                    ui.label(format!("Selected: {} on {}, bar {:.0}", f.kind.name(), targets[f.target.min(4)], f.start / 4.0 + 1.0));
+                    egui::Grid::new("fxp").num_columns(2).show(ui, |ui| {
+                        ui.label("Target"); egui::ComboBox::from_id_salt("fxst").selected_text(targets[f.target.min(4)]).show_ui(ui, |ui| { for (i, n) in targets.iter().enumerate() { ui.selectable_value(&mut f.target, i, *n); } }); ui.end_row();
+                        ui.label("Length"); ui.add(egui::DragValue::new(&mut f.len).range(0.5..=256.0).speed(0.25).suffix(" beats")); ui.end_row();
+                        if f.kind.has_tail() { ui.label("Tail"); ui.add(egui::DragValue::new(&mut f.tail).range(0.0..=64.0).speed(0.25).suffix(" beats")); ui.end_row(); }
+                        ui.label("Mix"); ui.add(egui::Slider::new(&mut f.mix, 0.0..=1.0)); ui.end_row();
+                        if matches!(f.kind, FxKind::Reverb | FxKind::Echo) { ui.label(if f.kind == FxKind::Reverb { "Decay" } else { "Feedback" }); ui.add(egui::Slider::new(&mut f.decay, 0.0..=1.0)); ui.end_row(); }
+                        if matches!(f.kind, FxKind::Flanger | FxKind::FilterSweep) { ui.label("Depth"); ui.add(egui::Slider::new(&mut f.depth, 0.0..=1.0)); ui.end_row(); }
+                        if matches!(f.kind, FxKind::Echo | FxKind::Flanger) { ui.label("Time"); ui.add(egui::Slider::new(&mut f.time, 0.125..=8.0).logarithmic(true).suffix(" beats")); ui.end_row(); }
+                    });
+                    if self.mix.fx[k] != before { let now = self.mix.fx[k].clone(); self.mix.fx[k] = before; self.snapshot(); self.mix.fx[k] = now; }
+                    ui.horizontal(|ui| { if ui.button("🗑 Delete block").clicked() { del = true; }
+                        ui.add(egui::TextEdit::singleline(&mut self.fx_name).hint_text("preset name").desired_width(120.0));
+                        if ui.add_enabled(!self.fx_name.trim().is_empty(), egui::Button::new("Save as preset")).clicked() { save = true; } });
+                    if del { self.snapshot(); self.mix.fx.remove(k); self.fx_sel = None; }
+                    else if save { let name = self.fx_name.trim().to_string(); let mut b = self.mix.fx[k].clone(); b.start = 0.0;
+                        self.fx_presets.retain(|p| p.name != name); self.fx_presets.push(FxPreset { name: name.clone(), block: b });
+                        self.status = match save_presets(&self.fx_presets) { Ok(()) => format!("Preset \"{name}\" saved"), Err(e) => format!("Could not save presets: {e}") }; self.fx_name.clear(); }
+                } else { ui.label(dim("Click a block on the timeline to edit it.")); }
+                ui.separator();
+                ui.label(egui::RichText::new("Presets").strong());
+                if self.fx_presets.is_empty() { ui.label(dim("No presets yet: select a block and save it.")); }
+                let mut rm = None; let mut add = None;
+                for (i, p) in self.fx_presets.iter().enumerate() { ui.horizontal(|ui| { ui.label(format!("{} ({})", p.name, p.block.kind.name()));
+                    if ui.small_button("Add at playhead").clicked() { add = Some(i); } if ui.small_button("✕").clicked() { rm = Some(i); } }); }
+                if let Some(i) = add { self.snapshot(); let mut b = self.fx_presets[i].block.clone(); b.start = self.beat().round(); self.mix.fx.push(b); self.fx_sel = Some(self.mix.fx.len() - 1); }
+                if let Some(i) = rm { self.fx_presets.remove(i); let _ = save_presets(&self.fx_presets); }
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("XY pad (live)").strong());
+                ui.label(dim("Hold and move while the mix plays: X = mix, Y = decay / depth. Release, then commit."));
+                let (r, resp) = ui.allocate_exact_size(vec2(220.0, 150.0), Sense::click_and_drag());
+                let p = ui.painter(); p.rect_filled(r, 6.0, C::from_rgb(30, 31, 36)); p.rect_stroke(r, 6.0, Stroke::new(1.0_f32, LINE));
+                for k in 1..4 { let x = r.left() + r.width() * k as f32 / 4.0; let y = r.top() + r.height() * k as f32 / 4.0;
+                    p.line_segment([pos2(x, r.top()), pos2(x, r.bottom())], Stroke::new(0.5_f32, LINE)); p.line_segment([pos2(r.left(), y), pos2(r.right(), y)], Stroke::new(0.5_f32, LINE)); }
+                if let Some(pp) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on()) {
+                    let x = ((pp.x - r.left()) / r.width()).clamp(0.0, 1.0); let y = ((r.bottom() - pp.y) / r.height()).clamp(0.0, 1.0);
+                    let mut b = FxBlock::new(self.fx_kind, 4, 0.0); b.mix = x; b.decay = y; b.depth = y; if self.fx_kind == FxKind::FilterSweep { b.time = y; }
+                    if self.live_fx.is_none() { self.live_start = self.beat(); }
+                    p.circle_filled(pp, 9.0, ACCENT); self.live_fx = Some(b);
+                } else if let Some(b) = self.live_fx.take() { self.live_last = Some((self.live_start, self.beat(), b)); }
+                if let Some((s, e, b)) = self.live_last.clone() {
+                    ui.label(format!("Last: {} from bar {:.1} to {:.1}, mix {:.2}, {:.2}", b.kind.name(), s / 4.0 + 1.0, e / 4.0 + 1.0, b.mix, b.decay));
+                    if ui.button("Commit to a block").clicked() { self.snapshot(); let mut nb = b.clone(); nb.start = s.round(); nb.len = (e - s).round().max(1.0); nb.target = self.fx_target;
+                        if nb.kind == FxKind::FilterSweep { nb.depth = nb.time.max(0.1); nb.time = 1.0; }
+                        self.mix.fx.push(nb); self.fx_sel = Some(self.mix.fx.len() - 1); self.live_last = None; self.status = "Live effect committed to a block".into(); }
+                }
+                ui.add_space(8.0);
+                ui.label(dim("Per deck: 3-band EQ and filter on the left; automation with the A button on a clip."));
+            });
+        });
+    }
+    fn trans_curves_ui(&mut self, ui: &mut egui::Ui, i: usize) {
+        ui.separator();
+        ui.horizontal(|ui| { ui.label(egui::RichText::new("Volume automation").strong());
+            ui.radio_value(&mut self.tc_side, 0, "Outgoing"); ui.radio_value(&mut self.tc_side, 1, "Incoming");
+            if ui.button("Reset to preset").clicked() { self.snapshot(); let t = &mut self.mix.tracks[i].trans; t.curve_out.clear(); t.curve_in.clear(); }
+            ui.label(egui::RichText::new("click to add, drag to move, right-click to delete (used when stems are off)").color(DIM).size(11.0)); });
+        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(520.0), 110.0), Sense::click_and_drag());
+        let p = ui.painter(); p.rect_filled(r, 4.0, C::from_rgb(28, 29, 33)); p.rect_stroke(r, 4.0, Stroke::new(1.0_f32, LINE));
+        let preset = self.mix.tracks[i].trans.preset;
+        let to = |x: f32, g: f32| pos2(r.left() + x * r.width(), r.bottom() - g * r.height());
+        let cols = [C::from_rgb(240, 110, 90), C::from_rgb(110, 220, 130)];
+        for side in 0..2 {
+            let tr = &self.mix.tracks[i].trans; let c = if side == 0 { &tr.curve_out } else { &tr.curve_in };
+            let pts: Vec<egui::Pos2> = (0..=60).map(|k| { let x = k as f32 / 60.0; to(x, if c.is_empty() { engine::preset_gain(preset, x, side == 0) } else { crate::model::interp32(c, x) }) }).collect();
+            let act = side == self.tc_side; p.add(egui::Shape::line(pts, Stroke::new(if act { 2.0_f32 } else { 1.0 }, if act { cols[side] } else { cols[side].gamma_multiply(0.4) })));
+            if act { for q in c { p.circle_filled(to(q.0, q.1), 4.0, cols[side]); } }
+        }
+        let side = self.tc_side;
+        let cur: Vec<(f32, f32)> = { let tr = &self.mix.tracks[i].trans; if side == 0 { tr.curve_out.clone() } else { tr.curve_in.clone() } };
+        let near = |pp: egui::Pos2| cur.iter().enumerate().map(|(k, q)| (k, to(q.0, q.1).distance(pp))).filter(|x| x.1 < 7.0).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).map(|x| x.0);
+        let val = |pp: egui::Pos2| (((pp.x - r.left()) / r.width()).clamp(0.0, 1.0), ((r.bottom() - pp.y) / r.height()).clamp(0.0, 1.0));
+        let seed = |s: &mut Self| { let t = &mut s.mix.tracks[i].trans; let c = if side == 0 { &mut t.curve_out } else { &mut t.curve_in };
+            if c.is_empty() { *c = (0..=4).map(|k| { let x = k as f32 / 4.0; (x, engine::preset_gain(t.preset, x, side == 0)) }).collect(); } };
+        if let Some(pp) = resp.interact_pointer_pos() {
+            if resp.drag_started() { self.snapshot(); seed(self); let c = { let t = &self.mix.tracks[i].trans; if side == 0 { t.curve_out.clone() } else { t.curve_in.clone() } };
+                let k = c.iter().enumerate().map(|(k, q)| (k, to(q.0, q.1).distance(pp))).filter(|x| x.1 < 9.0).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).map(|x| x.0);
+                self.tc_drag = Some(match k { Some(k) => k, None => { let (x, g) = val(pp); let t = &mut self.mix.tracks[i].trans; let c = if side == 0 { &mut t.curve_out } else { &mut t.curve_in }; let j = c.partition_point(|q| q.0 < x); c.insert(j, (x, g)); j } }); }
+            else if resp.clicked() && near(pp).is_none() { self.snapshot(); seed(self); let (x, g) = val(pp); let t = &mut self.mix.tracks[i].trans; let c = if side == 0 { &mut t.curve_out } else { &mut t.curve_in }; let j = c.partition_point(|q| q.0 < x); c.insert(j, (x, g)); }
+            else if resp.secondary_clicked() { if let Some(k) = near(pp) { self.snapshot(); let t = &mut self.mix.tracks[i].trans; let c = if side == 0 { &mut t.curve_out } else { &mut t.curve_in }; c.remove(k); } }
+        }
+        if let Some(k) = self.tc_drag {
+            if resp.dragged() { if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) { let (x, g) = val(pp); let t = &mut self.mix.tracks[i].trans; let c = if side == 0 { &mut t.curve_out } else { &mut t.curve_in };
+                if k < c.len() { let lo = if k > 0 { c[k - 1].0 + 0.001 } else { 0.0 }; let hi = if k + 1 < c.len() { c[k + 1].0 - 0.001 } else { 1.0 }; c[k] = (x.clamp(lo, hi), g); } } }
+            else { self.tc_drag = None; }
+        }
+    }
     fn snap_beat(&self, b: f64) -> f64 { match self.snapping { Snapping::Off => b, Snapping::Free => b.round(), Snapping::Half => (b / 2.0).round() * 2.0, Snapping::Full => (b / 4.0).round() * 4.0 } }
 }
 
@@ -356,6 +461,7 @@ impl eframe::App for App {
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) { if ctx.input(|i| i.modifiers.shift) { self.do_redo() } else { self.do_undo() } }
             if ctx.input(|i| i.key_pressed(egui::Key::Delete)) { self.remove_sel(); }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::E)) { self.split_here(); }
+            if ctx.input(|i| !i.modifiers.command && i.key_pressed(egui::Key::Z)) { self.vzoom = !self.vzoom; }
         }
         if self.playing() || self.loading > 0 || self.lib.scanning { ctx.request_repaint(); } else { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
         self.top_bar(ctx);
@@ -595,7 +701,7 @@ impl App {
         let ruler = Rect::from_min_max(area.min, pos2(area.right(), area.top() + RULER_H));
         let mut y = ruler.bottom();
         let mut rows = vec![];
-        let deck_h = ((area.bottom() - y - 2.0 * SAMPLE_H - TEMPO_H) / 2.0).clamp(96.0, 230.0);
+        let deck_h = ((area.bottom() - y - 2.0 * SAMPLE_H - TEMPO_H) / 2.0).clamp(96.0, 230.0) * if self.vzoom { 1.8 } else { 1.0 };
         for (lane, h) in [(0usize, deck_h), (1, deck_h), (2, SAMPLE_H), (3, SAMPLE_H), (4, TEMPO_H)] { rows.push((lane, Rect::from_min_max(pos2(area.left(), y), pos2(area.right(), y + h)))); y += h; }
         let tlrect = Rect::from_min_max(pos2(tl_x0, ruler.bottom()), pos2(area.right(), y));
         let clip = |r: Rect| Rect::from_min_max(pos2(r.left().max(tl_x0), r.top()), pos2(r.right().min(area.right()), r.bottom()));
@@ -643,6 +749,7 @@ impl App {
         let (d1, d2) = (rows[0].1, rows[1].1);
         let mut clicked_clip: Option<(usize, f64, u8)> = None;
         let mut stem_act: Option<(usize, u8, usize, f64)> = None;
+        let mut auto_act: Option<(usize, u8, f64, f32)> = None;
         let mut tl_act: Option<TlDrag> = None; let mut tl_hover: Option<(usize, f64)> = None;
         let mut bm_mode = self.bm_mode; let mut bm_act: Option<(usize, i64, u8)> = None; let mut bm_hover: Option<egui::Pos2> = None;
         for (ti, t) in self.mix.tracks.iter().enumerate() {
@@ -784,6 +891,58 @@ impl App {
                     rr.on_hover_text(match v { 0 => "Show the full track", 1 => "Show 2 stems: instrumental / vocals", _ => "Show 4 stems: drums / bass / melody / vocals" });
                 }
             }
+            if !sample {
+                let r = Rect::from_min_size(pos2(cr.right() - 4.0 - 16.0 * 4.0 - 4.0, tr.top() + 1.5), vec2(14.0, title_h - 3.0));
+                if r.left() > vis.left() + 60.0 && r.right() < vis.right() {
+                    let on = self.auto_track == Some(ti);
+                    tp.rect_filled(r, 2.0, if on { C::from_rgb(255, 120, 60) } else { C::from_rgba_unmultiplied(0, 0, 0, 90) });
+                    tp.text(r.center(), Align2::CENTER_CENTER, "A", FontId::proportional(8.5), if on { C::BLACK } else { TXT });
+                    let rr = ui.interact(r, ui.id().with(("autob", ti)), Sense::click());
+                    if rr.clicked() { auto_act = Some((ti, 100, 0.0, 0.0)); }
+                    rr.on_hover_text("Automation: draw volume, EQ and filter curves over the waveform (Z zooms the decks vertically)");
+                }
+            }
+            if self.auto_track == Some(ti) {
+                let h = wave.height(); let ap = self.auto_param;
+                let y_of = |k: usize, v: f32| if k == 0 { wave.bottom() - v * h } else { wave.center().y - v * h / 2.0 };
+                let v_of = |k: usize, y: f32| if k == 0 { ((wave.bottom() - y) / h).clamp(0.0, 1.0) } else { ((wave.center().y - y) / (h / 2.0)).clamp(-1.0, 1.0) };
+                let cols = [C::from_rgb(255, 255, 255), C::from_rgb(80, 120, 255), C::from_rgb(80, 220, 120), C::from_rgb(240, 240, 140), C::from_rgb(255, 130, 60)];
+                tp.rect_filled(wave, 0.0, C::from_rgba_unmultiplied(0, 0, 0, 70));
+                for k in 0..5 {
+                    if self.auto_solo && k != ap { continue; }
+                    let pts = t.auto.get(k).cloned().unwrap_or_default(); let act = k == ap;
+                    let col = if act { cols[k] } else { cols[k].gamma_multiply(0.35) };
+                    if pts.is_empty() { let y = y_of(k, if k == 0 { 1.0 } else { 0.0 }); tp.line_segment([pos2(vis.left(), y), pos2(vis.right(), y)], Stroke::new(1.0_f32, col.gamma_multiply(0.5))); continue; }
+                    let mut line = vec![pos2(vis.left(), y_of(k, pts[0].1))];
+                    for p in &pts { line.push(pos2(bx(t.start_beat + p.0), y_of(k, p.1))); }
+                    line.push(pos2(vis.right(), y_of(k, pts.last().unwrap().1)));
+                    let line: Vec<egui::Pos2> = line.into_iter().map(|p| pos2(p.x.clamp(vis.left(), vis.right()), p.y)).collect();
+                    tp.add(egui::Shape::line(line, Stroke::new(if act { 2.0_f32 } else { 1.2 }, col)));
+                    if act { for p in &pts { let c = pos2(bx(t.start_beat + p.0), y_of(k, p.1)); if vis.contains(c) { tp.circle_filled(c, 4.0, col); tp.circle_stroke(c, 4.0, Stroke::new(1.0_f32, C::BLACK)); } } }
+                }
+                // parameter chips + solo
+                let mut x = vis.left() + 4.0;
+                for (k, n) in crate::model::AUTO_PARAMS.iter().enumerate().map(|(k, n)| (k as u8, *n)).chain([(5u8, "Solo")]) {
+                    let w = 7.0 + 5.5 * n.len() as f32; let r = Rect::from_min_size(pos2(x, wave.top() + 2.0), vec2(w, 13.0)); x += w + 3.0;
+                    let on = if k == 5 { self.auto_solo } else { ap == k as usize };
+                    tp.rect_filled(r, 3.0, if on { if k == 5 { ACCENT } else { cols[k as usize] } } else { C::from_rgba_unmultiplied(20, 20, 24, 220) });
+                    tp.text(r.center(), Align2::CENTER_CENTER, n, FontId::proportional(9.0), if on { C::BLACK } else { TXT });
+                    if ui.interact(r, ui.id().with(("ap", ti, k)), Sense::click()).clicked() { auto_act = Some((ti, 110 + k, 0.0, 0.0)); }
+                }
+                let area_r = Rect::from_min_max(pos2(vis.left(), wave.top() + 17.0), vis.max.min(wave.max));
+                let r = ui.interact(area_r, ui.id().with(("autoarea", ti)), Sense::click_and_drag());
+                let pts = t.auto.get(ap).cloned().unwrap_or_default();
+                let near = |pp: egui::Pos2| pts.iter().enumerate().map(|(i, p)| (i, pos2(bx(t.start_beat + p.0), y_of(ap, p.1)).distance(pp))).filter(|x| x.1 < 7.0).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).map(|x| x.0);
+                if let Some(pp) = r.interact_pointer_pos() {
+                    let (bx_, v) = (xb(pp.x) - t.start_beat, v_of(ap, pp.y));
+                    if r.drag_started() { auto_act = Some(match near(pp) { Some(i) => (ti, 1, i as f64, 0.0), None => (ti, 0, bx_, v) }); }
+                    else if r.clicked() && near(pp).is_none() { auto_act = Some((ti, 2, bx_, v)); }
+                    else if r.secondary_clicked() { if let Some(i) = near(pp) { auto_act = Some((ti, 3, i as f64, 0.0)); } }
+                }
+                if r.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair); }
+                self.auto_rect = wave;
+                r.on_hover_text("Click to add a point, drag to move it, right-click a point to delete it");
+            }
             if !sample && t.stem_view > 0 {
                 let nl = if t.stem_view == 1 { 2 } else { 4 }; let lh = wave.height() / nl as f32;
                 if my_stems.is_some() { for l in 0..nl { tp.text(pos2(vis.left() + 3.0, wave.top() + lh * l as f32 + 2.0), Align2::LEFT_TOP, crate::model::lane_name(t.stem_view, l), FontId::proportional(8.5), C::from_rgba_unmultiplied(255, 255, 255, 150)); } }
@@ -853,6 +1012,35 @@ impl App {
                     });
                 }
             }
+        }
+        // effect blocks: a strip at the bottom of the target lane (master blocks in the tempo lane)
+        let mut fx_act: Option<(usize, u8, f64)> = None;
+        for (k, fb) in self.mix.fx.iter().enumerate() {
+            let row = rows[fb.target.min(4)].1;
+            let (x0, x1, x2) = (bx(fb.start), bx(fb.start + fb.len), bx(fb.end()));
+            if x2 < tl_x0 || x0 > area.right() { continue; }
+            let r = Rect::from_min_max(pos2(x0.max(tl_x0), row.bottom() - 15.0), pos2(x1.min(area.right()), row.bottom() - 2.0));
+            let col = match fb.kind { crate::fx::FxKind::Reverb => C::from_rgb(170, 110, 230), crate::fx::FxKind::Echo => C::from_rgb(70, 190, 220), crate::fx::FxKind::Flanger => C::from_rgb(230, 120, 160), crate::fx::FxKind::FilterSweep => C::from_rgb(230, 170, 60) };
+            if x2 > x1 + 1.0 { let tr_ = Rect::from_min_max(pos2(x1.max(tl_x0), r.top() + 3.0), pos2(x2.min(area.right()), r.bottom() - 3.0)); tp.rect_filled(tr_, 0.0, col.gamma_multiply(0.3)); }
+            let sel = self.fx_sel == Some(k);
+            tp.rect_filled(r, 3.0, col.gamma_multiply(if sel { 1.0 } else { 0.75 })); if sel { tp.rect_stroke(r, 3.0, Stroke::new(1.5_f32, C::WHITE)); }
+            if r.width() > 30.0 { tp.text(pos2(r.left() + 4.0, r.center().y), Align2::LEFT_CENTER, fb.kind.name(), FontId::proportional(9.0), C::BLACK); }
+            let resp = ui.interact(r, ui.id().with(("fx", k)), Sense::click_and_drag());
+            let mut edge = 0u8;
+            if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) { if resp.hovered() { if (hp.x - x0).abs() < 5.0 { edge = 1; } else if (hp.x - x1).abs() < 5.0 { edge = 2; }
+                ui.ctx().set_cursor_icon(if edge > 0 { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::Grab }); } }
+            if resp.clicked() { fx_act = Some((k, 9, 0.0)); }
+            if resp.drag_started() && !self.lock { if let Some(pp) = resp.interact_pointer_pos() { let e = if (pp.x - x0).abs() < 5.0 { 1 } else if (pp.x - x1).abs() < 5.0 { 2 } else { 0 }; fx_act = Some((k, e, xb(pp.x))); } }
+            resp.on_hover_text(format!("{} on {}: drag to move, drag an edge to resize, click to edit in Effects", fb.kind.name(), ["Deck 1", "Deck 2", "Sample 1", "Sample 2", "Master"][fb.target.min(4)]));
+        }
+        if let Some((k, what, b)) = fx_act { self.fx_sel = Some(k); self.tab = Tab::Effects;
+            if what < 9 { self.snapshot(); let f = &self.mix.fx[k]; self.fx_drag = Some((k, what, b, f.start, f.len)); } }
+        if let Some((k, what, grab, os, ol)) = self.fx_drag {
+            if ui.input(|i| i.pointer.primary_down()) && k < self.mix.fx.len() { if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) {
+                let d = xb(pp.x) - grab; let q = |x: f64| if self.snapping == Snapping::Off { x } else { x.round() };
+                let f = &mut self.mix.fx[k];
+                match what { 0 => f.start = q(os + d), 1 => { let ns = q(os + d).min(os + ol - 0.5); f.len = os + ol - ns; f.start = ns; } _ => f.len = q(os + ol + d - os).max(0.5) + 0.0 * os }
+            } } else { self.fx_drag = None; if self.undo.last().is_some_and(|u| *u == serde_json::to_string(&self.mix).unwrap()) { self.undo.pop(); } }
         }
         // transition boxes spanning both decks
         let mut clicked_trans = None;
@@ -941,6 +1129,27 @@ impl App {
             else { self.grid_drag = None; }
         }
         self.tl_hover = tl_hover;
+        if let Some((ti, what, x, v)) = auto_act { if ti < self.mix.tracks.len() {
+            match what {
+                100 => { self.auto_track = if self.auto_track == Some(ti) { None } else { Some(ti) }; }
+                110..=114 => self.auto_param = (what - 110) as usize,
+                115 => self.auto_solo = !self.auto_solo,
+                0 => { self.snapshot(); let i = self.mix.tracks[ti].auto_set(self.auto_param, x, v); self.auto_drag = Some((ti, i)); }
+                1 => { self.snapshot(); self.auto_drag = Some((ti, x as usize)); }
+                2 => { self.snapshot(); self.mix.tracks[ti].auto_set(self.auto_param, x, v); }
+                _ => { self.snapshot(); let k = self.auto_param; if let Some(p) = self.mix.tracks[ti].auto.get_mut(k) { if (x as usize) < p.len() { p.remove(x as usize); } } }
+            }
+        } }
+        if let Some((ti, i)) = self.auto_drag {
+            if ui.input(|i| i.pointer.primary_down()) && ti < self.mix.tracks.len() { if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) {
+                let k = self.auto_param; let w = self.auto_rect; let h = w.height();
+                let v = if k == 0 { ((w.bottom() - pp.y) / h).clamp(0.0, 1.0) } else { ((w.center().y - pp.y) / (h / 2.0)).clamp(-1.0, 1.0) };
+                let t = &mut self.mix.tracks[ti]; let mut x = xb(pp.x) - t.start_beat; if self.snapping != Snapping::Off { x = (x * 4.0).round() / 4.0; }
+                if let Some(p) = t.auto.get_mut(k) { if i < p.len() {
+                    let lo = if i > 0 { p[i - 1].0 + 1e-3 } else { f64::MIN }; let hi = if i + 1 < p.len() { p[i + 1].0 - 1e-3 } else { f64::MAX };
+                    p[i] = (x.clamp(lo, hi), v); self.status = format!("{}: {}", crate::model::AUTO_PARAMS[k], if k == 0 { format!("{:.0} %", v * 100.0) } else { format!("{:+.0} %", v * 100.0) }); } }
+            } } else { self.auto_drag = None; }
+        }
         if let Some((ti, what, lane, b)) = stem_act { if ti < self.mix.tracks.len() {
             let sel = self.stem_sel.filter(|s| s.0 == ti);
             match what {
@@ -1083,8 +1292,7 @@ impl App {
                 if ui.button("Fit whole mix").clicked() { self.ppb = (ui.available_width() / self.mix.length_beats().max(64.0) as f32).max(0.3); self.scroll = 0.0; }
                 ui.label(dim("Tip: Ctrl + scroll zooms around the pointer, scroll moves in time.")); }
             Tab::Video => { ui.heading("Video"); ui.label(dim("Video is not supported in v1.")); }
-            Tab::Effects => { ui.heading("Effects"); ui.label(dim("Per deck: 3-band EQ and filter (knobs on the left). Echo is in the \"Echo out\" transition. More effects in v2."));
-                for d in 0..2 { ui.horizontal(|ui| { ui.label(format!("Deck {} filter", d + 1)); ui.add(egui::Slider::new(&mut self.mix.decks[d].filter, -1.0..=1.0).text("LP ← → HP")); }); } }
+            Tab::Effects => self.effects_tab(ui),
             Tab::Master => { ui.heading("Master"); let mut b = self.mix.bpm;
                 ui.horizontal(|ui| { ui.label("Mix tempo"); if ui.add(egui::DragValue::new(&mut b).range(60.0..=200.0).speed(0.1).suffix(" BPM")).changed() { self.mix.bpm = b; } });
                 ui.add(egui::Slider::new(&mut self.mix.master, 0.0..=1.5).text("Master volume"));
@@ -1192,6 +1400,7 @@ impl App {
                 if !both && ui.button("Separate stems for both").clicked() { self.request_stems(o); self.request_stems(i); }
                 if ui.button("▶ Listen to transition").clicked() { self.seek(s - 8.0); let _ = self.out.tx.send(Cmd::Play(true)); } });
         });
+        self.trans_curves_ui(ui, i);
     }
 
     fn track_tab(&mut self, ui: &mut egui::Ui) {
