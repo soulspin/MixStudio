@@ -44,6 +44,8 @@ pub struct Track {
     #[serde(default)] pub stem_mutes: Vec<StemMute>,
     /// automation lanes (see AUTO_PARAMS): (beat relative to the downbeat, value)
     #[serde(default)] pub auto: Vec<Vec<(f64, f32)>>,
+    /// stretch mode (STRETCH_MODES): 0 = mix default (key lock setting), 1 key lock, 2 vinyl, 3 beat slice
+    #[serde(default)] pub stretch: u8,
 }
 impl Track {
     pub fn grid(&self) -> Grid { Grid::new(self.map.clone(), self.bpm, self.offset, self.start_beat) }
@@ -89,11 +91,13 @@ pub struct Mix { pub name: String, pub bpm: f64, pub tracks: Vec<Track>, pub dec
     /// stem colours inside transitions: 0 normal, 1 dimmed, 2 inverted
     #[serde(default)] pub trans_stem_style: u8,
     /// effect blocks on the timeline
-    #[serde(default)] pub fx: Vec<crate::fx::FxBlock> }
+    #[serde(default)] pub fx: Vec<crate::fx::FxBlock>,
+    /// tempo lane (TEMPO_MODES), manual nodes (beat, BPM) and ramp (start, end BPM)
+    #[serde(default)] pub tempo_mode: u8, #[serde(default)] pub tempo_pts: Vec<(f64, f64)>, #[serde(default)] pub ramp: (f64, f64) }
 fn yes() -> bool { true }
 fn half() -> f32 { 0.5 }
 fn one() -> f32 { 1.0 }
-impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![] } } }
+impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![], tempo_mode: 0, tempo_pts: vec![], ramp: (0.0, 0.0) } } }
 
 impl Mix {
     /// indices of main-deck tracks sorted by start
@@ -238,4 +242,37 @@ impl Track {
         while self.auto.len() < AUTO_PARAMS.len() { self.auto.push(vec![]); }
         let p = &mut self.auto[k]; let i = p.partition_point(|q| q.0 < x); p.insert(i, (x, v)); i
     }
+}
+
+pub const TEMPO_MODES: [&str; 4] = ["Constant", "Auto", "Manual", "Fixed ramp"];
+pub const STRETCH_MODES: [&str; 4] = ["Mix default", "Key lock (WSOLA)", "Vinyl (varispeed)", "Beat slice"];
+impl Mix {
+    /// Tempo curve as (mix beat, BPM) points, linear in between; empty = constant `bpm`.
+    pub fn tempo_curve(&self) -> Vec<(f64, f64)> {
+        match self.tempo_mode {
+            1 => { // Auto: each track at its own tempo, gliding through the transitions
+                let o = self.main_order(); let mut v: Vec<(f64, f64)> = vec![];
+                if let Some(&f) = o.first() { v.push((self.tracks[f].vis_start(self.bpm), self.tracks[f].bpm)); }
+                for (a, b, s, e) in self.transitions() { v.push((s, self.tracks[a].bpm)); v.push((e, self.tracks[b].bpm)); }
+                if let Some(&l) = o.last() { v.push((self.tracks[l].end(self.bpm), self.tracks[l].bpm)); }
+                v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap()); v.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-9); v
+            }
+            2 => { let mut v = self.tempo_pts.clone(); v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap()); v }
+            3 => { let (s, e) = (if self.ramp.0 > 0.0 { self.ramp.0 } else { self.bpm }, if self.ramp.1 > 0.0 { self.ramp.1 } else { self.bpm }); vec![(0.0, s), (self.length_beats().max(1.0), e)] }
+            _ => vec![],
+        }
+    }
+    pub fn bpm_at(&self, b: f64) -> f64 { bpm_on(&self.tempo_curve(), self.bpm, b) }
+    /// Seconds between two mix beats along the tempo curve.
+    pub fn secs(&self, a: f64, b: f64) -> f64 { secs_on(&self.tempo_curve(), self.bpm, a, b) }
+}
+pub fn bpm_on(c: &[(f64, f64)], bpm: f64, b: f64) -> f64 {
+    if c.is_empty() { return bpm; } let v: Vec<(f64, f32)> = vec![]; let _ = v;
+    let (f, l) = (c[0], c[c.len() - 1]); if b <= f.0 { return f.1.max(20.0); } if b >= l.0 { return l.1.max(20.0); }
+    let i = c.partition_point(|q| q.0 <= b); let (p, q) = (c[i - 1], c[i]); (p.1 + (q.1 - p.1) * (b - p.0) / (q.0 - p.0).max(1e-9)).max(20.0)
+}
+pub fn secs_on(c: &[(f64, f64)], bpm: f64, a: f64, b: f64) -> f64 {
+    if c.is_empty() { return (b - a) * 60.0 / bpm; }
+    let n = ((b - a).abs() * 16.0).ceil().max(1.0) as usize; let h = (b - a) / n as f64;
+    (0..n).map(|k| 60.0 / bpm_on(c, bpm, a + (k as f64 + 0.5) * h) * h).sum()
 }

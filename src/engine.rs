@@ -11,14 +11,15 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub mutes: Vec<(u8, f64, f64)>, pub auto: Vec<Vec<(f64, f32)>> }
+pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub mutes: Vec<(u8, f64, f64)>, pub auto: Vec<Vec<(f64, f32)>>, pub stretch: u8 }
 impl SnapTrack {
     /// clip gate and fades: 0 outside [vis, end), linear fades in beats
     #[inline] fn edge(&self, b: f64) -> f32 { if b < self.vis || b >= self.end { return 0.0; } let mut g = 1.0;
         if self.fade_in > 0.0 { g *= ((b - self.vis) / self.fade_in).min(1.0); } if self.fade_out > 0.0 { g *= ((self.end - b) / self.fade_out).min(1.0); } g as f32 }
 }
+#[allow(dead_code)]
 pub struct Snap { pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset, [StemMode; 4])>, pub decks: [Deck; 4], pub master: f32,
-    pub tcurves: Vec<(Vec<(f32, f32)>, Vec<(f32, f32)>)>, pub fx: Vec<crate::fx::FxBlock>, pub live: Option<crate::fx::FxBlock> }
+    pub tcurves: Vec<(Vec<(f32, f32)>, Vec<(f32, f32)>)>, pub fx: Vec<crate::fx::FxBlock>, pub live: Option<crate::fx::FxBlock>, pub tempo: Vec<(f64, f64)> }
 
 impl Snap {
     pub fn build(mix: &Mix, audio: &[Option<Arc<Audio>>]) -> Snap { Self::build_with(mix, audio, &[]) }
@@ -27,13 +28,13 @@ impl Snap {
         for (i, t) in mix.tracks.iter().enumerate() {
             if let Some(Some(a)) = audio.get(i) {
                 map[i] = tracks.len();
-                tracks.push(SnapTrack { stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.bpm, vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect(), auto: t.auto.clone() });
+                tracks.push(SnapTrack { stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.bpm, vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect(), auto: t.auto.clone(), stretch: match t.stretch { 0 => if mix.key_lock { 1 } else { 2 }, x => x } });
             }
         }
         let tcurves = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX).map(|x| (mix.tracks[x.1].trans.curve_out.clone(), mix.tracks[x.1].trans.curve_in.clone())).collect();
         let trans = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX)
             .map(|(a, b, s, e)| (map[a], map[b], s, e, mix.tracks[b].trans.preset, mix.tracks[b].trans.stems)).collect();
-        Snap { key_lock: mix.key_lock, metro: if mix.metronome { Some(mix.metro_vol) } else { None }, bpm: mix.bpm, tracks, trans, decks: mix.decks, master: mix.master, tcurves, fx: mix.fx.clone(), live: None }
+        Snap { key_lock: mix.key_lock, metro: if mix.metronome { Some(mix.metro_vol) } else { None }, bpm: mix.bpm, tracks, trans, decks: mix.decks, master: mix.master, tcurves, fx: mix.fx.clone(), live: None, tempo: mix.tempo_curve() }
     }
 }
 
@@ -215,7 +216,8 @@ impl Engine {
         for d in &mut self.dbuf { d.clear(); d.resize(n, [0.0; 2]); }
         let Some(snap) = self.snap.clone() else { return; };
         if !self.playing { self.meters(); return; }
-        let bpb = snap.bpm / 60.0 / self.sr as f64; // beats per output sample
+        let bpm_now = snap.bpm_at(self.beat);
+        let bpb = bpm_now / 60.0 / self.sr as f64; // beats per output sample (tempo curve, per block)
         let b0 = self.beat; let b1 = b0 + bpb * n as f64;
         let mut deck_mod = [Mods::default(); 4]; let mut deck_auto = [[0f32; 4]; 4];
         for (ti, t) in snap.tracks.iter().enumerate() {
@@ -227,9 +229,9 @@ impl Engine {
             if b0 > t.end { continue; }
             let a = &t.audio; let srt = a.sr as f64;
             let dst = &mut self.dbuf[t.lane];
-            let rate = snap.bpm / t.bpm;
+            let rate = bpm_now / t.bpm;
             let (av0, av1) = (t.auto_at(0, b0).unwrap_or(1.0), t.auto_at(0, b1).unwrap_or(1.0));
-            if snap.key_lock && ((rate - 1.0).abs() > 1e-4 || t.grid.dynamic()) && ti < self.ws.len() {
+            if t.stretch == 1 && ((rate - 1.0).abs() > 1e-4 || t.grid.dynamic()) && ti < self.ws.len() {
                 let w = &mut self.ws[ti];
                 let id = (Arc::as_ptr(a) as usize, t.start_beat.to_bits(), t.offset.to_bits(), t.bpm.to_bits());
                 if w.id != id || !w.active || (w.next_beat - b0).abs() > bpb * 2.0 {
@@ -249,10 +251,10 @@ impl Engine {
             }
             for i in 0..n {
                 let b = b0 + bpb * i as f64;
-                let sec = t.grid.sec(b);
+                let (sec, slg) = if t.stretch == 3 { t.slice(b, bpm_now) } else { (t.grid.sec(b), 1.0) };
                 let pos = sec * srt;
                 if pos < 1.0 || pos as usize + 2 >= a.l.len() { continue; }
-                let g = ((m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32)) * (av0 + (av1 - av0) * (i as f32 / n as f32))) * t.edge(b);
+                let g = ((m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32)) * (av0 + (av1 - av0) * (i as f32 / n as f32))) * t.edge(b) * slg;
                 if g <= 0.0 { continue; }
                 let k = pos as usize; let f = (pos - k as f64) as f32;
                 let sg = combine(m0.stem, t.mute_gain(sec)); let st = t.stems.as_deref();
@@ -263,10 +265,10 @@ impl Engine {
                 dst[i][0] += herm(0) * g; dst[i][1] += herm(1) * g;
             }
         }
-        for (k, f) in snap.fx.iter().enumerate() { if k >= self.fx.len() - 1 { break; } if f.target < 4 { let (st, buf) = (&mut self.fx[k], &mut self.dbuf[f.target]); st.process(f, buf, b0, bpb, snap.bpm, false); } }
+        for (k, f) in snap.fx.iter().enumerate() { if k >= self.fx.len() - 1 { break; } if f.target < 4 { let (st, buf) = (&mut self.fx[k], &mut self.dbuf[f.target]); st.process(f, buf, b0, bpb, bpm_now, false); } }
         let any_solo = snap.decks.iter().any(|d| d.solo);
         let sr = self.sr;
-        let dly = ((0.75 * 60.0 / snap.bpm) as f32 * sr) as usize;
+        let dly = ((0.75 * 60.0 / bpm_now) as f32 * sr) as usize;
         for d in 0..4 {
             let p = snap.decks[d]; let m = deck_mod[d]; let st = &mut self.decks[d];
             let lowdb = if m.low < 0.01 { -40.0 } else { 20.0 * m.low.log10() };
@@ -301,8 +303,8 @@ impl Engine {
             let old = Shared::get(&self.shared.deck_meter[d]);
             self.shared.deck_meter[d].store(pk.max(old * 0.9).to_bits(), Ordering::Relaxed);
         }
-        for (k, f) in snap.fx.iter().enumerate() { if k >= self.fx.len() - 1 { break; } if f.target >= 4 { self.fx[k].process(f, &mut self.buf, b0, bpb, snap.bpm, false); } }
-        { let last = self.fx.len() - 1; match &snap.live { Some(f) => self.fx[last].process(f, &mut self.buf, b0, bpb, snap.bpm, true), None => if self.fx[last].active { self.fx[last].reset(); } } }
+        for (k, f) in snap.fx.iter().enumerate() { if k >= self.fx.len() - 1 { break; } if f.target >= 4 { self.fx[k].process(f, &mut self.buf, b0, bpb, bpm_now, false); } }
+        { let last = self.fx.len() - 1; match &snap.live { Some(f) => self.fx[last].process(f, &mut self.buf, b0, bpb, bpm_now, true), None => if self.fx[last].active { self.fx[last].reset(); } } }
         let mut pk = [0f32; 2];
         for f in &mut self.buf { for c in 0..2 { let x = f[c] * snap.master; let y = if x.abs() < 0.9 { x } else { x.signum() * (0.9 + 0.1 * ((x.abs() - 0.9) * 10.0).tanh()) }; f[c] = y; pk[c] = pk[c].max(y.abs()); } }
         if let (Some(vol), true) = (snap.metro, self.metro_enabled) {
@@ -324,7 +326,7 @@ pub fn render_offline(snap: Arc<Snap>, sr: u32, from: f64, to: f64) -> (Vec<f32>
     let mut e = Engine::new(sr as f32, Arc::new(Shared::new()));
     e.metro_enabled = false; // metronome is never exported
     e.handle(Cmd::Snap(snap.clone())); e.handle(Cmd::Seek(from)); e.handle(Cmd::Play(true));
-    let frames = ((to - from) * 60.0 / snap.bpm * sr as f64) as usize;
+    let frames = (snap.secs(from, to) * sr as f64).round() as usize;
     let mut buf = vec![0f32; 1024]; let (mut l, mut r) = (Vec::with_capacity(frames), Vec::with_capacity(frames));
     while l.len() < frames { e.render(&mut buf, 2); for f in buf.chunks(2) { l.push(f[0]); r.push(f[1]); } }
     l.truncate(frames); r.truncate(frames); (l, r)
@@ -376,4 +378,17 @@ impl SnapTrack {
 }
 impl SnapTrack {
     #[inline] pub fn auto_at(&self, k: usize, b: f64) -> Option<f32> { self.auto.get(k).and_then(|p| crate::model::interp(p, b - self.start_beat)) }
+}
+impl Snap {
+    #[inline] pub fn bpm_at(&self, b: f64) -> f64 { crate::model::bpm_on(&self.tempo, self.bpm, b) }
+    pub fn secs(&self, a: f64, b: f64) -> f64 { crate::model::secs_on(&self.tempo, self.bpm, a, b) }
+}
+impl SnapTrack {
+    /// Beat slice: each beat's audio plays at its original speed from the beat start; it is cut at
+    /// the next mix beat (faster tempo) or ends early leaving a short gap (slower tempo). 2 ms fades.
+    #[inline] fn slice(&self, b: f64, bpm: f64) -> (f64, f32) {
+        let k = (b - self.start_beat).floor(); let bs = self.start_beat + k; let s0 = self.grid.sec(bs); let s1 = self.grid.sec(bs + 1.0);
+        let el = (b - bs) * 60.0 / bpm; let sec = s0 + el; let left = (1.0 - (b - bs)) * 60.0 / bpm;
+        let g = (el / 0.002).min((s1 - sec) / 0.002).min(left / 0.002).clamp(0.0, 1.0) as f32; (sec, g)
+    }
 }

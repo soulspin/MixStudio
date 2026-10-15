@@ -54,7 +54,7 @@ pub struct App {
     sel: Option<usize>, sel_in: Option<usize>, undo: Vec<String>, redo: Vec<String>,
     tx: crossbeam_channel::Sender<Msg>, rx: crossbeam_channel::Receiver<Msg>, loading: usize,
     drag: Option<(usize, f64, f64)>, loop_on: bool, bars: u32, snapping: Snapping, lock: bool,
-    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, auto_track: Option<usize>, auto_param: usize, auto_solo: bool, auto_drag: Option<(usize, usize)>, auto_rect: Rect, vzoom: bool, tc_side: usize, tc_drag: Option<usize>, fx_sel: Option<usize>, fx_drag: Option<(usize, u8, f64, f64, f64)>, fx_kind: crate::fx::FxKind, fx_target: usize, fx_name: String, fx_presets: Vec<crate::fx::FxPreset>, live_fx: Option<crate::fx::FxBlock>, live_start: f64, live_last: Option<(f64, f64, crate::fx::FxBlock)>, stem_sel: Option<(usize, usize, f64, f64)>, stem_drag: bool, dl_offer: Option<usize>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
+    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, tempo_drag: Option<(usize, f64, f64)>, export_fmt: u8, ffmpeg: bool, auto_track: Option<usize>, auto_param: usize, auto_solo: bool, auto_drag: Option<(usize, usize)>, auto_rect: Rect, vzoom: bool, tc_side: usize, tc_drag: Option<usize>, fx_sel: Option<usize>, fx_drag: Option<(usize, u8, f64, f64, f64)>, fx_kind: crate::fx::FxKind, fx_target: usize, fx_name: String, fx_presets: Vec<crate::fx::FxPreset>, live_fx: Option<crate::fx::FxBlock>, live_start: f64, live_last: Option<(f64, f64, crate::fx::FxBlock)>, stem_sel: Option<(usize, usize, f64, f64)>, stem_drag: bool, dl_offer: Option<usize>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
     stems: HashMap<String, Arc<crate::stems::Stems>>, stem_prog: HashMap<String, Arc<std::sync::atomic::AtomicU32>>, stem_err: HashMap<String, String>,
     stem_tx: crossbeam_channel::Sender<StemJob>, dl_prog: Arc<std::sync::atomic::AtomicU32>, ep: Arc<Mutex<String>>,
     ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
@@ -135,7 +135,7 @@ impl App {
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let mut a = App { mix: Mix::default(), store: HashMap::new(), out: crate::audio::start(), ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
-            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
+            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib: { let c = cc.egui_ctx.clone(); crate::library::Library::new(crate::library::config_dir(), crate::library::cache_dir(), Arc::new(move || c.request_repaint())) },
             lib_q: String::new(), lib_path: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
             lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_view_key: None, timeline_rect: Rect::NOTHING };
@@ -164,12 +164,12 @@ impl App {
     fn beat(&self) -> f64 { self.out.shared.beat() }
     fn playing(&self) -> bool { self.out.shared.playing.load(std::sync::atomic::Ordering::Relaxed) }
     fn seek(&self, b: f64) { self.out.shared.beat.store(b.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed); let _ = self.out.tx.send(Cmd::Seek(b.max(0.0))); }
-    fn sec(&self, b: f64) -> f64 { b * 60.0 / self.mix.bpm }
+    fn sec(&self, b: f64) -> f64 { self.mix.secs(0.0, b) }
 
     fn insert(&mut self, p: PathBuf, au: Audio, an: Analysis, sample: Option<(usize, f64)>) {
         let key = p.display().to_string();
         let t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![] };
+            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 };
         self.store.insert(key, (Arc::new(au), Arc::new(an)));
         match sample { Some((lane, at)) => { let mut t = t; t.lane = lane; t.start_beat = (at / 4.0).round() * 4.0; self.mix.tracks.push(t); }
             None => self.mix.add_track(t) }
@@ -211,12 +211,12 @@ impl App {
         }
     }
     fn dialog(&self, save: bool, kind: u8) {
-        let tx = self.tx.clone(); let name = self.mix.name.clone();
+        let tx = self.tx.clone(); let name = self.mix.name.clone(); let fmt = self.export_fmt;
         std::thread::spawn(move || {
             use crate::dialogs::Req;
-            let filter = if kind == 2 { ("WAV".to_string(), vec!["wav".to_string()]) } else { ("MixStudio mix".to_string(), vec!["json".to_string()]) };
-            let title = match kind { 0 => "Open mix", 1 => "Save mix", _ => "Export WAV" }.to_string();
-            let req = if save { Req::Save { title, filter, name: if kind == 2 { format!("{name}.wav") } else { format!("{name}.mixstudio.json") } } } else { Req::Open { title, filter } };
+            let filter = if kind == 2 { (crate::export::FORMATS[fmt as usize].0.to_string(), vec![crate::export::FORMATS[fmt as usize].1.to_string()]) } else { ("MixStudio mix".to_string(), vec!["json".to_string()]) };
+            let title = match kind { 0 => "Open mix", 1 => "Save mix", _ => "Export mix" }.to_string();
+            let req = if save { Req::Save { title, filter, name: if kind == 2 { format!("{name}.{}", crate::export::FORMATS[fmt as usize].1) } else { format!("{name}.mixstudio.json") } } } else { Req::Open { title, filter } };
             let r = match crate::dialogs::run(req) { Ok(v) => v.and_then(|v| v.into_iter().next()), Err(e) => { let _ = tx.send(Msg::Status(e)); None } };
             if let Some(p) = r { let _ = tx.send(match kind { 0 => Msg::Opened(p), 1 => Msg::SaveTo(p), _ => Msg::ExportTo(p) }); }
         });
@@ -229,8 +229,10 @@ impl App {
     fn export(&mut self, p: PathBuf) {
         let snap = Arc::new(self.build_snap()); let len = self.mix.length_beats() + 16.0; let tx = self.tx.clone();
         self.status = "Exporting mix…".into();
+        let fmt = self.export_fmt; let ext = crate::export::FORMATS[fmt as usize].1;
+        let p = if p.extension().map_or(true, |e| !e.eq_ignore_ascii_case(ext)) { p.with_extension(ext) } else { p };
         std::thread::spawn(move || { let (l, r) = engine::render_offline(snap, 44100, 0.0, len);
-            let _ = tx.send(Msg::Status(match engine::write_wav(&p, &l, &r, 44100) { Ok(_) => format!("Exported: {}", p.display()), Err(e) => format!("Export error: {e}") })); });
+            let _ = tx.send(Msg::Status(match crate::export::write(&p, &l, &r, 44100, fmt) { Ok(_) => format!("Exported ({}): {}", crate::export::FORMATS[fmt as usize].0, p.display()), Err(e) => format!("Export error: {e}") })); });
     }
     fn ao_item(&self, i: usize) -> crate::automix::Item {
         let t = &self.mix.tracks[i];
@@ -531,7 +533,7 @@ impl App {
                         ui.label(egui::RichText::new(if ep.is_empty() { "Inference: not started yet (CUDA if available, else CPU)".to_string() } else { format!("Inference: {ep}") }).color(DIM).size(11.0));
                     });
                     ui.add(egui::Button::new("?").min_size(vec2(28.0, 28.0))).on_hover_text("Space = play/pause · Ctrl+scroll = zoom · scroll = pan · Ctrl+Z = undo · Delete = remove track · drop audio files on the window");
-                    if ui.add(egui::Button::new("Export").min_size(vec2(60.0, 28.0))).on_hover_text("Export the whole mix to WAV").clicked() { self.dialog(true, 2); }
+                    if ui.add(egui::Button::new("Export").min_size(vec2(60.0, 28.0))).on_hover_text("Export the whole mix (format in the Master tab)").clicked() { self.dialog(true, 2); }
                     if self.loading > 0 { ui.spinner(); ui.label(format!("Analysing {}…", self.loading)); }
                     else if !self.status.is_empty() { ui.label(egui::RichText::new(&self.status).color(DIM).size(12.0)); }
                 });
@@ -572,7 +574,7 @@ impl App {
                     if ui.button(format!("Set all overlaps to {} bars", self.bars)).clicked() { self.snapshot(); let o = self.mix.main_order(); self.mix.relayout(&o, self.bars as f64); ui.close_menu(); }
                     if ui.button("Open mix…").clicked() { self.dialog(false, 0); ui.close_menu(); }
                     if ui.button("Save mix as…").clicked() { self.dialog(true, 1); ui.close_menu(); }
-                    if ui.button("Export WAV…").clicked() { self.dialog(true, 2); ui.close_menu(); }
+                    if ui.button("Export mix…").clicked() { self.dialog(true, 2); ui.close_menu(); }
                 });
                 egui::ComboBox::from_id_salt("bars").width(46.0).selected_text(format!("{}", self.bars))
                     .show_ui(ui, |ui| { for b in [4, 8, 16, 32] { ui.selectable_value(&mut self.bars, b, format!("{b} bars")); } }).response.on_hover_text("Bar length for loop and overlap");
@@ -581,7 +583,7 @@ impl App {
                 let b = self.beat(); let bpm = self.mix.bpm;
                 if flat(ui, "⏮", "Previous track").clicked() { let st: Vec<f64> = self.mix.main_order().iter().map(|&i| self.mix.tracks[i].vis_start(bpm)).filter(|&s| s < b - 2.0).collect(); self.seek(st.last().copied().unwrap_or(0.0)); }
                 if flat(ui, "⏪", "To start").clicked() { self.seek(0.0); }
-                if circ(ui, "⏺", C::from_rgb(50, 52, 58), C::from_rgb(230, 40, 40), "Record: export the mix to WAV").clicked() { self.dialog(true, 2); }
+                if circ(ui, "⏺", C::from_rgb(50, 52, 58), C::from_rgb(230, 40, 40), "Record: export the mix").clicked() { self.dialog(true, 2); }
                 let pl = self.playing();
                 if ui.add(egui::Button::new(egui::RichText::new(if pl { "⏸" } else { "▶" }).color(C::BLACK).size(18.0)).fill(ACCENT).rounding(18.0).min_size(vec2(38.0, 36.0))).on_hover_text("Play/pause (space)").clicked() { let _ = self.out.tx.send(Cmd::Play(!pl)); }
                 let lb = egui::Button::new(egui::RichText::new("🔁").size(16.0).color(if self.loop_on { ACCENT } else { TXT })).frame(false).min_size(vec2(30.0, 30.0));
@@ -1070,8 +1072,51 @@ impl App {
             resp.on_hover_text(format!("Transition {}: {} ({} bars). Click for settings, drag to move the incoming track.", k + 1, tt.preset.name(), ((e - s) / 4.0).round()));
         }
         let trow = rows[4].1;
-        tp.line_segment([pos2(tl_x0, trow.center().y + 3.0), pos2(area.right(), trow.center().y + 3.0)], Stroke::new(1.5_f32, C::from_rgb(220, 140, 30)));
-        tp.text(pos2(tl_x0 + 4.0, trow.center().y - 4.0), Align2::LEFT_CENTER, format!("{:.1} BPM", bpm), FontId::proportional(9.0), C::from_rgb(220, 140, 30));
+        { // tempo lane: curve, mode chips, manual points
+            let curve = self.mix.tempo_curve();
+            let (lo, hi) = curve.iter().map(|p| p.1).chain([self.mix.bpm]).fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(v), b.max(v)));
+            let (lo, hi) = (lo - 2.0, hi + 2.0);
+            let y_of = |v: f64| trow.bottom() - 4.0 - ((v - lo) / (hi - lo)) as f32 * (trow.height() - 8.0);
+            let v_of = |y: f32| lo + ((trow.bottom() - 4.0 - y) / (trow.height() - 8.0)) as f64 * (hi - lo);
+            let oc = C::from_rgb(220, 140, 30);
+            let pts: Vec<egui::Pos2> = { let mut x = tl_x0; let mut v = vec![]; while x <= area.right() { v.push(pos2(x, y_of(crate::model::bpm_on(&curve, self.mix.bpm, xb(x))))); x += 3.0; } v };
+            tp.add(egui::Shape::line(pts, Stroke::new(1.5_f32, oc)));
+            let now = self.mix.bpm_at(xb(tl_x0 + 4.0));
+            let mut x = tl_x0 + 4.0;
+            tp.text(pos2(x, trow.top() + 7.0), Align2::LEFT_CENTER, format!("{now:.1} BPM"), FontId::proportional(9.0), oc); x += 58.0;
+            for (k, n) in crate::model::TEMPO_MODES.iter().enumerate() {
+                let w = 8.0 + 5.2 * n.len() as f32; let r = Rect::from_min_size(pos2(x, trow.top() + 1.0), vec2(w, 12.0)); x += w + 3.0;
+                let on = self.mix.tempo_mode as usize == k;
+                tp.rect_filled(r, 3.0, if on { oc } else { C::from_rgba_unmultiplied(0, 0, 0, 120) });
+                tp.text(r.center(), Align2::CENTER_CENTER, *n, FontId::proportional(8.5), if on { C::BLACK } else { TXT });
+                let rr = ui.interact(r, ui.id().with(("tm", k)), Sense::click());
+                if rr.clicked() && !on { self.snapshot(); self.mix.tempo_mode = k as u8;
+                    if k == 2 && self.mix.tempo_pts.is_empty() { self.mix.tempo_pts = vec![(0.0, self.mix.bpm), (self.mix.length_beats().max(4.0), self.mix.bpm)]; }
+                    if k == 3 && self.mix.ramp.0 <= 0.0 { self.mix.ramp = (self.mix.bpm, self.mix.bpm + 4.0); } }
+                rr.on_hover_text(match k { 0 => "The whole mix plays at the mix tempo (Master tab)", 1 => "Each track plays at its own tempo; the tempo glides through every transition", 2 => "Draw the tempo: click to add a node, drag to move, right-click to delete", _ => "Ramp linearly from a start to an end BPM across the mix (set them in the Master tab)" });
+            }
+            if self.mix.tempo_mode == 2 {
+                let pts = self.mix.tempo_pts.clone();
+                for p in &pts { let c = pos2(bx(p.0), y_of(p.1)); if c.x > tl_x0 && c.x < area.right() { tp.circle_filled(c, 4.0, oc); tp.circle_stroke(c, 4.0, Stroke::new(1.0_f32, C::BLACK)); } }
+                let ar = Rect::from_min_max(pos2(tl_x0, trow.top() + 14.0), pos2(area.right(), trow.bottom()));
+                let r = ui.interact(ar, ui.id().with("tempo_area"), Sense::click_and_drag());
+                let near = |pp: egui::Pos2| pts.iter().enumerate().map(|(i, p)| (i, pos2(bx(p.0), y_of(p.1)).distance(pp))).filter(|x| x.1 < 7.0).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).map(|x| x.0);
+                if let Some(pp) = r.interact_pointer_pos() {
+                    let (b, v) = (xb(pp.x).max(0.0), (v_of(pp.y) * 10.0).round() / 10.0);
+                    if r.drag_started() { self.snapshot(); let i = match near(pp) { Some(i) => i, None => { let i = self.mix.tempo_pts.partition_point(|q| q.0 < b); self.mix.tempo_pts.insert(i, (b, v)); i } }; self.tempo_drag = Some((i, lo, hi)); }
+                    else if r.clicked() && near(pp).is_none() { self.snapshot(); let i = self.mix.tempo_pts.partition_point(|q| q.0 < b); self.mix.tempo_pts.insert(i, (b, v)); }
+                    else if r.secondary_clicked() { if let Some(i) = near(pp) { self.snapshot(); self.mix.tempo_pts.remove(i); } }
+                }
+                r.on_hover_text("Click to add a tempo node, drag to move it, right-click to delete it");
+            }
+            if let Some((i, lo, hi)) = self.tempo_drag {
+                if ui.input(|i| i.pointer.primary_down()) { if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) {
+                    let v = lo + ((trow.bottom() - 4.0 - pp.y) / (trow.height() - 8.0)) as f64 * (hi - lo); let v = ((v * 10.0).round() / 10.0).clamp(40.0, 250.0);
+                    let mut b = xb(pp.x).max(0.0); if self.snapping != Snapping::Off { b = b.round(); }
+                    let p = &mut self.mix.tempo_pts; if i < p.len() { let lo_b = if i > 0 { p[i - 1].0 + 0.25 } else { 0.0 }; let hi_b = if i + 1 < p.len() { p[i + 1].0 - 0.25 } else { f64::MAX }; p[i] = (b.clamp(lo_b, hi_b.max(lo_b)), v); self.status = format!("Tempo node: {v:.1} BPM at bar {:.0}", b / 4.0 + 1.0); }
+                } } else { self.tempo_drag = None; }
+            }
+        }
         if bg.clicked() { if let Some(pp) = bg.interact_pointer_pos() { self.seek(xb(pp.x)); self.sel = None; } }
         if let Some(i) = clicked_trans { self.sel_in = Some(i); self.tab = Tab::Transition; }
         else if let Some((ti, b, drag)) = clicked_clip {
@@ -1298,7 +1343,17 @@ impl App {
                 ui.add(egui::Slider::new(&mut self.mix.master, 0.0..=1.5).text("Master volume"));
                 ui.checkbox(&mut self.mix.key_lock, "Key lock (keep pitch when tempo changes)").on_hover_text("On: WSOLA time-stretch keeps the pitch. Off: varispeed, pitch follows tempo like a turntable.");
                 ui.horizontal(|ui| { ui.checkbox(&mut self.mix.metronome, "Metronome"); ui.add(egui::Slider::new(&mut self.mix.metro_vol, 0.0..=1.0).text("click volume")); });
-                ui.label(dim("All tracks play at the mix tempo. The metronome is never included in exports.")); }
+                ui.separator();
+                ui.horizontal(|ui| { ui.label("Tempo lane:"); for (k, n) in crate::model::TEMPO_MODES.iter().enumerate() { if ui.radio(self.mix.tempo_mode as usize == k, *n).clicked() { self.snapshot(); self.mix.tempo_mode = k as u8;
+                    if k == 2 && self.mix.tempo_pts.is_empty() { self.mix.tempo_pts = vec![(0.0, self.mix.bpm), (self.mix.length_beats().max(4.0), self.mix.bpm)]; }
+                    if k == 3 && self.mix.ramp.0 <= 0.0 { self.mix.ramp = (self.mix.bpm, self.mix.bpm + 4.0); } } } });
+                if self.mix.tempo_mode == 3 { ui.horizontal(|ui| { ui.label("Ramp from"); ui.add(egui::DragValue::new(&mut self.mix.ramp.0).range(40.0..=250.0).speed(0.1).suffix(" BPM")); ui.label("to"); ui.add(egui::DragValue::new(&mut self.mix.ramp.1).range(40.0..=250.0).speed(0.1).suffix(" BPM")); ui.label(dim("across the whole mix")); }); }
+                if self.mix.tempo_mode == 2 { ui.label(dim("Manual: edit the tempo nodes in the tempo lane (click to add, drag, right-click to delete).")); }
+                if self.mix.tempo_mode == 1 { ui.label(dim("Auto: every track plays at its own tempo and the tempo glides through each transition.")); }
+                ui.separator();
+                ui.horizontal(|ui| { ui.label("Export format:"); egui::ComboBox::from_id_salt("efmt").selected_text(crate::export::FORMATS[self.export_fmt as usize].0).show_ui(ui, |ui| { for (k, f) in crate::export::FORMATS.iter().enumerate() { ui.selectable_value(&mut self.export_fmt, k as u8, f.0); } }); });
+                if self.export_fmt == 3 && !self.ffmpeg { ui.label(egui::RichText::new("MP3 needs ffmpeg (sudo pacman -S ffmpeg).").color(C::from_rgb(230, 120, 90))); }
+                ui.label(dim("The metronome is never included in exports. Stretch mode per track is in the Track tab.")); }
             Tab::Samples => { ui.heading("Samples"); ui.horizontal(|ui| {
                 if ui.button("Add sample to Sample 1 at playhead…").clicked() { self.pick_files(Some(2)); }
                 if ui.button("Add sample to Sample 2 at playhead…").clicked() { self.pick_files(Some(3)); } });
@@ -1410,6 +1465,8 @@ impl App {
         ui.horizontal_top(|ui| {
         ui.vertical(|ui| { ui.set_width(520.0);
             let t = &mut self.mix.tracks[i];
+            ui.horizontal(|ui| { ui.label("Stretch:"); egui::ComboBox::from_id_salt("stretch").selected_text(crate::model::STRETCH_MODES[t.stretch.min(3) as usize]).show_ui(ui, |ui| { for (k, n) in crate::model::STRETCH_MODES.iter().enumerate() { ui.selectable_value(&mut t.stretch, k as u8, *n); } })
+                .response.on_hover_text("Key lock keeps the pitch (WSOLA), Vinyl changes pitch with tempo, Beat slice plays each beat at its original speed from the beat start"); });
             ui.heading(format!("{} — {}", t.title, t.artist));
             egui::Grid::new("tt").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
                 ui.label("Track BPM"); ui.add(egui::DragValue::new(&mut t.bpm).range(60.0..=200.0).speed(0.01).fixed_decimals(2)); ui.end_row();

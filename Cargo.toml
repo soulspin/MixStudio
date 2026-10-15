@@ -1,6 +1,6 @@
 [package]
 name = "mixstudio"
-version = "0.9.0-alpha"
+version = "0.10.0-beta"
 authors = ["soulspin"]
 license = "MIT"
 description = "A DAW-style DJ mixing app where every song is its own clip on a timeline"
@@ -9,6 +9,7 @@ edition = "2021"
 rust-version = "1.92"
 
 [dependencies]
+flacenc = "0.4"
 anyhow = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"

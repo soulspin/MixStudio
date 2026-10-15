@@ -2,6 +2,7 @@
 mod analysis;
 mod automix;
 mod library;
+mod export;
 mod fx;
 mod dialogs;
 mod beatmap;
@@ -38,7 +39,7 @@ fn selftest(dir: &Path) -> bool {
         ok &= pass;
         println!("{} {}: bpm {:.2} (exp {eb}) key {} (exp {ek}) offset {:.3}s (err {:.3}s, exp {eo}) dur {:.1}s peaks {} [{} ms]",
             if pass { "OK  " } else { "FAIL" }, an.title, an.bpm, an.key, an.offset, od, an.duration, an.peaks.len(), t0.elapsed().as_millis());
-        mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "Test".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![] });
+        mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "Test".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 });
         auds.push(Some(Arc::new(a)));
     }
     let presets = [model::Preset::Crossfade, model::Preset::BassSwap, model::Preset::EchoOut, model::Preset::HighToLow];
@@ -74,6 +75,7 @@ fn selftest(dir: &Path) -> bool {
     ok &= timeline_tests();
     ok &= stem_edit_tests();
     ok &= fx_tests();
+    ok &= tempo_export_tests(dir);
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -81,7 +83,7 @@ fn selftest(dir: &Path) -> bool {
 fn one_track_mix(a: analysis::Audio, bpm: f64, mix_bpm: f64, key_lock: bool) -> (Arc<engine::Snap>, f64) {
     let dur = a.secs();
     let mut mix = model::Mix::default();
-    mix.tracks.push(model::Track { path: "t".into(), title: "t".into(), artist: "t".into(), bpm, offset: 0.0, key: "8A".into(), duration: dur, start_beat: 0.0, lane: 0, trans: Default::default(), map: Option::None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![] });
+    mix.tracks.push(model::Track { path: "t".into(), title: "t".into(), artist: "t".into(), bpm, offset: 0.0, key: "8A".into(), duration: dur, start_beat: 0.0, lane: 0, trans: Default::default(), map: Option::None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 });
     mix.bpm = mix_bpm; mix.key_lock = key_lock; mix.metronome = true; // metronome must stay out of offline renders
     let len = mix.length_beats();
     (Arc::new(engine::Snap::build(&mix, &[Some(Arc::new(a))])), len)
@@ -144,7 +146,7 @@ fn stem_tests() -> bool {
     let mut res = vec![];
     for (dm, vm) in [(Full, None), (None, Full)] {
         let mut mix = model::Mix::default(); mix.bpm = 120.0;
-        for (k, lane) in [(0usize, 0usize), (1, 1)] { mix.tracks.push(model::Track { path: format!("{k}"), title: "t".into(), artist: "t".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 40.0, start_beat: if k == 0 { 0.0 } else { 40.0 }, lane, trans: Default::default(), map: Option::None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![] }); }
+        for (k, lane) in [(0usize, 0usize), (1, 1)] { mix.tracks.push(model::Track { path: format!("{k}"), title: "t".into(), artist: "t".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 40.0, start_beat: if k == 0 { 0.0 } else { 40.0 }, lane, trans: Default::default(), map: Option::None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 }); }
         mix.tracks[1].trans.stems = [dm, Crossfade, Crossfade, vm];
         let auds = vec![Some(Arc::new(analysis::Audio { sr, l: ta.clone(), r: ta.clone() })), Some(Arc::new(analysis::Audio { sr, l: tb.clone(), r: tb.clone() }))];
         let st = vec![Some(mk(&ta, 0)), Some(mk(&tb, 3))];
@@ -235,7 +237,7 @@ fn alignment_test(dir: &Path) -> bool {
             let p = dir.join(format!("align_{}.wav", bpm as i32));
             let (l, r) = testgen::synth(bpm, 45 + i as i32 * 3, true, 90.0, lead, sr); engine::write_wav(&p, &l, &r, sr).unwrap();
             let (a, an) = analysis::load(&p).unwrap();
-            mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![] });
+            mix.add_track(model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 });
             auds.push(Some(Arc::new(a)));
         }
         mix.bpm = 126.0; mix.key_lock = key_lock;
@@ -257,7 +259,7 @@ fn alignment_test(dir: &Path) -> bool {
 }
 
 fn track_of(p: &Path, an: &analysis::Analysis) -> model::Track {
-    model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![] }
+    model::Track { path: p.display().to_string(), title: an.title.clone(), artist: "t".into(), bpm: an.bpm, offset: an.offset, key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 }
 }
 
 
@@ -504,7 +506,7 @@ fn beatgrid_tests() -> bool {
     let mut chk = |name: &str, pass: bool, info: String| { ok &= pass; println!("{} beatgrid editor {name}: {info}", if pass { "OK  " } else { "FAIL" }); };
     let mono = |m: &BeatMap| m.beats.windows(2).all(|w| w[1] > w[0]);
     let mut t = model::Track { path: "x".into(), title: "x".into(), artist: String::new(), bpm: 120.0, offset: 0.25, key: "8A".into(), duration: 60.0,
-        start_beat: 16.0, lane: 0, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![] };
+        start_beat: 16.0, lane: 0, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 };
     t.normalize_grid();
     let before: Vec<f64> = (0..40).map(|k| t.sec_at(t.start_beat + k as f64)).collect();
     t.ensure_map();
@@ -552,7 +554,7 @@ fn timeline_tests() -> bool {
     let sine: Vec<f32> = (0..sr as usize * 20).map(|i| 0.5 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sr as f32).sin()).collect();
     let au = Arc::new(analysis::Audio { sr, l: sine.clone(), r: sine });
     let base = || { let mut m = model::Mix::default(); m.bpm = 120.0; m.key_lock = false;
-        m.tracks.push(model::Track { path: "t".into(), title: "t".into(), artist: "t".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 20.0, start_beat: 0.0, lane: 0, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![] }); m };
+        m.tracks.push(model::Track { path: "t".into(), title: "t".into(), artist: "t".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 20.0, start_beat: 0.0, lane: 0, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 }); m };
     let render = |m: &model::Mix, a: f64, b: f64| { let auds: Vec<_> = m.tracks.iter().map(|_| Some(au.clone())).collect(); engine::render_offline(Arc::new(engine::Snap::build(m, &auds)), sr, a, b).0 };
     let whole = render(&base(), 0.0, 32.0);
     let mut m = base(); let n = m.split(0, 13.5);
@@ -600,7 +602,7 @@ fn stem_edit_tests() -> bool {
     let tone = |x: &[f32], f: f32, srate: f32| { let (mut re, mut im) = (0.0f64, 0.0f64); for (i, v) in x.iter().enumerate() { let p = 2.0 * std::f64::consts::PI * f as f64 * i as f64 / srate as f64; re += *v as f64 * p.cos(); im += *v as f64 * p.sin(); } (2.0 * (re * re + im * im).sqrt() / x.len() as f64) as f32 };
     let mk = |mutes: &[(Vec<u8>, f64, f64, bool)], bpm: f64, kl: bool| {
         let mut m = model::Mix::default(); m.bpm = bpm; m.key_lock = kl; m.decks[0].vol = 1.0;
-        let mut t = model::Track { path: "s".into(), title: "s".into(), artist: "s".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 20.0, start_beat: 0.0, lane: 0, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 2, stem_mutes: vec![], auto: vec![] };
+        let mut t = model::Track { path: "s".into(), title: "s".into(), artist: "s".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 20.0, start_beat: 0.0, lane: 0, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 2, stem_mutes: vec![], auto: vec![], stretch: 0 };
         for (k, a, b, on) in mutes { t.set_mute(k, *a, *b, *on); }
         m.tracks.push(t); m };
     let render = |m: &model::Mix, from: f64, to: f64| engine::render_offline(Arc::new(engine::Snap::build_with(m, &[Some(au.clone())], &[Some(st.clone())])), sr, from, to).0;
@@ -635,7 +637,7 @@ fn fx_tests() -> bool {
     use fx::*; let mut ok = true; let sr = 44100u32;
     let mut chk = |name: &str, pass: bool, info: String| { ok &= pass; println!("{} automation/fx {name}: {info}", if pass { "OK  " } else { "FAIL" }); };
     let mk = |f: f32| -> Arc<analysis::Audio> { let v: Vec<f32> = (0..sr as usize * 30).map(|i| 0.4 * (2.0 * std::f32::consts::PI * f * i as f32 / sr as f32).sin()).collect(); Arc::new(analysis::Audio { sr, l: v.clone(), r: v }) };
-    let track = || model::Track { path: "a".into(), title: "a".into(), artist: "a".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 30.0, start_beat: 0.0, lane: 0, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![] };
+    let track = || model::Track { path: "a".into(), title: "a".into(), artist: "a".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 30.0, start_beat: 0.0, lane: 0, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 };
     let mix1 = |t: model::Track| { let mut m = model::Mix::default(); m.bpm = 120.0; m.key_lock = false; m.decks[0].vol = 1.0; m.tracks.push(t); m };
     let render = |m: &model::Mix, au: &[Arc<analysis::Audio>], a: f64, b: f64| { let auds: Vec<_> = au.iter().map(|x| Some(x.clone())).collect(); engine::render_offline(Arc::new(engine::Snap::build(m, &auds)), sr, a, b).0 };
     let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt();
@@ -688,5 +690,58 @@ fn fx_tests() -> bool {
     let mut v = serde_json::to_value(&mix1(track())).unwrap(); v.as_object_mut().unwrap().remove("fx"); v["tracks"][0].as_object_mut().unwrap().remove("auto");
     let old: Result<model::Mix, _> = serde_json::from_value(v);
     chk("old projects load", old.as_ref().map_or(false, |m| m.fx.is_empty() && m.tracks[0].auto.is_empty()), old.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()));
+    ok
+}
+fn tempo_export_tests(dir: &Path) -> bool {
+    let mut ok = true; let sr = 44100u32;
+    let mut chk = |name: &str, pass: bool, info: String| { ok &= pass; println!("{} tempo/export {name}: {info}", if pass { "OK  " } else { "FAIL" }); };
+    let sine: Vec<f32> = (0..sr as usize * 45).map(|i| 0.4 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin()).collect();
+    let au = Arc::new(analysis::Audio { sr, l: sine.clone(), r: sine });
+    let track = |bpm: f64| model::Track { path: "a".into(), title: "a".into(), artist: "a".into(), bpm, offset: 0.0, key: "8A".into(), duration: 45.0, start_beat: 0.0, lane: 0, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 };
+    let mut m = model::Mix::default(); m.bpm = 120.0; m.tracks.push(track(120.0)); m.tempo_mode = 3; m.ramp = (120.0, 130.0);
+    let len = m.length_beats(); let c = m.tempo_curve();
+    let exact = 60.0 * len / 10.0 * (130.0f64 / 120.0).ln();
+    let snap = Arc::new(engine::Snap::build(&m, &[Some(au.clone())]));
+    let x = engine::render_offline(snap.clone(), sr, 0.0, len).0;
+    chk("fixed ramp: length follows the tempo curve", c.len() == 2 && ((x.len() as f64 / sr as f64) - exact).abs() < 0.01, format!("120 → 130 BPM over {len:.0} beats: {:.3} s (exact {exact:.3} s)", x.len() as f64 / sr as f64));
+    let at = |m: &model::Mix, b: f64| (m.secs(0.0, b) * sr as f64) as usize;
+    let fr = |x: &[f32], m: &model::Mix, b: f64| freq(&x[at(m, b - 1.0)..at(m, b + 1.0)], sr as f32);
+    let target = 440.0 * m.bpm_at(len - 4.0) as f32 / 120.0;
+    for (st, name, exp) in [(1u8, "key lock", 440.0f32), (2, "vinyl", target), (3, "beat slice", 440.0)] {
+        let mut mm = m.clone(); mm.tracks[0].stretch = st;
+        let x = engine::render_offline(Arc::new(engine::Snap::build(&mm, &[Some(au.clone())])), sr, 0.0, len).0;
+        let f = fr(&x, &mm, len - 4.0);
+        chk(&format!("stretch mode {name} on the ramp"), (f - exp).abs() < 4.0, format!("{f:.1} Hz near the end at {:.1} BPM (exp {exp:.1})", mm.bpm_at(len - 4.0)));
+    }
+    let mut mm = model::Mix::default(); mm.bpm = 100.0; mm.tracks.push(track(120.0)); mm.tracks[0].stretch = 3;
+    let x = engine::render_offline(Arc::new(engine::Snap::build(&mm, &[Some(au.clone())])), sr, 0.0, 16.0).0;
+    let beat = (0.6 * sr as f64) as usize; let rms = |s: &[f32]| (s.iter().map(|v| v * v).sum::<f32>() / s.len().max(1) as f32).sqrt();
+    let (head, tail) = ((4..12).map(|k| rms(&x[k * beat..k * beat + beat * 7 / 10])).sum::<f32>() / 8.0, (4..12).map(|k| rms(&x[k * beat + beat * 87 / 100..(k + 1) * beat - 10])).sum::<f32>() / 8.0);
+    chk("beat slice at a slower tempo", head > 0.2 && tail < 0.01 && (freq(&x[4 * beat..4 * beat + beat / 2], sr as f32) - 440.0).abs() < 4.0, format!("120-BPM track at 100 BPM: slices at the original pitch (rms {head:.3}), gap at the end of each beat (rms {tail:.4})"));
+    let mut mm = model::Mix::default(); mm.bpm = 120.0; mm.tempo_mode = 2; mm.tempo_pts = vec![(0.0, 120.0), (32.0, 120.0), (40.0, 140.0)];
+    chk("manual tempo nodes", (mm.bpm_at(16.0) - 120.0).abs() < 1e-9 && (mm.bpm_at(36.0) - 130.0).abs() < 1e-9 && (mm.bpm_at(60.0) - 140.0).abs() < 1e-9, "120 → 130 (between nodes) → 140 BPM".into());
+    let mut ma = model::Mix::default(); ma.bpm = 120.0; ma.tempo_mode = 1; let a = track(120.0); let mut b = track(126.0); b.start_beat = 64.0; b.lane = 1; b.path = "b".into(); ma.tracks.push(a); ma.tracks.push(b);
+    let tr = ma.transitions(); let (s, e) = tr.first().map(|t| (t.2, t.3)).unwrap_or((0.0, 0.0));
+    chk("auto tempo glides through the transition", !tr.is_empty() && (ma.bpm_at(s - 8.0) - 120.0).abs() < 1e-9 && (ma.bpm_at((s + e) / 2.0) - 123.0).abs() < 1e-6 && (ma.bpm_at(e + 8.0) - 126.0).abs() < 1e-9,
+        format!("120 BPM, {:.1} BPM in the middle of the transition, 126 BPM after", ma.bpm_at((s + e) / 2.0)));
+    let tone: Vec<f32> = (0..sr as usize).map(|i| 0.5 * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr as f32).sin()).collect();
+    for (fmt, ext) in [(0u8, "wav"), (1, "wav"), (2, "flac"), (3, "mp3")] {
+        let p = dir.join(format!("export-{fmt}.{ext}"));
+        if fmt == 3 && !export::has_ffmpeg() { println!("SKIP tempo/export MP3: ffmpeg not installed"); continue; }
+        let t0 = std::time::Instant::now(); let r = export::write(&p, &tone, &tone, sr, fmt);
+        let back = r.clone().and_then(|_| analysis::decode(&p).map_err(|e| e.to_string()));
+        let (pass, info) = match back {
+            Ok((a, _, _)) => { let n = a.l.len().min(tone.len()); let lag = if fmt == 3 { (0..3000).min_by_key(|&d| (a.l.iter().skip(d).zip(&tone).take(4000).map(|(x, y)| (x - y).abs()).sum::<f32>() * 1000.0) as i64).unwrap_or(0) } else { 0 };
+                let err = a.l.iter().skip(lag).zip(&tone).take(n.saturating_sub(lag + 2000)).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+                let lim = match fmt { 0 => 1e-4, 1 | 2 => 1e-6, _ => 0.05 };
+                let bits = if fmt == 0 { 16 } else if fmt == 3 { 0 } else { 24 };
+                (err < lim && a.sr == sr, format!("{} written in {} ms, decoded back: max error {err:.1e}{}", export::FORMATS[fmt as usize].0, t0.elapsed().as_millis(), if bits > 0 { format!(" ({bits}-bit)") } else { String::new() })) }
+            Err(e) => (false, e),
+        };
+        chk(&format!("export {}", export::FORMATS[fmt as usize].0), pass, info);
+    }
+    let mut v = serde_json::to_value(&m).unwrap(); for k in ["tempo_mode", "tempo_pts", "ramp"] { v.as_object_mut().unwrap().remove(k); } v["tracks"][0].as_object_mut().unwrap().remove("stretch");
+    let old: Result<model::Mix, _> = serde_json::from_value(v);
+    chk("old projects keep a constant tempo", old.as_ref().map_or(false, |m| m.tempo_mode == 0 && m.tempo_curve().is_empty() && m.tracks[0].stretch == 0), "ok".into());
     ok
 }
