@@ -2,6 +2,7 @@
 mod analysis;
 mod automix;
 mod library;
+mod dialogs;
 mod beatmap;
 mod app;
 mod audio;
@@ -184,6 +185,8 @@ fn stem_tests() -> bool {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--dialog-check") { for (n, r) in dialogs::backends() { println!("{n:8} {}", match r { Ok(()) => "available".to_string(), Err(e) => format!("unavailable: {e}") }); } return; }
+    if std::env::args().nth(1).as_deref() == Some("--dialog-test") { println!("{:?}", dialogs::run(dialogs::Req::Folders { title: "MixStudio dialog test".into() })); return; }
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "--analyse" { for p in &args[2..] { let pa = Path::new(p); match analysis::decode(pa) { Ok((a, t, ar)) => { let an = analysis::analyse(&a, t, ar, pa); println!("{p}: bpm {:.3} downbeat {:.3}s key {}", an.bpm, an.offset, an.key); } Err(e) => println!("{p}: {e}") } } return; }
     if args.len() >= 4 && args[1] == "--align" { align_cli(Path::new(&args[2]), Path::new(&args[3])); return; }

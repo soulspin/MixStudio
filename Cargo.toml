@@ -1,6 +1,6 @@
 [package]
 name = "mixstudio"
-version = "0.5.0-alpha"
+version = "0.5.1-alpha"
 authors = ["soulspin"]
 license = "MIT"
 description = "A DAW-style DJ mixing app where every song is its own clip on a timeline"
@@ -21,7 +21,7 @@ cpal = "0.15"
 ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "load-dynamic", "cuda", "api-22"] }
 ureq = "2"
 sha2 = "0.10"
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 
 [profile.release]
 opt-level = 3

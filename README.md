@@ -2,7 +2,7 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Alpha 0.5](https://img.shields.io/badge/status-alpha%200.5-e8e000?style=flat-square&labelColor=24262b)
+![Status: Alpha 0.5](https://img.shields.io/badge/status-alpha%200.5.1-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
@@ -130,6 +130,7 @@ Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates
 - Beat maps follow gradual drift, not sudden tempo jumps or rubato.
 - Analysis is tuned for 4/4 dance music. Some tracks are detected at half or double tempo (use ×2 / ÷2 or tap tempo).
 - Section tags are a rough energy guess.
+- File dialogs use the XDG desktop portal (KDE/GNOME), then kdialog, then zenity. If none works, the status line says why: type or paste a folder path in the Library tab, or drop a folder on the window. `MIXSTUDIO_DIALOG=kdialog` (or portal/zenity) forces one; `mixstudio --dialog-check` lists what is available.
 - Carousel, Video, effects beyond EQ/filter/echo, and headphone cue aren't implemented yet.
 - Decoded audio is held in memory (about 100 MB per 6-minute track).
 

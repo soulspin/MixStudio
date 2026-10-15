@@ -41,7 +41,7 @@ pub struct App {
     stems: HashMap<String, Arc<crate::stems::Stems>>, stem_prog: HashMap<String, Arc<std::sync::atomic::AtomicU32>>, stem_err: HashMap<String, String>,
     stem_tx: crossbeam_channel::Sender<StemJob>, dl_prog: Arc<std::sync::atomic::AtomicU32>, ep: Arc<Mutex<String>>,
     ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
-    lib: crate::library::Library, lib_q: String, lib_sort: crate::library::SortCol, lib_asc: bool, lib_key: bool, lib_bpm: bool, lib_pct: f64,
+    lib: crate::library::Library, lib_q: String, lib_path: String, lib_sort: crate::library::SortCol, lib_asc: bool, lib_key: bool, lib_bpm: bool, lib_pct: f64,
     lib_sel: std::collections::HashSet<String>, lib_anchor: Option<usize>, lib_view: Vec<usize>,
     lib_view_key: Option<(u64, String, crate::library::SortCol, bool, Option<String>, Option<(u64, u64)>)>, timeline_rect: Rect,
 }
@@ -120,7 +120,7 @@ impl App {
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
             file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib: { let c = cc.egui_ctx.clone(); crate::library::Library::new(crate::library::config_dir(), crate::library::cache_dir(), Arc::new(move || c.request_repaint())) },
-            lib_q: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
+            lib_q: String::new(), lib_path: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
             lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_view_key: None, timeline_rect: Rect::NOTHING };
         if !a.lib.cfg.folders.is_empty() { a.lib.rescan(); }
         if let Some(d) = demo {
@@ -164,7 +164,10 @@ impl App {
     fn pick_files(&self, sample: Option<usize>) {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            if let Some(v) = rfd::FileDialog::new().set_title("Add tracks").add_filter("Audio", crate::library::EXTS).pick_files() { let _ = tx.send(Msg::Picked(v, sample)); }
+            let f = ("Audio".to_string(), crate::library::EXTS.iter().map(|s| s.to_string()).collect());
+            match crate::dialogs::run(crate::dialogs::Req::Files { title: "Add tracks".into(), filter: f }) {
+                Ok(Some(v)) => { let _ = tx.send(Msg::Picked(v, sample)); } Ok(None) => {}
+                Err(e) => { let _ = tx.send(Msg::Status(format!("Add tracks: {e}"))); } }
         });
     }
     fn load_files(&mut self, v: Vec<PathBuf>, sample: Option<usize>) {
@@ -193,8 +196,11 @@ impl App {
     fn dialog(&self, save: bool, kind: u8) {
         let tx = self.tx.clone(); let name = self.mix.name.clone();
         std::thread::spawn(move || {
-            let d = if kind == 2 { rfd::FileDialog::new().add_filter("WAV", &["wav"]).set_file_name(format!("{name}.wav")) } else { rfd::FileDialog::new().add_filter("MixStudio mix", &["json"]).set_file_name(format!("{name}.mixstudio.json")) };
-            let r = if save { d.save_file() } else { d.pick_file() };
+            use crate::dialogs::Req;
+            let filter = if kind == 2 { ("WAV".to_string(), vec!["wav".to_string()]) } else { ("MixStudio mix".to_string(), vec!["json".to_string()]) };
+            let title = match kind { 0 => "Open mix", 1 => "Save mix", _ => "Export WAV" }.to_string();
+            let req = if save { Req::Save { title, filter, name: if kind == 2 { format!("{name}.wav") } else { format!("{name}.mixstudio.json") } } } else { Req::Open { title, filter } };
+            let r = match crate::dialogs::run(req) { Ok(v) => v.and_then(|v| v.into_iter().next()), Err(e) => { let _ = tx.send(Msg::Status(e)); None } };
             if let Some(p) = r { let _ = tx.send(match kind { 0 => Msg::Opened(p), 1 => Msg::SaveTo(p), _ => Msg::ExportTo(p) }); }
         });
     }
@@ -267,7 +273,7 @@ impl eframe::App for App {
                 Err(e) => self.status = format!("Could not read {}: {e}", p.display()) } }
             Msg::Stems(p, r) => { self.stem_prog.remove(&p); match r { Ok(st) => { self.stems.insert(p.clone(), st); self.stem_err.remove(&p); self.status = "Stems ready".into(); }
                 Err(e) => { self.status = format!("Stem separation failed: {e}"); self.stem_err.insert(p, e); } } }
-            Msg::LibFolders(v) => { for p in v { self.lib.add_folder(&p); } self.tab = Tab::Library; }
+            Msg::LibFolders(v) => { self.add_lib_folders(v); }
             Msg::Status(s) => self.status = s, Msg::Opened(p) => self.open(p), Msg::SaveTo(p) => self.save(p), Msg::ExportTo(p) => self.export(p),
         } }
         self.lib.poll();
@@ -281,6 +287,8 @@ impl eframe::App for App {
                 let p = dir.join(name); if std::fs::write(&p, &bytes[..]).is_ok() { files.push(p); }
             }
         }
+        let dirs: Vec<PathBuf> = files.iter().filter(|p| p.is_dir()).cloned().collect();
+        if !dirs.is_empty() { self.add_lib_folders(dirs); }
         files.retain(|p| crate::library::is_audio(p));
         if !files.is_empty() { self.load_files(files, None); }
         let _ = self.out.tx.send(Cmd::Snap(Arc::new(self.build_snap())));
@@ -979,14 +987,37 @@ impl App {
         if v.is_empty() { self.status = "File not available (drive missing?)".into(); return; }
         self.status = format!("Adding {} track(s) from the library…", v.len()); self.load_files(v, None);
     }
+    fn add_lib_folders(&mut self, v: Vec<PathBuf>) {
+        let mut ok = vec![]; let mut bad = vec![];
+        for p in v { let p = if let Some(r) = p.to_str().and_then(|s| s.strip_prefix("file://")) { PathBuf::from(r) } else { p };
+            let p = if let Some(r) = p.to_str().and_then(|s| s.strip_prefix("~/")) { PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(r) } else { p };
+            if p.is_dir() { self.lib.add_folder(&p); ok.push(p.display().to_string()); } else { bad.push(p.display().to_string()); } }
+        self.tab = Tab::Library;
+        self.status = match (ok.is_empty(), bad.is_empty()) {
+            (false, true) => format!("Added folder: {} (scanning…)", ok.join(", ")),
+            (false, false) => format!("Added {}; not a folder: {}", ok.join(", "), bad.join(", ")),
+            _ => format!("Not a folder (or not available): {}", bad.join(", ")) };
+    }
     fn pick_folder(&self) {
         let tx = self.tx.clone();
-        std::thread::spawn(move || { if let Some(v) = rfd::FileDialog::new().set_title("Add music folder").pick_folders() { let _ = tx.send(Msg::LibFolders(v)); } });
+        let _ = tx.send(Msg::Status("Opening folder dialog…".into()));
+        std::thread::spawn(move || match crate::dialogs::run(crate::dialogs::Req::Folders { title: "Add music folder".into() }) {
+            Ok(Some(v)) => { let _ = tx.send(Msg::LibFolders(v)); }
+            Ok(None) => { let _ = tx.send(Msg::Status("No folder chosen".into())); }
+            Err(e) => { let _ = tx.send(Msg::Status(format!("Add folder: {e}"))); }
+        });
     }
     fn library_tab(&mut self, ui: &mut egui::Ui) {
         let dim = |s: String| egui::RichText::new(s).color(DIM).size(11.0);
         let rf = self.lib_ref();
         let mut add: Option<Vec<String>> = None;
+        ui.horizontal(|ui| {
+            ui.label(dim("Folder path:".into()));
+            let r = ui.add(egui::TextEdit::singleline(&mut self.lib_path).hint_text("type or paste a folder path, or drop a folder on the window").desired_width(360.0));
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add_enabled(!self.lib_path.trim().is_empty(), egui::Button::new("Add path")).clicked() || enter) && !self.lib_path.trim().is_empty() {
+                let p = PathBuf::from(self.lib_path.trim()); self.lib_path.clear(); self.add_lib_folders(vec![p]); }
+        });
         ui.horizontal(|ui| {
             if ui.button("＋ Add folder…").on_hover_text("Add a music folder; it is scanned recursively and kept up to date at every start").clicked() { self.pick_folder(); }
             if ui.add_enabled(!self.lib.cfg.folders.is_empty(), egui::Button::new("⟳ Rescan now")).clicked() { self.lib.rescan(); }
