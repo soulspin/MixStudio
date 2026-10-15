@@ -18,7 +18,20 @@ impl StemMode { pub const ALL: [StemMode; 4] = [StemMode::None, StemMode::Swap, 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Transition { pub preset: Preset, pub stems: [StemMode; 4],
     /// custom volume curves over the transition (progress 0..1, gain); empty = preset curve
-    #[serde(default)] pub curve_out: Vec<(f32, f32)>, #[serde(default)] pub curve_in: Vec<(f32, f32)> }
+    #[serde(default)] pub curve_out: Vec<(f32, f32)>, #[serde(default)] pub curve_in: Vec<(f32, f32)>,
+    /// beat ratio of the incoming track (RATIOS): 0 = auto (half / double time when clearly closer)
+    #[serde(default)] pub ratio: u8 }
+
+/// (name, mix beats per track beat; None = auto)
+pub const RATIOS: [(&str, Option<f64>); 6] = [("Auto", None), ("1:1", Some(1.0)), ("1:2", Some(2.0)), ("2:1", Some(0.5)), ("2:3", Some(1.5)), ("3:2", Some(2.0 / 3.0))];
+fn one64() -> f64 { 1.0 }
+/// Auto ratio: x2 or /2 only when it is clearly closer to the reference tempo (in log distance).
+pub fn auto_mult(bpm: f64, reference: f64) -> f64 {
+    if bpm <= 0.0 || reference <= 0.0 { return 1.0; }
+    let d = |m: f64| (bpm * m / reference).ln().abs();
+    let best = [2.0, 0.5].into_iter().min_by(|a, b| d(*a).partial_cmp(&d(*b)).unwrap()).unwrap();
+    if d(best) < d(1.0) - 0.15 { best } else { 1.0 }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Track {
@@ -46,9 +59,15 @@ pub struct Track {
     #[serde(default)] pub auto: Vec<Vec<(f64, f32)>>,
     /// stretch mode (STRETCH_MODES): 0 = mix default (key lock setting), 1 key lock, 2 vinyl, 3 beat slice
     #[serde(default)] pub stretch: u8,
+    /// resolved beat ratio (mix beats per track beat), kept up to date by `Mix::resolve_ratios`
+    #[serde(default = "one64")] pub beat_mult: f64,
 }
 impl Track {
-    pub fn grid(&self) -> Grid { Grid::new(self.map.clone(), self.bpm, self.offset, self.start_beat) }
+    pub fn grid(&self) -> Grid { self.grid_raw().scaled(self.beat_mult) }
+    /// grid without the beat ratio (the beatgrid editor works on track beats)
+    pub fn grid_raw(&self) -> Grid { Grid::new(self.map.clone(), self.bpm, self.offset, self.start_beat) }
+    /// tempo of the track on the mix grid (track BPM x beat ratio)
+    pub fn eff_bpm(&self) -> f64 { self.bpm * self.beat_mult }
     /// mix beat -> source seconds
     pub fn sec_at(&self, b: f64) -> f64 { self.grid().sec(b) }
     pub fn vis_start(&self, _mix_bpm: f64) -> f64 { self.grid().beat(self.trim_in) }
@@ -57,7 +76,7 @@ impl Track {
     pub fn intro_beats(&self) -> f64 { self.start_beat - self.grid().beat(0.0) }
     /// Make sure the track has an editable beat map that maps one track beat to one map entry.
     pub fn ensure_map(&mut self) {
-        let g = self.grid(); if g.dynamic() && g.ratio() == 1.0 { return; }
+        let g = self.grid_raw(); if g.dynamic() && g.ratio() == 1.0 { return; }
         let m = BeatMap::from_grid(&g, self.start_beat, self.duration, self.bpm);
         self.map = Some(Arc::new(m));
     }
@@ -141,6 +160,7 @@ impl Mix {
     pub fn length_beats(&self) -> f64 { self.tracks.iter().map(|t| t.end(self.bpm)).fold(0.0, f64::max) }
     /// lay main tracks out in current order with `overlap_bars` overlap, alternating decks
     pub fn relayout(&mut self, order: &[usize], overlap_bars: f64) {
+        self.resolve_ratios();
         let mut cursor = 0.0f64;
         for (k, &i) in order.iter().enumerate() {
             let bpm = self.bpm;
@@ -272,15 +292,31 @@ impl Mix {
         match self.tempo_mode {
             1 => { // Auto: each track at its own tempo, gliding through the transitions
                 let o = self.main_order(); let mut v: Vec<(f64, f64)> = vec![];
-                if let Some(&f) = o.first() { v.push((self.tracks[f].vis_start(self.bpm), self.tracks[f].bpm)); }
-                for (a, b, s, e) in self.transitions() { v.push((s, self.tracks[a].bpm)); v.push((e, self.tracks[b].bpm)); }
-                if let Some(&l) = o.last() { v.push((self.tracks[l].end(self.bpm), self.tracks[l].bpm)); }
+                if let Some(&f) = o.first() { v.push((self.tracks[f].vis_start(self.bpm), self.tracks[f].eff_bpm())); }
+                for (a, b, s, e) in self.transitions() { v.push((s, self.tracks[a].eff_bpm())); v.push((e, self.tracks[b].eff_bpm())); }
+                if let Some(&l) = o.last() { v.push((self.tracks[l].end(self.bpm), self.tracks[l].eff_bpm())); }
                 v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap()); v.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-9); v
             }
             2 => { let mut v = self.tempo_pts.clone(); v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap()); v }
             3 => { let (s, e) = (if self.ramp.0 > 0.0 { self.ramp.0 } else { self.bpm }, if self.ramp.1 > 0.0 { self.ramp.1 } else { self.bpm }); vec![(0.0, s), (self.length_beats().max(1.0), e)] }
             _ => vec![],
         }
+    }
+    /// Resolve every track's beat ratio (explicit, or auto against the previous track in Auto tempo,
+    /// otherwise against the mix tempo where the track starts). The downbeat stays on its mix beat.
+    pub fn resolve_ratios(&mut self) -> bool {
+        let fixed_curve = if self.tempo_mode == 1 { vec![] } else { self.tempo_curve() };
+        let order = self.main_order(); let mut prev: Option<f64> = None; let mut res = vec![];
+        for &i in &order { let t = &self.tracks[i];
+            let m = match RATIOS[(t.trans.ratio as usize).min(RATIOS.len() - 1)].1 { Some(m) => m,
+                None => if self.tempo_mode == 1 { prev.map(|p| auto_mult(t.bpm, p)).unwrap_or(1.0) } else { auto_mult(t.bpm, bpm_on(&fixed_curve, self.bpm, t.start_beat)) } };
+            prev = Some(t.bpm * m); res.push((i, m)); }
+        for (i, t) in self.tracks.iter().enumerate() { if t.lane >= 2 {
+            let reference = if self.tempo_mode == 1 { None } else { Some(bpm_on(&fixed_curve, self.bpm, t.start_beat)) };
+            let m = match RATIOS[(t.trans.ratio as usize).min(RATIOS.len() - 1)].1 { Some(m) => m, None => reference.map(|r| auto_mult(t.bpm, r)).unwrap_or(1.0) }; res.push((i, m)); } }
+        let mut changed = false;
+        for (i, m) in res { if self.tracks[i].beat_mult != m { self.tracks[i].beat_mult = m; changed = true; } }
+        changed
     }
     pub fn bpm_at(&self, b: f64) -> f64 { bpm_on(&self.tempo_curve(), self.bpm, b) }
     /// Seconds between two mix beats along the tempo curve.

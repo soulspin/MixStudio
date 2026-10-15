@@ -170,7 +170,7 @@ impl App {
     fn insert(&mut self, p: PathBuf, au: Audio, an: Analysis, sample: Option<(usize, f64)>) {
         let key = p.display().to_string();
         let t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0 };
+            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, beat_mult: 1.0 };
         if let Some((src, et)) = self.lib.ext_info(&key) { if !et.cues.is_empty() {
             let v: Vec<(f64, String)> = et.cues.iter().map(|c| (c.pos, if !c.name.is_empty() { c.name.clone() } else if c.hot >= 0 { format!("{} hot cue {}", src.name(), (b'A' + (c.hot as u8).min(25)) as char) } else { format!("{} cue", src.name()) })).collect();
             self.mix.cue_marks.insert(key.clone(), v); } }
@@ -491,6 +491,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
+        self.mix.resolve_ratios();
         while let Ok(m) = self.rx.try_recv() { match m {
             Msg::Found(v) => { self.status = if v.is_empty() { "No DJ libraries found in the usual places: use Browse… or paste the file path".into() } else { format!("Found {} DJ libraries (Library tab)", v.len()) }; self.lib_found = v; }
             Msg::ImportPick(p) => self.import_file(p),
@@ -1504,6 +1505,13 @@ impl App {
                     self.snapshot(); let delta = (bars - cur) as f64 * 4.0; let ord = self.mix.main_order(); let pos = ord.iter().position(|&x| x == i).unwrap();
                     for &j in &ord[pos..] { self.mix.tracks[j].start_beat -= delta; } } }
                 ui.label(egui::RichText::new("Bars:").color(DIM));
+                ui.separator();
+                let cur = (self.mix.tracks[i].trans.ratio as usize).min(crate::model::RATIOS.len() - 1); let (m, eb) = (self.mix.tracks[i].beat_mult, self.mix.tracks[i].eff_bpm());
+                let label = if cur == 0 { format!("Auto ({})", match m { x if x == 2.0 => "1:2", x if x == 0.5 => "2:1", _ => "1:1" }) } else { crate::model::RATIOS[cur].0.to_string() };
+                egui::ComboBox::from_id_salt("beat_ratio").selected_text(label).width(84.0).show_ui(ui, |ui| { for (k, (n, _)) in crate::model::RATIOS.iter().enumerate() {
+                    if ui.selectable_label(k == cur, *n).clicked() && k != cur { self.snapshot(); self.mix.tracks[i].trans.ratio = k as u8; self.mix.resolve_ratios(); } } })
+                    .response.on_hover_text(format!("Beat ratio of the incoming track: 1:2 plays one track beat over two mix beats (a 70 BPM track on a 140 BPM grid), 2:1 the opposite, 2:3 maps two track beats to three mix beats. Auto picks half / double time when it is clearly closer. Now ×{m:.2}: the track runs at {eb:.1} BPM on the grid."));
+                ui.label(egui::RichText::new("Beat ratio:").color(DIM));
             });
         });
         ui.add_space(4.0);
@@ -1562,7 +1570,7 @@ impl App {
                 ui.label("First beat (s)"); ui.add(egui::DragValue::new(&mut t.offset).range(0.0..=30.0).speed(0.002).fixed_decimals(3)); ui.end_row();
                 ui.label("Key (Camelot)"); ui.text_edit_singleline(&mut t.key); ui.end_row();
                 ui.label("Start (bar)"); let mut bar = t.start_beat / 4.0 + 1.0; if ui.add(egui::DragValue::new(&mut bar).speed(0.1).fixed_decimals(0)).changed() { t.start_beat = (bar.round() - 1.0) * 4.0; } ui.end_row();
-                ui.label("Tempo change"); ui.label(format!("{:+.1}% (plays at {:.1} BPM)", (bpm_mix / t.bpm - 1.0) * 100.0, bpm_mix)); ui.end_row();
+                ui.label("Tempo change"); ui.label(format!("{:+.1}% (plays at {:.1} BPM{})", (bpm_mix / t.eff_bpm() - 1.0) * 100.0, bpm_mix, if t.beat_mult != 1.0 { format!(", beat ratio ×{:.2}", t.beat_mult) } else { String::new() })); ui.end_row();
                 ui.label("Beatgrid"); if t.grid().dynamic() { let (lo, hi) = t.map.as_ref().map(|m| m.tempo_range()).unwrap_or((t.bpm, t.bpm));
                     ui.label(format!("Beat map, follows tempo {lo:.2}–{hi:.2} BPM")).on_hover_text("Every beat is tracked, so tempo drift stays locked to the mix grid. Editing the BPM by hand switches to a fixed grid; Reset to analysis brings the beat map back."); }
                 else { ui.label("Fixed (linear)"); } ui.end_row();

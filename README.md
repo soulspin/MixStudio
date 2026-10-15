@@ -176,3 +176,9 @@ tree; the table shows the other app's BPM and key (e.g. *Key (Rekordbox)*) next 
 (Rekordbox, Traktor) become orange markers on the clip when the track is added to the mix. **Path remapping** rewrites
 prefixes such as `C:\Users\Mike\Music` → `/mnt/windows/Users/Mike/Music`. Imports are strictly read-only (Engine's
 database is read from a temporary copy). Not yet: Serato / Engine cue points (stored in file tags / compressed blobs).
+
+### Big tempo jumps (v0.14)
+Each transition has a **Beat ratio** (transition panel): *Auto*, 1:1, 1:2, 2:1, 2:3, 3:2. With 1:2 one beat of the
+incoming track spans two mix beats, so a 70 BPM track locks onto a 140 BPM mix (kicks within a millisecond in the
+selftest); 2:3 maps two track beats onto three mix beats. *Auto* (default) switches to half / double time only when it
+is clearly closer to the tempo it joins, which also fixes Auto tempo gliding 140 → 70 BPM between such tracks.

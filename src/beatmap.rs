@@ -56,6 +56,8 @@ impl Grid {
         let u0 = map.as_ref().map(|m| m.u_of(offset)).unwrap_or(0.0);
         Grid { map, r, u0, bpm, offset, start }
     }
+    /// Beat ratio: one mix beat covers `1/m` track beats (m = 2: a 70 BPM track runs on a 140 BPM grid).
+    pub fn scaled(mut self, m: f64) -> Grid { if m > 0.0 && m != 1.0 { self.r /= m; self.bpm *= m; } self }
     pub fn dynamic(&self) -> bool { self.map.is_some() }
     pub fn ratio(&self) -> f64 { self.r }
     /// Mix beat -> source seconds.
