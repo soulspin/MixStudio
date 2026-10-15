@@ -19,7 +19,9 @@ impl SnapTrack {
 }
 #[allow(dead_code)]
 pub struct Snap { pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset, [StemMode; 4])>, pub decks: [Deck; 4], pub master: f32,
-    pub tcurves: Vec<(Vec<(f32, f32)>, Vec<(f32, f32)>)>, pub fx: Vec<crate::fx::FxBlock>, pub live: Option<crate::fx::FxBlock>, pub tempo: Vec<(f64, f64)> }
+    pub tcurves: Vec<(Vec<(f32, f32)>, Vec<(f32, f32)>)>, pub fx: Vec<crate::fx::FxBlock>, pub live: Option<crate::fx::FxBlock>, pub tempo: Vec<(f64, f64)>,
+    /// scratch blocks: (lane, start, end, parsed pattern, easing)
+    pub scratch: Vec<(usize, f64, f64, Vec<Vec<crate::scratch::Key>>, f64)> }
 
 impl Snap {
     pub fn build(mix: &Mix, audio: &[Option<Arc<Audio>>]) -> Snap { Self::build_with(mix, audio, &[]) }
@@ -34,7 +36,7 @@ impl Snap {
         let tcurves = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX).map(|x| (mix.tracks[x.1].trans.curve_out.clone(), mix.tracks[x.1].trans.curve_in.clone())).collect();
         let trans = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX)
             .map(|(a, b, s, e)| (map[a], map[b], s, e, mix.tracks[b].trans.preset, mix.tracks[b].trans.stems)).collect();
-        Snap { key_lock: mix.key_lock, metro: if mix.metronome { Some(mix.metro_vol) } else { None }, bpm: mix.bpm, tracks, trans, decks: mix.decks, master: mix.master, tcurves, fx: mix.fx.clone(), live: None, tempo: mix.tempo_curve() }
+        Snap { key_lock: mix.key_lock, metro: if mix.metronome { Some(mix.metro_vol) } else { None }, bpm: mix.bpm, tracks, trans, decks: mix.decks, master: mix.master, tcurves, fx: mix.fx.clone(), live: None, tempo: mix.tempo_curve(), scratch: mix.fx.iter().filter(|f| f.kind == crate::fx::FxKind::Scratch).filter_map(|f| crate::scratch::parse(&f.pattern).ok().map(|p| (f.target, f.start, f.start + f.len, p, f.ease as f64))).collect() }
     }
 }
 
@@ -231,7 +233,8 @@ impl Engine {
             let dst = &mut self.dbuf[t.lane];
             let rate = bpm_now / t.bpm;
             let (av0, av1) = (t.auto_at(0, b0).unwrap_or(1.0), t.auto_at(0, b1).unwrap_or(1.0));
-            if t.stretch == 1 && ((rate - 1.0).abs() > 1e-4 || t.grid.dynamic()) && ti < self.ws.len() {
+            let scr = snap.scratch.iter().find(|s| s.0 == t.lane && b1 > s.1 && b0 < s.2);
+            if scr.is_none() && t.stretch == 1 && ((rate - 1.0).abs() > 1e-4 || t.grid.dynamic()) && ti < self.ws.len() {
                 let w = &mut self.ws[ti];
                 let id = (Arc::as_ptr(a) as usize, t.start_beat.to_bits(), t.offset.to_bits(), t.bpm.to_bits());
                 if w.id != id || !w.active || (w.next_beat - b0).abs() > bpb * 2.0 {
@@ -251,10 +254,11 @@ impl Engine {
             }
             for i in 0..n {
                 let b = b0 + bpb * i as f64;
-                let (sec, slg) = if t.stretch == 3 { t.slice(b, bpm_now) } else { (t.grid.sec(b), 1.0) };
+                let (bb, scg) = match scr { Some(s) if b >= s.1 && b < s.2 => { let (x, g) = crate::scratch::eval(&s.3, b - s.1, s.4); (s.1 + x, g) } _ => (b, 1.0) };
+                let (sec, slg) = if t.stretch == 3 && bb == b { t.slice(b, bpm_now) } else { (t.grid.sec(bb), 1.0) };
                 let pos = sec * srt;
                 if pos < 1.0 || pos as usize + 2 >= a.l.len() { continue; }
-                let g = ((m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32)) * (av0 + (av1 - av0) * (i as f32 / n as f32))) * t.edge(b) * slg;
+                let g = ((m0.gain + (m1.gain - m0.gain) * (i as f32 / n as f32)) * (av0 + (av1 - av0) * (i as f32 / n as f32))) * t.edge(b) * slg * scg;
                 if g <= 0.0 { continue; }
                 let k = pos as usize; let f = (pos - k as f64) as f32;
                 let sg = combine(m0.stem, t.mute_gain(sec)); let st = t.stems.as_deref();

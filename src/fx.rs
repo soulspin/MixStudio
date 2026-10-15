@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
-pub enum FxKind { #[default] Reverb, Echo, Flanger, FilterSweep }
+pub enum FxKind { #[default] Reverb, Echo, Flanger, FilterSweep, Scratch }
 impl FxKind {
-    pub const ALL: [FxKind; 4] = [FxKind::Reverb, FxKind::Echo, FxKind::Flanger, FxKind::FilterSweep];
-    pub fn name(self) -> &'static str { match self { FxKind::Reverb => "Reverb", FxKind::Echo => "Echo / delay", FxKind::Flanger => "Flanger", FxKind::FilterSweep => "Filter sweep" } }
+    pub const ALL: [FxKind; 5] = [FxKind::Reverb, FxKind::Echo, FxKind::Flanger, FxKind::FilterSweep, FxKind::Scratch];
+    pub fn name(self) -> &'static str { match self { FxKind::Reverb => "Reverb", FxKind::Echo => "Echo / delay", FxKind::Flanger => "Flanger", FxKind::FilterSweep => "Filter sweep", FxKind::Scratch => "Scratch" } }
     pub fn has_tail(self) -> bool { matches!(self, FxKind::Reverb | FxKind::Echo) }
 }
 
@@ -26,11 +26,15 @@ pub struct FxBlock {
     pub depth: f32,
     /// echo time in beats / flanger LFO period in beats
     pub time: f32,
+    /// Scratch: pattern (see scratch.rs) and easing 0..1
+    #[serde(default)] pub pattern: String, #[serde(default)] pub ease: f32,
 }
 impl FxBlock {
     pub fn new(kind: FxKind, target: usize, start: f64) -> FxBlock {
-        let (mix, decay, depth, time, tail) = match kind { FxKind::Reverb => (0.4, 0.6, 0.5, 1.0, 8.0), FxKind::Echo => (0.45, 0.5, 0.5, 0.75, 8.0), FxKind::Flanger => (0.6, 0.5, 0.7, 4.0, 0.0), FxKind::FilterSweep => (1.0, 0.5, 0.8, 1.0, 0.0) };
-        FxBlock { kind, target, start, len: 8.0, tail, mix, decay, depth, time }
+        let (mix, decay, depth, time, tail) = match kind { FxKind::Reverb => (0.4, 0.6, 0.5, 1.0, 8.0), FxKind::Echo => (0.45, 0.5, 0.5, 0.75, 8.0), FxKind::Flanger => (0.6, 0.5, 0.7, 4.0, 0.0), FxKind::FilterSweep => (1.0, 0.5, 0.8, 1.0, 0.0), FxKind::Scratch => (1.0, 0.0, 0.0, 1.0, 0.0) };
+        let scratch = kind == FxKind::Scratch;
+        FxBlock { kind, target: if scratch { target.min(3) } else { target }, start, len: if scratch { 4.0 } else { 8.0 }, tail, mix, decay, depth, time,
+            pattern: if scratch { crate::scratch::PRESETS[0].1.to_string() } else { String::new() }, ease: 0.6 }
     }
     pub fn end(&self) -> f64 { self.start + self.len + if self.kind.has_tail() { self.tail } else { 0.0 } }
 }
@@ -65,6 +69,7 @@ impl FxState {
     }
     /// Process `buf` in place for mix beats b0 + i * bpb. `live` ignores the block's time range.
     pub fn process(&mut self, b: &FxBlock, buf: &mut [[f32; 2]], b0: f64, bpb: f64, bpm: f64, live: bool) {
+        if b.kind == FxKind::Scratch { return; } // handled per track in the engine
         let n = buf.len(); let b1 = b0 + bpb * n as f64;
         if !live && (b1 < b.start || b0 > b.end() + 0.5) { if self.active { self.reset(); } return; }
         self.active = true;
@@ -102,6 +107,7 @@ impl FxState {
                     }
                     self.fpos = (self.fpos + 1) % len;
                 }
+                FxKind::Scratch => {}
                 FxKind::FilterSweep => {
                     let prog = if live { b.time.clamp(0.0, 1.0) as f64 } else { ((t - b.start) / b.len.max(0.01)).clamp(0.0, 1.0) };
                     let lo = 150.0 + (1.0 - b.depth.clamp(0.0, 1.0)) * 4000.0;

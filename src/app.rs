@@ -54,7 +54,7 @@ pub struct App {
     sel: Option<usize>, sel_in: Option<usize>, undo: Vec<String>, redo: Vec<String>,
     tx: crossbeam_channel::Sender<Msg>, rx: crossbeam_channel::Receiver<Msg>, loading: usize,
     drag: Option<(usize, f64, f64)>, loop_on: bool, bars: u32, snapping: Snapping, lock: bool,
-    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, tempo_drag: Option<(usize, f64, f64)>, export_fmt: u8, ffmpeg: bool, auto_track: Option<usize>, auto_param: usize, auto_solo: bool, auto_drag: Option<(usize, usize)>, auto_rect: Rect, vzoom: bool, tc_side: usize, tc_drag: Option<usize>, fx_sel: Option<usize>, fx_drag: Option<(usize, u8, f64, f64, f64)>, fx_kind: crate::fx::FxKind, fx_target: usize, fx_name: String, fx_presets: Vec<crate::fx::FxPreset>, live_fx: Option<crate::fx::FxBlock>, live_start: f64, live_last: Option<(f64, f64, crate::fx::FxBlock)>, stem_sel: Option<(usize, usize, f64, f64)>, stem_drag: bool, dl_offer: Option<usize>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
+    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, scratch_win: bool, scratch_play: Option<(usize, f64, f64)>, tempo_drag: Option<(usize, f64, f64)>, export_fmt: u8, ffmpeg: bool, auto_track: Option<usize>, auto_param: usize, auto_solo: bool, auto_drag: Option<(usize, usize)>, auto_rect: Rect, vzoom: bool, tc_side: usize, tc_drag: Option<usize>, fx_sel: Option<usize>, fx_drag: Option<(usize, u8, f64, f64, f64)>, fx_kind: crate::fx::FxKind, fx_target: usize, fx_name: String, fx_presets: Vec<crate::fx::FxPreset>, live_fx: Option<crate::fx::FxBlock>, live_start: f64, live_last: Option<(f64, f64, crate::fx::FxBlock)>, stem_sel: Option<(usize, usize, f64, f64)>, stem_drag: bool, dl_offer: Option<usize>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
     stems: HashMap<String, Arc<crate::stems::Stems>>, stem_prog: HashMap<String, Arc<std::sync::atomic::AtomicU32>>, stem_err: HashMap<String, String>,
     stem_tx: crossbeam_channel::Sender<StemJob>, dl_prog: Arc<std::sync::atomic::AtomicU32>, ep: Arc<Mutex<String>>,
     ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
@@ -135,7 +135,7 @@ impl App {
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let mut a = App { mix: Mix::default(), store: HashMap::new(), out: crate::audio::start(), ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
-            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
+            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, scratch_win: false, scratch_play: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib: { let c = cc.egui_ctx.clone(); crate::library::Library::new(crate::library::config_dir(), crate::library::cache_dir(), Arc::new(move || c.request_repaint())) },
             lib_q: String::new(), lib_path: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
             lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_view_key: None, timeline_rect: Rect::NOTHING };
@@ -318,6 +318,56 @@ impl App {
             let _ = tx.send(Msg::Clip(nt, clip, an));
         });
     }
+    fn scratch_window(&mut self, ctx: &egui::Context) {
+        if !self.scratch_win { return; }
+        let Some(k) = self.fx_sel.filter(|&k| k < self.mix.fx.len() && self.mix.fx[k].kind == crate::fx::FxKind::Scratch) else { self.scratch_win = false; return };
+        let mut open = true; let mut preview = false; let mut snap_needed = false;
+        egui::Window::new("Scratch Pattern Editor").open(&mut open).default_width(460.0).show(ctx, |ui| {
+            let before = (self.mix.fx[k].pattern.clone(), self.mix.fx[k].ease);
+            ui.horizontal(|ui| { ui.label("Preset:"); for (n, p) in crate::scratch::PRESETS { if ui.small_button(n).clicked() { self.mix.fx[k].pattern = p.to_string(); } } });
+            let user: Vec<(usize, String, String, f32)> = self.fx_presets.iter().enumerate().filter(|(_, p)| p.block.kind == crate::fx::FxKind::Scratch).map(|(i, p)| (i, p.name.clone(), p.block.pattern.clone(), p.block.ease)).collect();
+            if !user.is_empty() { ui.horizontal_wrapped(|ui| { ui.label("Saved:"); let mut del = None;
+                for (i, n, p, e) in &user { if ui.small_button(n).on_hover_text(p).clicked() { self.mix.fx[k].pattern = p.clone(); self.mix.fx[k].ease = *e; }
+                    if ui.small_button("🗑").on_hover_text(format!("Delete \"{n}\"")).clicked() { del = Some(*i); } }
+                if let Some(i) = del { self.fx_presets.remove(i); let _ = crate::fx::save_presets(&self.fx_presets); } }); }
+            ui.horizontal(|ui| { ui.label("Pattern:"); ui.add(egui::TextEdit::singleline(&mut self.mix.fx[k].pattern).font(egui::TextStyle::Monospace).desired_width(300.0)); });
+            ui.label(egui::RichText::new("A–E = position in the beat (A start, E one beat on) · > play · - hold · r release (mute) · . next beat. Down = reverse.").color(DIM).size(11.0));
+            ui.add(egui::Slider::new(&mut self.mix.fx[k].ease, 0.0..=1.0).text("Easing"));
+            let f = self.mix.fx[k].clone();
+            match crate::scratch::parse(&f.pattern) {
+                Err(e) => { ui.label(egui::RichText::new(format!("Pattern error: {e}")).color(C::from_rgb(230, 100, 80))); }
+                Ok(p) => {
+                    let beats = p.len() as f64;
+                    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().min(440.0), 150.0), Sense::hover());
+                    let pt = ui.painter(); pt.rect_filled(r, 4.0, C::from_rgb(26, 27, 31)); pt.rect_stroke(r, 4.0, Stroke::new(1.0_f32, LINE));
+                    for b in 0..=p.len() { let x = r.left() + r.width() * b as f32 / beats as f32; pt.line_segment([pos2(x, r.top()), pos2(x, r.bottom())], Stroke::new(0.5_f32, LINE)); }
+                    for (q, lab) in ["A", "B", "C", "D", "E"].iter().enumerate() { let y = r.bottom() - 6.0 - (r.height() - 12.0) * q as f32 / 4.0; pt.text(pos2(r.left() + 3.0, y), Align2::LEFT_CENTER, *lab, FontId::proportional(9.0), DIM); }
+                    let c = crate::scratch::curve(&p, beats, f.ease as f64, 400);
+                    let to = |t: f64, x: f64| pos2(r.left() + r.width() * (t / beats) as f32, r.bottom() - 6.0 - (r.height() - 12.0) * (x.clamp(0.0, 1.0)) as f32);
+                    for w in c.windows(2) { let (a, b) = (w[0], w[1]); if (b.0.floor() - a.0.floor()).abs() > 0.5 && a.0.fract() > 0.9 { continue; }
+                        let col = if a.2 < 0.5 { C::from_rgba_unmultiplied(120, 120, 120, 60) } else if b.1 < a.1 - 1e-6 { C::from_rgb(240, 110, 90) } else { ACCENT };
+                        pt.line_segment([to(a.0, a.1), to(b.0, b.1)], Stroke::new(2.0_f32, col)); }
+                    if let Some((_, s, b)) = self.scratch_play.filter(|x| x.0 == k) { let now = self.beat(); if now >= b { self.scratch_play = None; } else if now >= s {
+                        let t = (now - s) % beats; let x = r.left() + r.width() * (t / beats) as f32; pt.line_segment([pos2(x, r.top()), pos2(x, r.bottom())], Stroke::new(1.5_f32, C::WHITE)); ui.ctx().request_repaint(); } }
+                    ui.label(egui::RichText::new(format!("{} beat(s), loops over the {:.0}-beat block · yellow = forward, red = reverse, grey = muted", p.len(), f.len)).color(DIM).size(11.0));
+                }
+            }
+            ui.horizontal(|ui| {
+                if ui.button("▶ Preview").on_hover_text("Play the block from one beat before it").clicked() { preview = true; }
+                ui.add(egui::TextEdit::singleline(&mut self.fx_name).hint_text("preset name").desired_width(120.0));
+                if ui.add_enabled(!self.fx_name.trim().is_empty(), egui::Button::new("Save as preset")).clicked() {
+                    let name = self.fx_name.trim().to_string(); let mut b = self.mix.fx[k].clone(); b.start = 0.0;
+                    self.fx_presets.retain(|p| p.name != name); self.fx_presets.push(crate::fx::FxPreset { name: name.clone(), block: b });
+                    self.status = match crate::fx::save_presets(&self.fx_presets) { Ok(()) => format!("Scratch preset \"{name}\" saved"), Err(e) => format!("Could not save presets: {e}") }; self.fx_name.clear(); }
+                if ui.button("🗑 Delete block").clicked() { snap_needed = true; }
+            });
+            if (self.mix.fx[k].pattern.clone(), self.mix.fx[k].ease) != before { let now = (self.mix.fx[k].pattern.clone(), self.mix.fx[k].ease);
+                self.mix.fx[k].pattern = before.0; self.mix.fx[k].ease = before.1; self.snapshot(); self.mix.fx[k].pattern = now.0; self.mix.fx[k].ease = now.1; }
+        });
+        if preview { let f = &self.mix.fx[k]; let (s, e) = (f.start, f.start + f.len); self.seek((s - 1.0).max(0.0)); let _ = self.out.tx.send(Cmd::Play(true)); self.scratch_play = Some((k, s, e)); }
+        if snap_needed { self.snapshot(); self.mix.fx.remove(k); self.fx_sel = None; self.scratch_win = false; }
+        if !open { self.scratch_win = false; }
+    }
     fn effects_tab(&mut self, ui: &mut egui::Ui) {
         use crate::fx::*;
         let dim = |s: &str| egui::RichText::new(s).color(DIM).size(11.0);
@@ -333,6 +383,7 @@ impl App {
                 let mut del = false; let mut save = false;
                 if let Some(k) = self.fx_sel.filter(|&k| k < self.mix.fx.len()) {
                     let before = self.mix.fx[k].clone();
+                    let mut open_ed = false;
                     let f = &mut self.mix.fx[k];
                     ui.label(format!("Selected: {} on {}, bar {:.0}", f.kind.name(), targets[f.target.min(4)], f.start / 4.0 + 1.0));
                     egui::Grid::new("fxp").num_columns(2).show(ui, |ui| {
@@ -343,7 +394,9 @@ impl App {
                         if matches!(f.kind, FxKind::Reverb | FxKind::Echo) { ui.label(if f.kind == FxKind::Reverb { "Decay" } else { "Feedback" }); ui.add(egui::Slider::new(&mut f.decay, 0.0..=1.0)); ui.end_row(); }
                         if matches!(f.kind, FxKind::Flanger | FxKind::FilterSweep) { ui.label("Depth"); ui.add(egui::Slider::new(&mut f.depth, 0.0..=1.0)); ui.end_row(); }
                         if matches!(f.kind, FxKind::Echo | FxKind::Flanger) { ui.label("Time"); ui.add(egui::Slider::new(&mut f.time, 0.125..=8.0).logarithmic(true).suffix(" beats")); ui.end_row(); }
+                        if f.kind == FxKind::Scratch { ui.label("Pattern"); ui.horizontal(|ui| { ui.monospace(&f.pattern); if ui.button("✎ Pattern editor…").clicked() { open_ed = true; } }); ui.end_row(); }
                     });
+                    if open_ed { self.scratch_win = true; }
                     if self.mix.fx[k] != before { let now = self.mix.fx[k].clone(); self.mix.fx[k] = before; self.snapshot(); self.mix.fx[k] = now; }
                     ui.horizontal(|ui| { if ui.button("🗑 Delete block").clicked() { del = true; }
                         ui.add(egui::TextEdit::singleline(&mut self.fx_name).hint_text("preset name").desired_width(120.0));
@@ -443,6 +496,7 @@ impl eframe::App for App {
             Msg::Status(s) => self.status = s, Msg::Opened(p) => self.open(p), Msg::SaveTo(p) => self.save(p), Msg::ExportTo(p) => self.export(p),
         } }
         self.lib.poll();
+        self.scratch_window(ctx);
         let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
         let mut files: Vec<PathBuf> = vec![];
         for f in dropped {
@@ -1022,11 +1076,13 @@ impl App {
             let (x0, x1, x2) = (bx(fb.start), bx(fb.start + fb.len), bx(fb.end()));
             if x2 < tl_x0 || x0 > area.right() { continue; }
             let r = Rect::from_min_max(pos2(x0.max(tl_x0), row.bottom() - 15.0), pos2(x1.min(area.right()), row.bottom() - 2.0));
-            let col = match fb.kind { crate::fx::FxKind::Reverb => C::from_rgb(170, 110, 230), crate::fx::FxKind::Echo => C::from_rgb(70, 190, 220), crate::fx::FxKind::Flanger => C::from_rgb(230, 120, 160), crate::fx::FxKind::FilterSweep => C::from_rgb(230, 170, 60) };
+            let col = match fb.kind { crate::fx::FxKind::Reverb => C::from_rgb(170, 110, 230), crate::fx::FxKind::Echo => C::from_rgb(70, 190, 220), crate::fx::FxKind::Flanger => C::from_rgb(230, 120, 160), crate::fx::FxKind::FilterSweep => C::from_rgb(230, 170, 60), crate::fx::FxKind::Scratch => C::from_rgb(90, 220, 140) };
             if x2 > x1 + 1.0 { let tr_ = Rect::from_min_max(pos2(x1.max(tl_x0), r.top() + 3.0), pos2(x2.min(area.right()), r.bottom() - 3.0)); tp.rect_filled(tr_, 0.0, col.gamma_multiply(0.3)); }
             let sel = self.fx_sel == Some(k);
             tp.rect_filled(r, 3.0, col.gamma_multiply(if sel { 1.0 } else { 0.75 })); if sel { tp.rect_stroke(r, 3.0, Stroke::new(1.5_f32, C::WHITE)); }
             if r.width() > 30.0 { tp.text(pos2(r.left() + 4.0, r.center().y), Align2::LEFT_CENTER, fb.kind.name(), FontId::proportional(9.0), C::BLACK); }
+            if fb.kind == crate::fx::FxKind::Scratch { if let Ok(p) = crate::scratch::parse(&fb.pattern) { let pl = p.len() as f64; let mut b = fb.start + pl;
+                while b < fb.start + fb.len - 1e-6 { let x = bx(b); if x > r.left() && x < r.right() { for k in 0..4 { let y = r.top() + 1.0 + k as f32 * 3.5; tp.line_segment([pos2(x, y), pos2(x, y + 2.0)], Stroke::new(1.5_f32, C::BLACK)); } tp.text(pos2(x + 2.0, r.center().y), Align2::LEFT_CENTER, "↻", FontId::proportional(9.0), C::BLACK); } b += pl; } } }
             let resp = ui.interact(r, ui.id().with(("fx", k)), Sense::click_and_drag());
             let mut edge = 0u8;
             if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) { if resp.hovered() { if (hp.x - x0).abs() < 5.0 { edge = 1; } else if (hp.x - x1).abs() < 5.0 { edge = 2; }

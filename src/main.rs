@@ -2,6 +2,7 @@
 mod analysis;
 mod automix;
 mod library;
+mod scratch;
 mod export;
 mod fx;
 mod dialogs;
@@ -76,6 +77,7 @@ fn selftest(dir: &Path) -> bool {
     ok &= stem_edit_tests();
     ok &= fx_tests();
     ok &= tempo_export_tests(dir);
+    ok &= scratch_tests();
     println!("{}", if ok { "ALL TESTS PASSED" } else { "SOME TEST FAILED" });
     ok
 }
@@ -743,5 +745,44 @@ fn tempo_export_tests(dir: &Path) -> bool {
     let mut v = serde_json::to_value(&m).unwrap(); for k in ["tempo_mode", "tempo_pts", "ramp"] { v.as_object_mut().unwrap().remove(k); } v["tracks"][0].as_object_mut().unwrap().remove("stretch");
     let old: Result<model::Mix, _> = serde_json::from_value(v);
     chk("old projects keep a constant tempo", old.as_ref().map_or(false, |m| m.tempo_mode == 0 && m.tempo_curve().is_empty() && m.tracks[0].stretch == 0), "ok".into());
+    ok
+}
+fn scratch_tests() -> bool {
+    use fx::*; let mut ok = true; let sr = 44100u32;
+    let mut chk = |name: &str, pass: bool, info: String| { ok &= pass; println!("{} scratch {name}: {info}", if pass { "OK  " } else { "FAIL" }); };
+    let n = sr as usize * 30;
+    let ramp: Vec<f32> = (0..n).map(|i| 0.7 * i as f32 / n as f32).collect();
+    let ra = Arc::new(analysis::Audio { sr, l: ramp.clone(), r: ramp });
+    let sine: Vec<f32> = (0..n).map(|i| 0.4 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sr as f32).sin()).collect();
+    let sa = Arc::new(analysis::Audio { sr, l: sine.clone(), r: sine });
+    let mk = |lane: usize, pat: &str, len: f64| { let mut m = model::Mix::default(); m.bpm = 120.0; m.decks[lane].vol = 1.0;
+        m.tracks.push(model::Track { path: "a".into(), title: "a".into(), artist: "a".into(), bpm: 120.0, offset: 0.0, key: "8A".into(), duration: 30.0, start_beat: 0.0, lane, trans: Default::default(), map: None, locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 2 });
+        let mut b = FxBlock::new(FxKind::Scratch, lane, 8.0); b.pattern = pat.into(); b.len = len; b.ease = 0.0; m.fx.push(b); m };
+    let render = |m: &model::Mix, a: &Arc<analysis::Audio>| engine::render_offline(Arc::new(engine::Snap::build(m, &[Some(a.clone())])), sr, 0.0, 16.0).0;
+    let p = scratch::parse("EA.").unwrap();
+    let (x0, x5, x9) = (scratch::eval(&p, 0.0, 0.0).0, scratch::eval(&p, 0.5, 0.0).0, scratch::eval(&p, 0.9, 0.0).0);
+    chk("pattern syntax", scratch::parse("AEx.").is_err() && scratch::parse(">r>r.").map(|p| p[0].len()) == Ok(4) && (x0 - 1.0).abs() < 1e-9 && (x5 - 0.5).abs() < 1e-9 && (x9 - 0.1).abs() < 1e-9,
+        format!("EA.: position {x0:.2} → {x5:.2} → {x9:.2} (reverse); bad characters rejected"));
+    let all_ok = scratch::PRESETS.iter().all(|(_, s)| scratch::parse(s).is_ok());
+    chk("presets parse", all_ok, scratch::PRESETS.iter().map(|p| format!("{} '{}'", p.0, p.1)).collect::<Vec<_>>().join(", "));
+    let src = |sec: f64| 0.7 * (sec * sr as f64) as f32 / n as f32;
+    let m = mk(0, "EA.", 1.0); let x = render(&m, &ra); let y = render(&m, &ra);
+    chk("deterministic render", x == y, format!("{} samples identical", x.len()));
+    let at = |b: f64| x[(b * 0.5 * sr as f64) as usize];
+    let errs: Vec<f32> = [0.1, 0.3, 0.6, 0.9].iter().map(|u| (at(8.0 + u) - src((8.0 + (1.0 - u)) * 0.5)).abs()).collect();
+    let mono = (1..40).all(|k| at(8.0 + k as f64 * 0.024) < at(8.0 + (k - 1) as f64 * 0.024));
+    chk("reverse plays the beat backwards", mono && errs.iter().all(|e| *e < 2e-3) && (at(7.5) - src(3.75)).abs() < 2e-3 && (at(9.5) - src(4.75)).abs() < 2e-3,
+        format!("position falls through the beat (max error {:.1e}), normal playback before and after", errs.iter().fold(0.0f32, |a, b| a.max(*b))));
+    let m = mk(0, "EA.", 4.0); let x = render(&m, &ra); let at = |b: f64| x[(b * 0.5 * sr as f64) as usize];
+    let e: f32 = (0..4).map(|k| (at(8.0 + k as f64 + 0.25) - src((8.0 + k as f64 + 0.75) * 0.5)).abs()).fold(0.0, f32::max);
+    chk("pattern loops over a longer block", e < 2e-3, format!("each of the 4 beats reversed, max error {e:.1e}"));
+    let m = mk(2, "EA.", 1.0); let x = render(&m, &ra); let at = |b: f64| x[(b * 0.5 * sr as f64) as usize];
+    chk("works on sample lanes", (at(8.25) - src(8.75 * 0.5)).abs() < 2e-3, "reverse on Sample 1".into());
+    let m = mk(0, ">r>r.", 4.0); let x = render(&m, &sa);
+    let rms = |a: f64, b: f64| { let s = &x[(a * 0.5 * sr as f64) as usize..(b * 0.5 * sr as f64) as usize]; (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt() };
+    let (on, off): (f32, f32) = ((0..4).map(|k| rms(8.0 + k as f64 + 0.03, 8.0 + k as f64 + 0.22)).sum::<f32>() / 4.0, (0..4).map(|k| rms(8.0 + k as f64 + 0.28, 8.0 + k as f64 + 0.47)).sum::<f32>() / 4.0);
+    chk("transformer gating mutes", on > 0.25 && off < 1e-3, format!("open slots rms {on:.3}, released slots {off:.1e}"));
+    let mut v = serde_json::to_value(FxBlock::new(FxKind::Reverb, 0, 0.0)).unwrap(); for k in ["pattern", "ease"] { v.as_object_mut().unwrap().remove(k); }
+    chk("old effect blocks load", serde_json::from_value::<FxBlock>(v).is_ok(), "ok".into());
     ok
 }

@@ -152,3 +152,10 @@ MixStudio is inspired by the timeline approach of DJ.Studio, but it's an indepen
 ## License
 
 [MIT](LICENSE) © 2026 soulspin
+
+### Scratch effect (v0.11)
+Add a **Scratch** block in the effects grid on a deck or sample lane. It drives the turntable position under the block
+(smooth varispeed, a falling line plays in reverse) and loops when the block is longer than the pattern.
+Presets: Baby scratch, Downer, Transformer, Reverse, Chirp. **✎ Pattern editor…** opens the syntax editor:
+`A`–`E` position targets within the beat (A = start, E = end), `.` next beat, `r` release (mute), `>` open, `-` hold;
+with live graph, Easing, Preview, Save as preset and Delete. Applies in playback and export.
