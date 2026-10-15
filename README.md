@@ -2,13 +2,22 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.16](https://img.shields.io/badge/status-beta%200.16-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.17](https://img.shields.io/badge/status-beta%200.17-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.16:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.17:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.16: select and repeat a song section](docs/screenshots/sections.png)
+
+## New in 0.17
+
+- **Dedicated Beatgrid tab:** source analysis, active grid BPM, mix BPM and beat ratio shown together. Whole-grid, single-beat and following-beat modes stay visible, with ±1/±10 ms correction, previous/next beat and zoom to target.
+- **Assisted beatmatch:** choose a transition and **Measure overlap**. A background bass-attack check reports signed offset, drift, scatter and usable beat count. Consistent evidence enables an explicit incoming-grid correction with one Undo; drifting or uncertain evidence stays advisory.
+- **Safer edits:** fractional grid anchors preserve neighbouring beat positions during single-beat edits, stale measurements cannot apply after timing changes, and arranged sections are protected from grid changes.
+- **Clearer Track tab:** reachable clip properties and stem controls; timing tools live in Beatgrid. The playback buffer fix from 0.16.1 is retained.
+
+The check compares bass attacks, not musical phrasing. Silence, sustained bass and unclear drums can leave too little evidence; listen after every correction. Single/following editing and overlap measurements currently require a 1:1 beat ratio. Correct the source grid before arranging sections.
 
 ## New in 0.16
 
@@ -26,14 +35,14 @@ Live DJ software is built for performing: two decks, a crossfader, and one shot 
 
 It's native, fast, and doesn't need an account. No sign-up, no license keys, no cloud. It's your music on your machine.
 
-## Features (Beta 0.16)
+## Features (Beta 0.17)
 
 - **Timeline decks:** songs alternate on Deck 1 and Deck 2 as coloured clips with 3-band waveforms (low/mid/high), beat and bar lines, bar numbers and heuristic phrase tags (Intro / Build / Drop / Breakdown / Outro). There's an overview strip, a time ruler, zoom (Ctrl+scroll), scrolling, a playhead, click-to-seek, and clip dragging with snapping (off / beat / half bar / bar).
 - **Automatic analysis:** global BPM (tempogram + full-track comb + beat regression, about 0.02 BPM), musical key (chromagram plus Krumhansl profiles) shown as **Camelot** codes, and bar 1. Results and waveforms are cached and re-analysed automatically when the analysis improves.
-- **Dynamic beatgrids:** every beat is tracked (dynamic-programming beat tracking, refined to the kick attack on a ripple-free low-band envelope and smoothed over 16 beats, so soft intro kicks and clicky main kicks land on the same grid), so tracks that drift in tempo (live-played, older or AI-generated material) still stay locked. The Track tab shows the tempo range the beat map follows. Projects saved before 0.3 load with the old fixed grid.
+- **Dynamic beatgrids:** every beat is tracked (dynamic-programming beat tracking, refined to the kick attack on a ripple-free low-band envelope and smoothed over 16 beats, so soft intro kicks and clicky main kicks land on the same grid), so tracks that drift in tempo (live-played, older or AI-generated material) still stay locked. The Beatgrid tab shows the analysis BPM, active grid and mix tempo. Projects saved before 0.3 load with the old fixed grid.
 - **Beat-locked time-stretch:** every track plays at the mix tempo through its beat map, so the stretch ratio changes continuously and each beat lands on a mix beat (kicks within a few ms in the self-tests, even against a drifting track). Key lock (on by default) uses a built-in WSOLA stretcher that keeps the pitch; grains containing a kick or snare attack are placed exactly on the beat map, so attacks don't shift when a track is sped up or slowed down. Switch it off for classic varispeed. Playback and export share the same engine.
-- **Editable beatgrid:** nudge ±1/±10 ms, Alt+drag the grid on a clip, set the downbeat (Shift+click a beat line or "Set downbeat at playhead"). These work on beat maps too. BPM ×2 / ÷2, **tap tempo** (a hand-set BPM switches the track to a fixed grid), and reset to analysis.
-- **Beatgrid editor:** zoom in until beat markers (▼) appear on the clips. Hover a marker for the mode popup: **Adjust full grid** (drag shifts the whole beat map), **Beat + following** (beats up to one bar to the left stay anchored and the following beats stretch; the tempo change is shown in %), or **Single beat**. Right-click a marker for *Set downbeat here* / *Set first beat here*. Fixed grids are turned into an editable beat map on the first edit, playback and export follow every edit immediately, and every edit can be undone. Correct the source beatgrid before arranging sections; changing its tempo later changes their beat lengths.
+- **Editable beatgrid:** nudge ±1/±10 ms, Alt+drag the grid on a clip, set the downbeat (Shift+click a beat line or "Set downbeat at target"). These work on beat maps too. BPM ×2 / ÷2, **tap tempo** (a hand-set BPM switches the track to a fixed grid), and reset to analysis.
+- **Beatgrid editor:** zoom in until beat markers (▼) appear on the clips. Use the persistent **Beatgrid** mode controls (or hover a marker for the popup): **Adjust full grid** (drag shifts the whole beat map), **Beat + following** (beats up to one bar to the left stay anchored and the following beats stretch; the tempo change is shown in %), or **Single beat**. Right-click a marker for *Set downbeat here* / *Set first beat here*. Fixed grids are turned into an editable beat map on the first edit, playback and export follow every edit immediately, and every edit can be undone. Correct the source beatgrid before arranging sections; grid changes are protected after section edits.
 - **Section editing:** choose **Select** above the timeline and drag a range on one waveform. The existing snap setting chooses beats, half bars or bars. **Ctrl+C / Ctrl+V** copies and inserts within the same source song at the playhead; **Ctrl+D** repeats directly after the selection; **Delete + close gap** shortens the song. Following songs and their transitions move together, as do later samples, effect blocks and manual tempo nodes. **Loop selection** auditions the range. Original audio stays untouched; edits are saved in the mix JSON and each command has one Undo step. **Move** restores normal clip dragging. Section edges have short splice fades, and continuous source ranges merge automatically.
 - **Timeline editing:** **Ctrl+E** splits the clip under the mouse (or at the playhead) into two clips that keep their source offsets. Drag a clip's left/right edge to trim or extend it, and drag a track's end onto the next clip to close a gap. Drag a transition's blue bar to move the incoming track. Drag a track down into a sample lane (or a sample up onto the decks). **Alt+drag** a sample to duplicate it, and drag the white squares on a sample to set its fade-in/out. Moves and trims snap magnetically to the playhead, clip edges and transition boundaries (yellow snap line), otherwise to the grid.
 - **AI stem separation:** one click, or automatically for new tracks, splits a song into **drums, bass, melody and vocals** with [HT-Demucs](https://github.com/facebookresearch/demucs). It runs in the background through ONNX Runtime, on your **NVIDIA GPU via CUDA** when available, otherwise on the CPU. Stems are cached on disk, so each track is separated only once.
@@ -55,15 +64,15 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 
 ## Screenshots
 
-Captured from MixStudio 0.16 on Linux using the app's generated demo music.
+Captured on Linux using the app's generated demo music. Beatgrid and Track show 0.17; the other views show 0.16.
 
-| Transition editing | Beatgrid corrections |
+| Transition editing | Track properties |
 |---|---|
-| ![Transition presets, stem controls and volume curves](docs/screenshots/transition.png) | ![Dynamic beatgrid and precise timing controls](docs/screenshots/track.png) |
+| ![Transition presets, stem controls and volume curves](docs/screenshots/transition.png) | ![Track properties and stem controls](docs/screenshots/track.png) |
 
-| Zoomed beat markers | Automation and effects |
+| Beatgrid and assisted beatmatch | Automation and effects |
 |---|---|
-| ![Editable beat markers at high zoom](docs/screenshots/grid.png) | ![Automation curve and effect blocks](docs/screenshots/effects.png) |
+| ![Beatgrid modes, fine timing controls and assisted beatmatch](docs/screenshots/grid.png) | ![Automation curve and effect blocks](docs/screenshots/effects.png) |
 
 ![Playlist with tempo, key and transition information](docs/screenshots/playlist.png)
 
@@ -212,7 +221,7 @@ selftest); 2:3 maps two track beats onto three mix beats. *Auto* (default) switc
 is clearly closer to the tempo it joins, which also fixes Auto tempo gliding 140 → 70 BPM between such tracks.
 
 ### Beatgrids (v0.15)
-- **Grid mode per clip** (Track tab): *Fixed* (straight grid at the average BPM), *Dynamic* (the analysed beat map),
+- **Grid mode per clip** (Beatgrid tab): *Fixed* (straight grid at the average BPM), *Dynamic* (the analysed beat map),
   *Flex* (piecewise grid that follows tempo jumps and ramps, found by change-point detection on the tempo curve),
   *Imported* (Rekordbox/Traktor grid, when the track came from an import) and *Manual* (set automatically when you
   edit the grid). Split clips keep their own mode.
@@ -227,3 +236,8 @@ is clearly closer to the tempo it joins, which also fixes Auto tempo gliding 140
 - Short splice fades and section-aware WSOLA pre-roll avoid carrying audio from the previous section across a cut. Beat Slice evaluates its source endpoints inside the current section.
 - Selection clears when its song, grid or timeline placement changes, preventing actions on an outdated range. Edited trim gestures use the drag-start arrangement so dragging back restores material within the same gesture.
 - Dynamic/Flex/Imported grid evaluation preserves fine fractional offsets. Returning to an analysed grid restores its compatible source BPM; Flex is never enabled automatically.
+
+### Beatgrid controls and assisted alignment (v0.17)
+The **Beatgrid** tab separates source-grid correction from clip placement. Fine corrections use source seconds; positive values move grid markers later in the source, making the corresponding audio play earlier against the mix grid. The selected target is the nearest visible clip beat to the playhead. **Beat + following** stretches from the marker one bar before the target.
+
+**Measure overlap** compares paired bass attacks on a background thread. Positive offset means incoming attacks are late. The report distinguishes consistent offset, drift and inconsistent attacks. Only sufficiently supported constant offsets enable **Correct incoming grid**. The check rejects sparse attacks and limited coverage; it does not infer the musical downbeat or rewrite analysis. Changed timing or audio invalidates the result, and each applied correction has one Undo step.

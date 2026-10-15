@@ -9,6 +9,7 @@ mod export;
 mod fx;
 mod dialogs;
 mod beatmap;
+mod beatcheck;
 mod app;
 mod audio;
 mod engine;

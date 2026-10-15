@@ -134,6 +134,9 @@ mod grid_regressions {
 pub const GRID_MODES: [&str; 5] = ["Fixed", "Dynamic", "Flex", "Imported", "Manual"];
 pub const GRID_HELP: [&str; 5] = ["Linear grid at the average BPM", "The analysed beat map (follows small tempo drift)", "Piecewise beat map that follows deliberate tempo jumps and ramps",
     "The beat grid from Rekordbox / Traktor (when the track came from an import)", "Your own edits (beatgrid editing switches to Manual)"];
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GridScope { All, Single, Following }
+
 impl Track {
     pub fn source_grid(&self) -> Grid { self.grid_raw().scaled(self.beat_mult) }
     pub fn grid(&self) -> Grid { self.source_grid().arranged(&self.sections, self.trim_in) }
@@ -188,6 +191,36 @@ impl Track {
         let anchor = m.u_of(self.offset);
         let r = f(&mut m);
         self.offset = m.t_of(anchor); self.map = Some(Arc::new(m)); self.normalize_grid(); r
+    }
+    /// Explicit correction in source seconds. Arranged clips must keep their cut timing.
+    pub fn adjust_grid(&mut self, scope: GridScope, beat: f64, seconds: f64) -> Result<f64, String> {
+        if !self.sections.is_empty() { return Err("Correct the source grid before arranging sections (Undo restores the source clip).".into()); }
+        if !beat.is_finite() || !seconds.is_finite() || seconds.abs() > 0.25 || self.bpm <= 0.0 {
+            return Err("Invalid beatgrid correction.".into());
+        }
+        let target = self.start_beat + (beat - self.start_beat).round();
+        if scope != GridScope::All && (target < self.vis_start(0.0) || target > self.end(0.0) || (self.beat_mult-1.0).abs()>1e-9) {
+            return Err("Select a beat inside an uncut clip with a 1:1 beat ratio.".into());
+        }
+        if seconds == 0.0 { return Ok(0.0); }
+        let before=self.sec_at(target);
+        if scope == GridScope::All {
+            if self.grid().dynamic() { self.edit_map(|m|m.shift(seconds)); }
+            else { self.offset+=seconds; self.normalize_grid(); }
+        } else {
+            // Materialize displayed beat positions, including fractional analysis anchors.
+            // Editing the nearest original map node would also move neighbouring displayed beats.
+            let m=BeatMap::from_grid(&self.grid_raw(),self.start_beat,self.duration,self.bpm);
+            self.map=Some(Arc::new(m)); self.grid_mode=4;
+            let k=(target-self.start_beat).round() as i64;
+            let index=self.map_index(k); let pivot=self.map_index(k-4);
+            self.edit_map(|m|match scope {
+                GridScope::Single=>{m.move_single(index,seconds);},
+                GridScope::Following=>{m.stretch_following(pivot,index,seconds);},
+                GridScope::All=>unreachable!(),
+            });
+        }
+        Ok(self.sec_at(target)-before)
     }
     /// keep `offset` the first downbeat in the file (step whole bars), without moving the audio
     pub fn normalize_grid(&mut self) {
@@ -447,4 +480,38 @@ pub fn secs_on(c: &[(f64, f64)], bpm: f64, a: f64, b: f64) -> f64 {
     if c.is_empty() { return (b - a) * 60.0 / bpm; }
     let n = ((b - a).abs() * 16.0).ceil().max(1.0) as usize; let h = (b - a) / n as f64;
     (0..n).map(|k| 60.0 / bpm_on(c, bpm, a + (k as f64 + 0.5) * h) * h).sum()
+}
+
+#[cfg(test)]
+mod precise_grid_controls {
+    use super::*;
+    fn track()->Track { serde_json::from_str(r#"{"path":"test.wav","title":"Test","artist":"Test","bpm":120.0,"offset":0.25,"key":"8A","duration":24.0,"start_beat":0.0,"lane":0,"trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]}}"#).unwrap() }
+    #[test]
+    fn grid_scope_keeps_placement_and_unselected_beats_anchored() {
+        for scope in [GridScope::All,GridScope::Single,GridScope::Following] {
+            let mut t=track();let before=t.clone();let d=t.adjust_grid(scope,16.0,0.010).unwrap();assert!((d-0.010).abs()<1e-8);
+            assert_eq!(t.start_beat,before.start_beat);
+            assert!((t.sec_at(16.0)-before.sec_at(16.0)-0.010).abs()<1e-8);
+            if scope!=GridScope::All { assert_eq!(t.sec_at(12.0),before.sec_at(12.0)); }
+            if scope==GridScope::Single { assert_eq!(t.sec_at(15.0),before.sec_at(15.0));assert_eq!(t.sec_at(17.0),before.sec_at(17.0)); }
+            if scope==GridScope::Following { assert!(t.sec_at(24.0)>before.sec_at(24.0)+0.010); }
+        }
+    }
+    #[test]
+    fn single_beat_preserves_fractional_analysis_anchor_and_clamps_safely() {
+        let mut t=track(); t.offset=0.361;
+        t.map=Some(Arc::new(BeatMap {beats:(0..64).map(|i|0.25+i as f64*0.5+(i as f64*0.3).sin()*0.005).collect(),bpm:120.0}));
+        let old=t.clone(); t.adjust_grid(GridScope::Single,16.0,0.010).unwrap();
+        for k in 0..40 { if k!=16 { assert!((t.sec_at(k as f64)-old.sec_at(k as f64)).abs()<1e-9,"beat {k} moved"); } }
+        for _ in 0..8 { t.adjust_grid(GridScope::Single,16.0,0.25).unwrap(); }
+        assert!(t.sec_at(16.0)<t.sec_at(17.0)); assert!(t.sec_at(16.0)>t.sec_at(15.0));
+        let mut t=track(); t.beat_mult=2.0; let old=serde_json::to_string(&t).unwrap();
+        assert!(t.adjust_grid(GridScope::Single,16.0,0.01).is_err()); assert_eq!(serde_json::to_string(&t).unwrap(),old);
+    }
+    #[test]
+    fn arranged_sections_and_invalid_targets_are_protected_without_partial_edits() {
+        let mut t=track();t.sections=vec![(0.0,4.0),(0.0,4.0)];let before=serde_json::to_string(&t).unwrap();
+        assert!(t.adjust_grid(GridScope::All,4.0,0.01).is_err());assert_eq!(serde_json::to_string(&t).unwrap(),before);
+        let mut t=track();let before=serde_json::to_string(&t).unwrap();assert!(t.adjust_grid(GridScope::Single,1000.0,0.01).is_err());assert_eq!(serde_json::to_string(&t).unwrap(),before);
+    }
 }

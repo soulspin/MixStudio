@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.17.0-beta
+
+- Add a dedicated, scrollable Beatgrid tab with persistent whole-grid / following / single-beat modes, ±1/±10 ms corrections, beat navigation, zoom, downbeat, fixed/tap BPM and reset to analysis.
+- Separate source analysis, active grid, mix tempo and beat ratio; simplify Track properties so controls remain reachable.
+- Measure bass-attack alignment in transition overlaps on a background worker. Report offset, drift, scatter and usable beat count; enable an explicit constant correction only for consistent evidence. Reject silence, continuous bass, short/poor coverage and inconsistent attacks.
+- Preserve neighbouring displayed beats for fractional-anchor single-beat edits, clamp markers inside neighbours, protect section arrangements, invalidate stale reports and undo corrections in one step. Targeted edits and measurements currently require a 1:1 beat ratio.
+- Keep Dynamic as the default, retain the 0.16.1 playback buffer fix, and add detector, grid safety and headless interaction regressions.
+
 ## 0.16.1-beta
 
 - Use the audio backend's default buffer instead of forcing a 512-frame buffer. On Linux/ALSA the forced buffer implied 128-frame periods (about 2.9 ms at 44.1 kHz), which produced an observed underrun with the native editor running. The backend's default provided a larger scheduling margin and passed the same native playback check without an underrun.
