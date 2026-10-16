@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.22.0-beta
+
+- Test ten local audio files (eight byte-distinct streams) using reproducible fresh analysis and separately implemented attack-agreement proxies across temporal thirds. Record limits without claiming annotated ground truth.
+- Gate dynamic grids on rhythmic repetition and sustained attack contrast; reject isolated/noise/carrier false evidence. Avoid unstable correlations from too few lag pairs.
+- Use gain-safe `ln_1p` onset energy and relative normalisation for very quiet rhythmic audio. Refine using supported attacks while interpolating weak sections.
+- Cache optional source rhythm evidence and show source-qualified insufficient/sparse-support advisories in Beatgrid. Upgrade analysis cache to v11 while preserving saved grids and library tags.
+
+
 ## 0.21.2-beta
 
 - Use pinned Signalsmith Stretch for polyphonic key lock, with source-grid mapping, sample-rate conversion and explicit input/output latency compensation. Continue compatible logical fragments without restarting stretcher phase.

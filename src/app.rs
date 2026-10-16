@@ -369,7 +369,7 @@ impl App {
             let p = dir.join(format!("{}-{}-{stamp}.wav", t.title.chars().filter(|c| c.is_alphanumeric()).take(24).collect::<String>(), name.to_lowercase()));
             if let Err(e) = engine::write_wav(&p, &clip.l, &clip.r, clip.sr) { let _ = tx.send(Msg::Status(format!("Could not write the clip: {e}"))); return; }
             let nt = t.clip_track(sa, sb, p.display().to_string(), format!("{} ({name})", t.title), free);
-            let an = Analysis { bpm: nt.bpm, offset: nt.offset, key: nt.key.clone(), duration: nt.duration, peaks: analysis::peaks(&clip), peak_sr: clip.sr, sections: vec![],
+            let an = Analysis { rhythm:None, bpm: nt.bpm, offset: nt.offset, key: nt.key.clone(), duration: nt.duration, peaks: analysis::peaks(&clip), peak_sr: clip.sr, sections: vec![],
                 title: nt.title.clone(), artist: nt.artist.clone(), version: 0, beats: nt.map.as_ref().map(|m| m.beats.clone()).unwrap_or_default(), flex: vec![], recommended_grid_mode: 1 };
             let _ = tx.send(Msg::Clip(nt, clip, an,docid));
         });
@@ -1844,6 +1844,9 @@ impl App {
                     }); });
                     if mode!=cur { self.snapshot(); if mode==1 { if let Some((_,a))=self.store.get(&t.path) { self.mix.tracks[i].map=a.beat_map(); } } self.mix.tracks[i].set_grid_mode(mode as u8); }
                 });
+                if let Some((_,a))=self.store.get(&t.path) {
+                    if let Some(note)=a.rhythm.as_ref().and_then(|e|e.warning()) {ui.colored_label(C::LIGHT_YELLOW,note);}
+                }
                 if !t.sections.is_empty() { ui.colored_label(C::LIGHT_YELLOW,"Grid editing is protected after section edits. Undo the section edits to correct the source grid first."); }
                 if t.grid_mode==2 { ui.colored_label(C::LIGHT_YELLOW,"Flex can cause audible tempo jumps. Dynamic is recommended for steady tracks."); }
                 ui.horizontal_wrapped(|ui| {
@@ -2209,6 +2212,15 @@ mod section_ui_tests {
         ctx.run(egui::RawInput {screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(width,800.0))),events,..Default::default()},|ctx| {
             egui::CentralPanel::default().show(ctx,|ui|app.timeline(ui));
         })
+    }
+    #[test]
+    fn beatgrid_surfaces_provisional_source_analysis() {
+        let (mut a,ctx,_rx,dir)=setup();
+        Arc::make_mut(&mut a.store.get_mut("test.wav").unwrap().1).rhythm=Some(crate::analysis::RhythmEvidence::default());
+        let draw=|a:&mut App|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,800.0))),..Default::default()},|ctx| {egui::CentralPanel::default().show(ctx,|ui|a.beatgrid_tab(ui));});
+        draw(&mut a);let out=draw(&mut a);
+        assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::epaint::Shape::Text(t) if t.galley.text().contains("BPM is provisional"))),"uncertain source BPM looked trustworthy");
+        a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
     }
     #[test]
     fn header_status_does_not_overlap_navigation() {

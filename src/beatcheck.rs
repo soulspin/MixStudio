@@ -76,6 +76,12 @@ fn combined_attack(a:&Audio,center:f64,period:f64)->Option<(f64,bool)> {
     }
 }
 
+/// Read-only evidence for the ignored local-corpus diagnostic; residuals are not ground truth.
+#[cfg(test)]
+pub(crate) fn diagnostic_attacks(a: &Audio, center: f64, period: f64) -> (Option<f64>, Option<f64>, Option<(f64, bool)>) {
+    (attack(a, center, period), percussion_attack(a, center, period), combined_attack(a, center, period))
+}
+
 #[cfg(test)]
 pub fn measure(a:&Track,aa:&Audio,b:&Track,ab:&Audio,start:f64,end:f64,bpm_at:impl Fn(f64)->f64)->Result<Report,String> {
     inspect(a,aa,b,ab,start,end,bpm_at).0
