@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.19.0-beta
+
+- Keep independent background recovery snapshots of changed projects, offer recoverable copies at startup, and require Save as after restoration. Provide recovery status, explicit discard, and corruption/version handling.
+- Save projects through a synced temporary sibling and atomic replacement, retaining the previous version as a .bak file. Reject invalid snapshots and enforce the same 64 MiB recovery limit on writes and reads.
+- Wait for confirmed recovery writes before switching away from unsaved work or closing normally; keep the app/project open on protection failure. Recheck edits made while a checkpoint was in flight.
+- Reset document-specific drag/edit state and save destinations at project boundaries; reject stale Save As, export, audio-picker, analysis, sample-render and relink callbacks.
+- Relink all occurrences of moved source audio after explicit recording confirmation, retain grids/sections/cue/phrase data, reject insufficient source length and conflicting metadata, and undo relinks in one step.
+- Add Ctrl+S / Ctrl+Shift+S, recovery demo view, and storage, throttling, failure, shutdown, project-boundary and relink regressions.
+
 ## 0.18.0-beta
 
 - Combine bass attack evidence with broadband percussion onsets, reject conflicting timing, and expose weak versus supported sampled beats in the transition comparison view.

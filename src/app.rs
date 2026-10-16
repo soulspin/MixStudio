@@ -1,3 +1,4 @@
+mod persistence;
 mod comparison;
 use crate::analysis::{self, Analysis, Audio, PEAK_HOP};
 use crate::engine::{self, Cmd, Shared, Snap};
@@ -47,11 +48,12 @@ enum TlDrag { Edge { ti: usize, left: bool, original: Box<Track> }, Fade { ti: u
 
 struct BeatCheckState { evidence:Vec<crate::beatcheck::BeatEvidence>, stamp:Vec<u64>, incoming:usize, result:Option<Result<crate::beatcheck::Report,String>> }
 
-enum Msg { BeatCheck(Vec<u64>,Result<crate::beatcheck::Report,String>,Vec<crate::beatcheck::BeatEvidence>), Found(Vec<PathBuf>), ImportPick(PathBuf), Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>), Clip(Track, Audio, Analysis) }
+enum Msg { RelinkReady(String,String,Result<Option<(PathBuf,Audio,Analysis)>,String>), BeatCheck(Vec<u64>,Result<crate::beatcheck::Report,String>,Vec<crate::beatcheck::BeatEvidence>), Found(Vec<PathBuf>), ImportPick(PathBuf), Picked(Vec<PathBuf>, Option<usize>,String), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>,String), Status(String), Opened(PathBuf), SaveTo(PathBuf,String), ExportTo(PathBuf,String), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>), Clip(Track, Audio, Analysis,String) }
 
 struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::AtomicU32> }
 
 pub struct App {
+    persistence:persistence::Persistence,
     comparison:comparison::Comparison, active_loop:Option<(f64,f64)>,
     beat_check: Option<BeatCheckState>,
     section_state: Vec<u64>, select_sections: bool, section_range: Option<(usize, f64, f64)>, section_drag: Option<(usize, f64)>, section_copy: Option<crate::sections::SectionCopy>,
@@ -145,7 +147,8 @@ impl App {
             let r = crate::stems::get_or_separate(&key, &j.audio, &dl, &j.prog);
             if let Ok(e) = crate::stems::session_info() { *ep.lock().unwrap() = e; }
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
-        let mut a = App { comparison:Default::default(), active_loop:None, beat_check:None, section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
+        let persistence=persistence::Persistence::new(lib.recovery_dir(),&Mix::default(),demo.is_none());
+        let mut a = App { persistence, comparison:Default::default(), active_loop:None, beat_check:None, section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
             file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, scratch_win: false, scratch_play: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib,
@@ -173,6 +176,11 @@ impl App {
                     a.snapshot(); a.mix.insert_section(first,at,&copy).unwrap();
                     a.sel=Some(first); a.select_sections=true; a.section_range=Some((first,at,at+32.0)); a.remember_section();
                     a.tab=Tab::Playlist; a.ppb=4.5; a.scroll=72.0; a.seek(at); a.status="Demo: 8 bars repeated · source audio untouched · Undo restores edits".into();
+                }
+                Ok("recovery") => {
+                    let mut mix=a.mix.clone();mix.name="Electric Vision — recovered rehearsal".into();
+                    let record=crate::recovery::Record::new(None,mix);
+                    if let Ok(path)=crate::recovery::write_record(&a.persistence.dir,&record){a.persistence.entries=vec![crate::recovery::Entry{path,record}];a.persistence.window=true;}
                 }
                 Ok("compare") => { let i=a.sel_in.unwrap(); a.open_comparison(i); a.request_beat_check(i,ctx); }
                 Ok("grid") => { a.tab=Tab::Grid; a.sel=Some(0); a.ppb=28.0; a.scroll=48.0; a.seek(64.0); }
@@ -222,46 +230,43 @@ impl App {
         if cached || self.mix.auto_stems { self.request_stems(last); }
     }
     fn pick_files(&self, sample: Option<usize>) {
-        let tx = self.tx.clone();
+        let tx = self.tx.clone();let docid=self.persistence.id.clone();
         std::thread::spawn(move || {
             let f = ("Audio".to_string(), crate::library::EXTS.iter().map(|s| s.to_string()).collect());
             match crate::dialogs::run(crate::dialogs::Req::Files { title: "Add tracks".into(), filter: f }) {
-                Ok(Some(v)) => { let _ = tx.send(Msg::Picked(v, sample)); } Ok(None) => {}
+                Ok(Some(v)) => { let _ = tx.send(Msg::Picked(v, sample,docid)); } Ok(None) => {}
                 Err(e) => { let _ = tx.send(Msg::Status(format!("Add tracks: {e}"))); } }
         });
     }
     fn load_files(&mut self, v: Vec<PathBuf>, sample: Option<usize>) {
         self.snapshot(); self.loading += v.len();
-        let tx = self.tx.clone(); let at = self.beat();
+        let tx = self.tx.clone(); let at = self.beat(); let docid=self.persistence.id.clone();
         std::thread::spawn(move || for p in v {
             let r = analysis::load(&p).map_err(|e| e.to_string());
-            let _ = tx.send(Msg::Loaded(p, r, sample.map(|l| (l, at))));
+            let _ = tx.send(Msg::Loaded(p, r, sample.map(|l| (l, at)),docid.clone()));
         });
     }
-    fn save(&mut self, p: PathBuf) {
-        match std::fs::write(&p, serde_json::to_string_pretty(&self.mix).unwrap()) { Ok(_) => { self.status = format!("Saved: {}", p.display()); self.file = Some(p); } Err(e) => self.status = format!("Could not save: {e}") }
+    fn save(&mut self, p:PathBuf) {
+        match crate::recovery::save_project(&p,&self.mix) {
+            Ok(())=>{self.file=Some(p.clone());self.persistence.saved(&self.mix);self.status=format!("Saved: {} (previous version: .bak)",p.display());},
+            Err(e)=>self.status=format!("Could not save: {e}. The previous project file was kept."),
+        }
     }
-    fn open(&mut self, p: PathBuf) {
-        match std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str::<Mix>(&s).ok()) {
-            Some(m) => {
-                self.snapshot(); let paths: Vec<String> = m.tracks.iter().map(|t| t.path.clone()).filter(|x| !self.store.contains_key(x)).collect();
-                self.mix = m; self.file = Some(p); self.fix_sel();
-                self.loading += paths.len(); let tx = self.tx.clone();
-                std::thread::spawn(move || for p in paths { let pb = PathBuf::from(&p);
-                    let r = analysis::load(&pb).map_err(|e| e.to_string()); let _ = tx.send(Msg::Loaded(pb, r, Some((usize::MAX, 0.0)))); });
-            }
-            None => self.status = "Could not read the mix file".into(),
+    fn open(&mut self,p:PathBuf) {
+        match std::fs::read_to_string(&p).map_err(|e|e.to_string()).and_then(|s|serde_json::from_str::<Mix>(&s).map_err(|e|e.to_string())) {
+            Ok(mix)=>self.request_project(persistence::Target{mix,file:Some(p),clean:true,restored:None,original:None}),
+            Err(e)=>self.status=format!("Could not read the mix file: {e}"),
         }
     }
     fn dialog(&self, save: bool, kind: u8) {
-        let tx = self.tx.clone(); let name = self.mix.name.clone(); let fmt = self.export_fmt;
+        let tx = self.tx.clone(); let name = self.mix.name.clone(); let fmt = self.export_fmt;let docid=self.persistence.id.clone();
         std::thread::spawn(move || {
             use crate::dialogs::Req;
             let filter = if kind == 2 { (crate::export::FORMATS[fmt as usize].0.to_string(), vec![crate::export::FORMATS[fmt as usize].1.to_string()]) } else { ("MixStudio mix".to_string(), vec!["json".to_string()]) };
             let title = match kind { 0 => "Open mix", 1 => "Save mix", _ => "Export mix" }.to_string();
             let req = if save { Req::Save { title, filter, name: if kind == 2 { format!("{name}.{}", crate::export::FORMATS[fmt as usize].1) } else { format!("{name}.mixstudio.json") } } } else { Req::Open { title, filter } };
             let r = match crate::dialogs::run(req) { Ok(v) => v.and_then(|v| v.into_iter().next()), Err(e) => { let _ = tx.send(Msg::Status(e)); None } };
-            if let Some(p) = r { let _ = tx.send(match kind { 0 => Msg::Opened(p), 1 => Msg::SaveTo(p), _ => Msg::ExportTo(p) }); }
+            if let Some(p) = r { let _ = tx.send(match kind { 0 => Msg::Opened(p), 1 => Msg::SaveTo(p,docid), _ => Msg::ExportTo(p,docid) }); }
         });
     }
     fn build_snap(&self) -> Snap {
@@ -355,7 +360,7 @@ impl App {
         let ks = crate::model::lane_stems(t.stem_view, lane); let mut g = [0.0f32; 4]; for k in &ks { g[*k as usize] = 1.0; }
         let (sa, sb) = (t.sec_at(a), t.sec_at(b)); let name = crate::model::lane_name(t.stem_view, lane);
         let free = if self.mix.tracks.iter().any(|x| x.lane == 2 && x.vis_start(0.0) < b && x.end(0.0) > a) { 3 } else { 2 };
-        let tx = self.tx.clone(); self.status = format!("Rendering {name} clip…");
+        let tx = self.tx.clone(); let docid=self.persistence.id.clone(); self.status = format!("Rendering {name} clip…");
         std::thread::spawn(move || {
             let clip = crate::stems::render_clip(&au, &st, &g, sa, sb);
             let dir = std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".cache/mixstudio/clips"); let _ = std::fs::create_dir_all(&dir);
@@ -365,7 +370,7 @@ impl App {
             let nt = t.clip_track(sa, sb, p.display().to_string(), format!("{} ({name})", t.title), free);
             let an = Analysis { bpm: nt.bpm, offset: nt.offset, key: nt.key.clone(), duration: nt.duration, peaks: analysis::peaks(&clip), peak_sr: clip.sr, sections: vec![],
                 title: nt.title.clone(), artist: nt.artist.clone(), version: 0, beats: nt.map.as_ref().map(|m| m.beats.clone()).unwrap_or_default(), flex: vec![], recommended_grid_mode: 1 };
-            let _ = tx.send(Msg::Clip(nt, clip, an));
+            let _ = tx.send(Msg::Clip(nt, clip, an,docid));
         });
     }
     fn scratch_window(&mut self, ctx: &egui::Context) {
@@ -598,26 +603,34 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self,_gl:Option<&eframe::glow::Context>) {
+        if !self.persistence.allow_close {self.persistence.probe(&self.mix,self.file.clone(),true);}self.persistence.worker.flush();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
         for t in self.mix.tracks.iter_mut() { if t.flex.is_none() { if let Some((_, an)) = self.store.get(&t.path) { if an.flex.len() >= 16 { t.flex = an.flex_map(); } } } }
         self.mix.resolve_ratios();
         self.validate_section();
+        self.poll_persistence();
         while let Ok(m) = self.rx.try_recv() { match m {
+            Msg::RelinkReady(id,old,result)=>{if id!=self.persistence.id {continue;}self.persistence.relink_busy=false;
+                match result {Ok(Some((path,audio,analysis)))=>self.persistence.candidate=Some(persistence::Candidate{old,path,audio:Arc::new(audio),analysis:Arc::new(analysis),confirmed:false}),Ok(None)=>{},Err(e)=>self.status=format!("Could not read replacement: {e}")}
+            },
             Msg::BeatCheck(stamp,r,evidence) => { if let Some(state)=&mut self.beat_check { if state.stamp==stamp { state.result=Some(r); state.evidence=evidence; } } },
             Msg::Found(v) => { self.status = if v.is_empty() { "No DJ libraries found in the usual places: use Browse… or paste the file path".into() } else { format!("Found {} DJ libraries (Library tab)", v.len()) }; self.lib_found = v; }
             Msg::ImportPick(p) => self.import_file(p),
-            Msg::Picked(v, s) => self.load_files(v, s),
-            Msg::Loaded(p, r, s) => { self.loading = self.loading.saturating_sub(1); match r {
-                Ok((au, an)) => { if s.is_some_and(|x| x.0 == usize::MAX) { let k = p.display().to_string(); self.store.insert(k.clone(), (Arc::new(au), Arc::new(an)));
+            Msg::Picked(v, s,id) => self.finish_pick(v,s,&id),
+            Msg::Loaded(p, r, s,id) => { self.loading = self.loading.saturating_sub(1); if id!=self.persistence.id {continue;} match r {
+                Ok((au, an)) => { self.persistence.load_errors.remove(&p.display().to_string()); if s.is_some_and(|x| x.0 == usize::MAX) { let k = p.display().to_string(); self.store.insert(k.clone(), (Arc::new(au), Arc::new(an)));
                         let cached = analysis::cache_key(&p).map(|c| crate::stems::cache_file(&c).exists()).unwrap_or(false);
                         if cached || self.mix.auto_stems { if let Some(i) = self.mix.tracks.iter().position(|t| t.path == k) { self.request_stems(i); } } }
                     else { self.status = format!("{} — {:.1} BPM, {}", an.title, an.bpm, an.key); self.insert(p, au, an, s); } }
-                Err(e) => self.status = format!("Could not read {}: {e}", p.display()) } }
+                Err(e) => { self.status = format!("Could not read {}: {e}", p.display());self.persistence.load_errors.insert(p.display().to_string(),e); } } }
             Msg::Stems(p, r) => { self.stem_prog.remove(&p); match r { Ok(st) => { self.stems.insert(p.clone(), st); self.stem_err.remove(&p); self.status = "Stems ready".into(); }
                 Err(e) => { self.status = format!("Stem separation failed: {e}"); self.stem_err.insert(p, e); } } }
-            Msg::Clip(t, au, an) => { self.snapshot(); let p = t.path.clone(); self.status = format!("{} copied to Sample {}", t.title, t.lane - 1); self.store.insert(p, (Arc::new(au), Arc::new(an))); self.mix.tracks.push(t); self.sel = Some(self.mix.tracks.len() - 1); }
+            Msg::Clip(t, au, an,id) => { if id!=self.persistence.id {continue;} self.snapshot(); let p = t.path.clone(); self.status = format!("{} copied to Sample {}", t.title, t.lane - 1); self.store.insert(p, (Arc::new(au), Arc::new(an))); self.mix.tracks.push(t); self.sel = Some(self.mix.tracks.len() - 1); }
             Msg::LibFolders(v) => { self.add_lib_folders(v); }
-            Msg::Status(s) => self.status = s, Msg::Opened(p) => self.open(p), Msg::SaveTo(p) => self.save(p), Msg::ExportTo(p) => self.export(p),
+            Msg::Status(s) => self.status = s, Msg::Opened(p) => self.open(p), Msg::SaveTo(p,id) => self.finish_save(p,&id), Msg::ExportTo(p,id) => if id==self.persistence.id {self.export(p)},
         } }
         self.lib.poll();
         self.scratch_window(ctx);
@@ -640,6 +653,7 @@ impl eframe::App for App {
         self.validate_comparison();
         let _ = self.out.tx.send(Cmd::Snap(Arc::new(self.build_playback_snap())));
         if !ctx.wants_keyboard_input() {
+            if ctx.input(|i|i.modifiers.command && i.key_pressed(egui::Key::S)) { if ctx.input(|i|i.modifiers.shift) || self.file.is_none(){self.dialog(true,1);}else if let Some(p)=self.file.clone(){self.save(p);} }
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) { self.toggle_playback(); }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) { if ctx.input(|i| i.modifiers.shift) { self.do_redo() } else { self.do_undo() } }
             if ctx.input(|i| i.key_pressed(egui::Key::Delete)) { if self.section_range.is_some() { self.section_action(3); } else if !self.select_sections { self.remove_sel(); } }
@@ -656,6 +670,7 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("bottom").exact_height(if self.tab==Tab::Compare {380.0} else if self.tab==Tab::Library {340.0} else {232.0}).frame(egui::Frame::none().fill(C::from_rgb(28, 29, 33)).inner_margin(10.0)).show(ctx, |ui| self.bottom(ui));
         self.transport(ctx);
         egui::SidePanel::right("master").exact_width(42.0).resizable(false).frame(egui::Frame::none().fill(BG)).show(ctx, |ui| self.master_meter(ui));
+        self.persistence_windows(ctx);
         self.timeline_rect = egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| self.timeline(ui)).response.rect;
         // drag from the library onto the timeline (or the tab bar / playlist area) adds the tracks to the mix
         if let Some(p) = egui::DragAndDrop::payload::<LibDrag>(ctx) {
@@ -671,6 +686,10 @@ impl eframe::App for App {
             p.rect_stroke(r.shrink(8.0), 12.0, Stroke::new(3.0_f32, ACCENT));
             p.text(r.center(), Align2::CENTER_CENTER, format!("Drop {} file(s) to add to the mix", hovering), FontId::proportional(24.0), ACCENT);
         }
+        if ctx.input(|i|i.viewport().close_requested()) && !self.persistence.allow_close && self.persistence.enabled && serde_json::to_string(&self.mix).unwrap()!=self.persistence.saved_body() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);self.protect_close();
+        }
+        self.close_if_ready(ctx);
     }
 }
 
@@ -683,22 +702,27 @@ impl App {
     fn top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top").exact_height(44.0).frame(egui::Frame::none().fill(PANEL).inner_margin(egui::Margin::symmetric(10.0, 6.0))).show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
-                if ui.add(egui::Button::new("🏠").min_size(vec2(30.0, 28.0))).on_hover_text("New empty mix").clicked() && !self.mix.tracks.is_empty() { self.snapshot(); self.mix = Mix::default(); self.clear_section(); self.sel = None; self.sel_in = None; }
+                if ui.add(egui::Button::new("🏠").min_size(vec2(30.0, 28.0))).on_hover_text("New empty mix").clicked() { self.new_project(); }
                 ui.spacing_mut().item_spacing.x = 0.0;
                 ui.label(egui::RichText::new("Mix").color(ACCENT).size(20.0).strong());
                 ui.label(egui::RichText::new("Studio").color(TXT).size(20.0).strong());
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.add_space(14.0);
-                let name = format!("☰  {}   ⏷", self.mix.name);
+                let name = format!("☰  {}{}   ⏷", self.mix.name,if self.persistence.error.is_some(){" ⚠ *"}else if self.persistence.dirty{" *"}else{""});
                 ui.scope(|ui| {
                     let wv = &mut ui.visuals_mut().widgets; for w in [&mut wv.inactive, &mut wv.hovered, &mut wv.open] { w.bg_stroke = Stroke::new(1.5_f32, ACCENT); }
                     ui.menu_button(egui::RichText::new(name).size(14.0), |ui| {
                         ui.horizontal(|ui| { ui.label("Name:"); ui.text_edit_singleline(&mut self.mix.name); });
                         ui.separator();
-                        if ui.button("New mix").clicked() { self.snapshot(); self.mix = Mix::default(); self.clear_section(); self.sel = None; self.file = None; ui.close_menu(); }
+                        if ui.button("New mix").clicked() { self.new_project(); ui.close_menu(); }
                         if ui.button("Open mix…").clicked() { self.dialog(false, 0); ui.close_menu(); }
                         if ui.button("Save").clicked() { match self.file.clone() { Some(p) => self.save(p), None => self.dialog(true, 1) } ui.close_menu(); }
                         if ui.button("Save as…").clicked() { self.dialog(true, 1); ui.close_menu(); }
+                        ui.separator();
+                        ui.label(if !self.persistence.enabled {"Autosave disabled for demo".to_string()}else if !self.persistence.dirty {"No unsaved changes".to_string()}else if self.persistence.pending_write {"Autosaving…".to_string()}else if let Some(at)=self.persistence.last_good{format!("Recovery copy: {} seconds ago",crate::recovery::now().saturating_sub(at))}else{"Autosave: checks changes every second, writes at most every 15 seconds".into()});
+                        if let Some(e)=&self.persistence.error{ui.colored_label(C::LIGHT_RED,format!("Recovery failed: {e}"));}
+                        if ui.button("Recover unsaved projects…").clicked(){self.persistence.show_scan=true;let _=self.persistence.worker.tx.send(crate::recovery::Job::Scan);ui.close_menu();}
+                        let missing=self.missing_sources().len();if ui.button(format!("Locate missing audio… ({missing})")).clicked(){self.persistence.relink_window=true;ui.close_menu();}
                     });
                 });
                 let mid = ui.max_rect().center().x; let cur = ui.cursor().min.x; ui.add_space((mid - 200.0 - cur).max(10.0));
@@ -2136,6 +2160,75 @@ mod section_ui_tests {
         ctx.run(egui::RawInput {screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(width,800.0))),events,..Default::default()},|ctx| {
             egui::CentralPanel::default().show(ctx,|ui|app.timeline(ui));
         })
+    }
+    #[test]
+    fn recovery_window_restore_button_opens_a_copy_and_close_protects_it() {
+        let (mut a,ctx,_rx,dir)=setup();let mut mix=a.mix.clone();mix.name="Recovered by click".into();let record=crate::recovery::Record::new(None,mix);let path=crate::recovery::write_record(&a.persistence.dir,&record).unwrap();
+        a.persistence.entries=vec![crate::recovery::Entry{path,record}];a.persistence.window=true;
+        let draw=|a:&mut App,events|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,800.0))),events,..Default::default()},|ctx|{
+            a.top_bar(ctx);a.tab_bar(ctx);egui::TopBottomPanel::bottom("qa_bottom").exact_height(232.0).show(ctx,|ui|a.bottom(ui));a.transport(ctx);a.persistence_windows(ctx);egui::CentralPanel::default().show(ctx,|ui|a.timeline(ui));
+        });
+        draw(&mut a,vec![]);let out=draw(&mut a,vec![]);
+        let pos=out.shapes.iter().find_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape {if t.galley.text()=="Restore copy"{Some(t.pos+t.galley.size()*0.5)}else{None}}else{None}).unwrap();
+        let pointer=|pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:egui::Modifiers::default()};
+        draw(&mut a,vec![egui::Event::PointerMoved(pos),pointer(true)]);draw(&mut a,vec![pointer(false)]);
+        a.persistence.worker.flush();a.poll_persistence();a.persistence.worker.flush();a.poll_persistence();
+        assert_eq!(a.mix.name,"Recovered by click");assert!(a.file.is_none());assert!(!a.persistence.window);
+        a.protect_close();a.persistence.worker.flush();a.poll_persistence();a.close_if_ready(&ctx);assert!(a.persistence.allow_close);
+        let (entries,_)=crate::recovery::scan(&a.persistence.dir);assert!(entries.iter().any(|e|e.record.id==a.persistence.id&&e.record.mix.name=="Recovered by click"));
+        a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn old_dialogs_and_drags_cannot_write_into_a_new_document() {
+        let (mut a,_ctx,_rx,dir)=setup();let old=a.persistence.id.clone();let track=a.mix.tracks[0].clone();
+        a.tl_drag=Some(TlDrag::Edge{ti:0,left:true,original:Box::new(track)});a.drag=Some((0,4.0,0.0));a.bm_drag=Some(BmDrag{ti:0,k:4,i:4,pivot:0,span:2.0,lastx:0.0,mode:BmMode::Single});
+        a.new_project();a.persistence.worker.flush();a.poll_persistence();assert!(a.tl_drag.is_none());assert!(a.drag.is_none());assert!(a.bm_drag.is_none());
+        let path=dir.join("wrong-project.json");a.finish_save(path.clone(),&old);a.finish_pick(vec![dir.join("old.wav")],None,&old);
+        assert!(!path.exists());assert_eq!(a.loading,0);assert!(a.mix.tracks.is_empty());
+        a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn normal_close_waits_for_confirmed_recovery_and_failure_keeps_app_open() {
+        let (mut a,ctx,_rx,dir)=setup();a.protect_close();a.close_if_ready(&ctx);assert!(!a.persistence.allow_close);
+        a.persistence.worker.flush();a.poll_persistence();a.close_if_ready(&ctx);assert!(a.persistence.allow_close);
+        let (records,_)=crate::recovery::scan(&a.persistence.dir);assert!(records.iter().any(|e|!e.record.mix.tracks.is_empty()));
+        a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
+        let (mut a,ctx,_rx,dir)=setup();std::fs::create_dir_all(a.persistence.dir.parent().unwrap()).unwrap();std::fs::write(&a.persistence.dir,b"blocked").unwrap();
+        a.protect_close();a.persistence.worker.flush();a.poll_persistence();a.close_if_ready(&ctx);assert!(!a.persistence.allow_close);assert!(a.persistence.error.is_some());
+        a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn relink_is_one_undo_step_and_short_replacement_is_rejected() {
+        let (mut a,_ctx,_rx,dir)=setup();let old=a.mix.tracks[0].path.clone();let (audio,analysis)=a.store[&old].clone();let before=serde_json::to_string(&a.mix).unwrap();
+        a.persistence.candidate=Some(persistence::Candidate{old:old.clone(),path:dir.join("moved.wav"),audio:audio.clone(),analysis:analysis.clone(),confirmed:true});
+        a.apply_relink();assert_eq!(a.undo.len(),1);assert_ne!(a.mix.tracks[0].path,old);a.do_undo();assert_eq!(serde_json::to_string(&a.mix).unwrap(),before);
+        let short=Arc::new(Audio{sr:8000,l:vec![0.0;8000],r:vec![0.0;8000]});a.persistence.candidate=Some(persistence::Candidate{old,path:dir.join("short.wav"),audio:short,analysis,confirmed:true});
+        a.apply_relink();assert!(a.undo.is_empty());assert_eq!(serde_json::to_string(&a.mix).unwrap(),before);
+        a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn project_switch_protects_unsaved_mix_and_clears_old_save_destination() {
+        let (mut a,_ctx,_rx,dir)=setup();a.mix.name="Unsaved session".into();a.file=Some(dir.join("old.json"));
+        a.new_project();assert_eq!(a.mix.name,"Unsaved session");a.persistence.worker.flush();a.poll_persistence();
+        assert_eq!(a.mix.name,"My mix");assert!(a.file.is_none());assert!(a.undo.is_empty());
+        let (records,bad)=crate::recovery::scan(&a.persistence.dir);assert_eq!(bad,0);assert!(records.iter().any(|e|e.record.mix.name=="Unsaved session"));
+        a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn failed_recovery_checkpoint_keeps_current_mix_and_failed_manual_save_stays_dirty() {
+        let (mut a,_ctx,_rx,dir)=setup();std::fs::create_dir_all(a.persistence.dir.parent().unwrap()).unwrap();std::fs::write(&a.persistence.dir,b"not a directory").unwrap();let before=serde_json::to_string(&a.mix).unwrap();
+        a.new_project();a.persistence.worker.flush();a.poll_persistence();assert_eq!(serde_json::to_string(&a.mix).unwrap(),before);assert!(a.persistence.error.is_some());
+        a.save(dir.join("missing-parent/project.json"));assert!(a.file.is_none());assert_eq!(serde_json::to_string(&a.mix).unwrap(),before);
+        a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn restored_copy_requires_save_as_and_manual_save_cleans_recovery() {
+        let (mut a,_ctx,_rx,dir)=setup();let mut recovered=Mix::default();recovered.name="Recovered".into();
+        let record=crate::recovery::Record::new(Some(dir.join("original.json")),recovered.clone());let path=crate::recovery::write_record(&a.persistence.dir,&record).unwrap();
+        a.request_project(persistence::Target{mix:recovered,file:None,clean:false,restored:Some(path.clone()),original:record.original});
+        a.persistence.worker.flush();a.poll_persistence();assert_eq!(a.mix.name,"Recovered");assert!(a.file.is_none());
+        let saved=dir.join("recovered.json");a.save(saved.clone());a.persistence.worker.flush();assert!(!path.exists());assert_eq!(a.file,Some(saved));assert!(!a.persistence.dirty);
+        drop(a);std::fs::remove_dir_all(dir).ok();
     }
     #[test]
     fn comparison_waveform_click_assigns_the_selected_target_and_preserves_project() {

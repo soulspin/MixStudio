@@ -217,6 +217,8 @@ pub struct Library {
 }
 
 impl Library {
+    pub fn recovery_dir(&self)->PathBuf {self.cfg_dir.join("recovery")}
+
     pub fn new(cfg_dir: PathBuf, data_dir: PathBuf, repaint: Arc<dyn Fn() + Send + Sync>) -> Library {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut l = Library { cfg: load_config(&cfg_dir), index: load_index(&data_dir), states: HashMap::new(), report: None, scanning: false, progress: (0, 0), analysing: (0, 0), gen: 1,

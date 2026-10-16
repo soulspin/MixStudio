@@ -2,13 +2,24 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.18](https://img.shields.io/badge/status-beta%200.18-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.19](https://img.shields.io/badge/status-beta%200.19-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.18:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.19:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
-![MixStudio 0.18: compare transition attacks and correct phase and drift](docs/screenshots/compare.png)
+![MixStudio 0.19: recover an unsaved project copy](docs/screenshots/recovery.png)
+
+## New in 0.19
+
+- **Autosave and recovery:** check for changes once a second and keep a separate recovery snapshot approximately every 15 seconds while editing. Disk writes run on a background worker. Startup offers recoverable copies; **Restore copy** opens one without overwriting the original and requires **Save as…**.
+- **Safer manual saves:** write a sibling temporary file, sync it, then replace the project. Keep the previous saved version beside it as `<project>.bak`. Failed writes preserve the previous file.
+- **Protected project changes and normal close:** before New/Open replaces unsaved work, wait for a confirmed recovery write. Normal close also waits for confirmation; failure leaves the current project/app open. Old file dialogs, analysis results and edit drags cannot mutate the next document.
+- **Relink moved audio:** use the project menu's **Locate missing audio…**, choose the same recording, review it and confirm. Update every split/arranged occurrence while keeping timing, beatgrids, sections, cues and phrase edits. Replacements shorter than source material used by the project are rejected; relinking has one Undo step.
+
+Use the project-name menu for **Recover unsaved projects…**, **Locate missing audio…** and recovery status/errors. **Ctrl+S** saves and **Ctrl+Shift+S** opens Save as. A `*` beside the project name indicates unsaved changes (updated on the next one-second check).
+
+Recovery files live in the app's configuration folder under `recovery` (`~/.config/mixstudio/recovery` on Linux). Keep them for later or explicitly discard an individual copy. Successful manual saving removes the active recovery and any copy restored into that document. To use a manual `.bak` backup, copy it to a `.json` filename and open that copy. Recovery snapshots are limited to 64 MiB; oversized or invalid snapshots fail visibly rather than replace a usable copy. Forced termination can lose changes made since the latest completed autosave.
 
 ## New in 0.18
 
@@ -50,7 +61,7 @@ Live DJ software is built for performing: two decks, a crossfader, and one shot 
 
 It's native, fast, and doesn't need an account. No sign-up, no license keys, no cloud. It's your music on your machine.
 
-## Features (Beta 0.18)
+## Features (Beta 0.19)
 
 - **Timeline decks:** songs alternate on Deck 1 and Deck 2 as coloured clips with 3-band waveforms (low/mid/high), beat and bar lines, bar numbers and heuristic phrase tags (Intro / Build / Drop / Breakdown / Outro). There's an overview strip, a time ruler, zoom (Ctrl+scroll), scrolling, a playhead, click-to-seek, and clip dragging with snapping (off / beat / half bar / bar).
 - **Automatic analysis:** global BPM (tempogram + full-track comb + beat regression, about 0.02 BPM), musical key (chromagram plus Krumhansl profiles) shown as **Camelot** codes, and bar 1. Results and waveforms are cached and re-analysed automatically when the analysis improves.
@@ -81,7 +92,7 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 
 ![Non-destructive section editing](docs/screenshots/sections.png)
 
-Captured on Linux using the app's generated demo music. Compare shows 0.18, Beatgrid and Track show 0.17, and the other views show 0.16.
+Captured on Linux using the app's generated demo music. Recovery shows 0.19, Compare shows 0.18, Beatgrid and Track show 0.17, and the other views show 0.16.
 
 | Transition editing | Track properties |
 |---|---|
@@ -97,7 +108,6 @@ Captured on Linux using the app's generated demo music. Compare shows 0.18, Beat
 
 ## Roadmap
 
-- Project autosave, recovery and easier relinking of missing audio
 - Export a selected region, CUE sheets and split files
 - Section clipboard across songs, plus more flexible arrangement trim/extend tools
 - Better analysis confidence and correction workflows for difficult tracks
