@@ -16,9 +16,9 @@ impl Curve { pub const ALL: [Curve; 4] = [Curve::Off, Curve::Build, Curve::Peak,
 #[derive(Clone, Debug)]
 pub struct Item { pub key: String, pub bpm: f64, pub energy: f64 }
 
-fn camelot(s: &str) -> Option<(i32, char)> {
-    let s = s.trim(); let (n, l) = s.split_at(s.len().checked_sub(1)?);
-    let n: i32 = n.parse().ok()?; let l = l.chars().next()?.to_ascii_uppercase();
+pub fn camelot(s: &str) -> Option<(i32, char)> {
+    let s = s.trim(); let (last, l) = s.char_indices().next_back()?;
+    let n: i32 = s[..last].parse().ok()?; let l = l.to_ascii_uppercase();
     if (1..=12).contains(&n) && (l == 'A' || l == 'B') { Some((n, l)) } else { None }
 }
 

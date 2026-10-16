@@ -18,6 +18,22 @@ const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub fn is_audio(p: &Path) -> bool { p.extension().and_then(|e| e.to_str()).is_some_and(|e| EXTS.contains(&e.to_ascii_lowercase().as_str())) }
 
+/// Preserve byte-backed drops as source files that saved projects can reopen.
+pub fn store_drop(root: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let name=Path::new(name).file_name().filter(|n| !n.is_empty()).unwrap_or(std::ffi::OsStr::new("drop.wav"));
+    std::fs::create_dir_all(root)?;
+    let dir=root.join(crate::recovery::unique_id()); std::fs::create_dir(&dir)?;
+    let p=dir.join(name);
+    let result=(|| {
+        let mut options=std::fs::OpenOptions::new(); options.write(true).create_new(true);
+        #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        let mut file=options.open(&p)?; file.write_all(bytes)?; file.sync_all()
+    })();
+    if let Err(e)=result { let _=std::fs::remove_file(&p); let _=std::fs::remove_dir(&dir); return Err(e); }
+    Ok(p)
+}
+
 fn home() -> PathBuf { std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")) }
 /// ~/.config/mixstudio (Linux), ~/Library/Application Support/MixStudio (macOS), %APPDATA%\MixStudio (Windows).
 pub fn config_dir() -> PathBuf {
@@ -50,10 +66,69 @@ pub struct Entry {
     /// file could not be read (tags); kept so it is not retried until it changes
     #[serde(default)] pub error: Option<String>,
     #[serde(default)] pub analysis_error: Option<String>,
+    #[serde(default)] pub analysis_version: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct Index { pub version: u32, pub entries: Vec<Entry> }
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn dropped_sources_with_the_same_name_never_replace_each_other() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-drop-{}",crate::recovery::unique_id()));
+        let first=store_drop(&dir,"song.wav",b"first").unwrap();
+        let second=store_drop(&dir,"song.wav",b"second").unwrap();
+        assert_ne!(first,second);
+        assert_eq!(std::fs::read(first).unwrap(),b"first");
+        let escaped=store_drop(&dir,"../outside.wav",b"safe").unwrap();
+        assert!(escaped.strip_prefix(&dir).unwrap().components().all(|c|matches!(c,std::path::Component::Normal(_))));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn unicode_imported_keys_can_be_sorted_and_filtered() {
+        let entries: Vec<_>=["F♯","♭","8A",""].iter().map(|k| Entry {key:Some(k.to_string()),..Default::default()}).collect();
+        let filter=Filter {query:"",key_ref:Some("8A"),bpm_ref:None};
+        assert_eq!(view(&entries,&filter,SortCol::Key,true),vec![2]);
+        let filter=Filter {key_ref:None,..filter};
+        assert_eq!(view(&entries,&filter,SortCol::Key,true).len(),4);
+    }
+    #[test]
+    fn old_library_analysis_is_invalidated_without_losing_tags() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-index-{}",crate::recovery::unique_id()));
+        let ix=Index {version:INDEX_VERSION,entries:vec![Entry {title:"Keep me".into(),bpm:Some(128.0),key:Some("8A".into()),..Default::default()}]};
+        save_index(&dir,&ix).unwrap();
+        let restored=load_index(&dir);
+        assert_eq!(restored.entries[0].title,"Keep me");
+        assert!(restored.entries[0].bpm.is_none(),"outdated BPM survives detector upgrade");
+        let mut current=restored;
+        current.entries[0].analysis_version=crate::analysis::ANALYSIS_VERSION;
+        current.entries[0].bpm=Some(127.98);
+        current.entries[0].analysis_error=Some("current decoder error".into());
+        save_index(&dir,&current).unwrap();
+        let restored=load_index(&dir);
+        assert_eq!(restored.entries[0].bpm,Some(127.98));
+        assert_eq!(restored.entries[0].analysis_error.as_deref(),Some("current decoder error"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn stale_analysis_results_cannot_overwrite_a_rescanned_library() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-stale-index-{}",crate::recovery::unique_id()));
+        let mut l=Library::new(dir.clone(),dir,Arc::new(||{}));
+        l.index.entries=vec![Entry {path:"same.wav".into(),bpm:Some(130.0),..Default::default()}]; l.reindex();
+        let old=Arc::new(AtomicBool::new(true));
+        l.tx.send(Event::Analysed(old.clone(),"same.wav".into(),Ok((120.0,"8A".into(),60.0)))).unwrap();
+        let unrelated=Arc::new(AtomicBool::new(false));
+        l.tx.send(Event::Analysed(unrelated.clone(),"same.wav".into(),Ok((110.0,"8A".into(),60.0)))).unwrap();
+        l.analysing=(2,5);
+        l.tx.send(Event::AnalysisDone(unrelated)).unwrap();
+        l.poll();
+        assert_eq!(l.index.entries[0].bpm,Some(130.0));
+        assert_eq!(l.analysing,(2,5));
+        drop(old);
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FolderState { Available(usize), Missing, NotResponding }
@@ -68,7 +143,14 @@ fn write_json<T: Serialize>(p: &Path, v: &T) -> std::io::Result<()> {
 }
 pub fn load_config(dir: &Path) -> Config { read_json(&dir.join("library.json")) }
 pub fn save_config(dir: &Path, c: &Config) -> std::io::Result<()> { write_json(&dir.join("library.json"), c) }
-pub fn load_index(dir: &Path) -> Index { let i: Index = read_json(&dir.join("library-index.json")); if i.version == INDEX_VERSION { i } else { Index { version: INDEX_VERSION, entries: vec![] } } }
+pub fn load_index(dir: &Path) -> Index {
+    let mut i: Index = read_json(&dir.join("library-index.json"));
+    if i.version != INDEX_VERSION { return Index { version: INDEX_VERSION, entries: vec![] }; }
+    for e in &mut i.entries { if e.analysis_version != crate::analysis::ANALYSIS_VERSION {
+        e.bpm=None; e.key=None; e.analysis_error=None;
+    } }
+    i
+}
 pub fn save_index(dir: &Path, i: &Index) -> std::io::Result<()> { write_json(&dir.join("library-index.json"), i) }
 
 /// Run `f` on a helper thread; None if it takes longer than `t` (the thread is left to finish on its own) or panics.
@@ -182,7 +264,7 @@ pub enum SortCol { Title, Artist, Bpm, Key, Duration, Genre, Folder }
 pub struct Filter<'a> { pub query: &'a str, pub key_ref: Option<&'a str>, pub bpm_ref: Option<(f64, f64)> }
 
 fn camelot_ord(k: &Option<String>) -> (i32, u8) {
-    let Some(k) = k else { return (99, 0) }; let (n, l) = k.split_at(k.len().saturating_sub(1)); (n.parse().unwrap_or(99), l.bytes().next().unwrap_or(0))
+    k.as_deref().and_then(crate::automix::camelot).map(|(n,l)| (n,l as u8)).unwrap_or((99,0))
 }
 
 /// Indices of matching entries, sorted.
@@ -204,7 +286,7 @@ pub fn view(entries: &[Entry], f: &Filter, sort: SortCol, asc: bool) -> Vec<usiz
     v
 }
 
-pub enum Event { Imported(u64, Vec<Result<crate::import::ExtLib, String>>), Progress(usize, usize), Scanned(Index, ScanReport, Vec<(String, FolderState)>), Analysed(String, Result<(f64, String, f64), String>), AnalysisDone }
+pub enum Event { Imported(u64, Vec<Result<crate::import::ExtLib, String>>), Progress(usize, usize), Scanned(Index, ScanReport, Vec<(String, FolderState)>), Analysed(Arc<AtomicBool>, String, Result<(f64, String, f64), String>), AnalysisDone(Arc<AtomicBool>) }
 
 /// Library state owned by the UI thread; scanning and analysis run on background threads.
 pub struct Library {
@@ -277,8 +359,8 @@ impl Library {
         let left = Arc::new(std::sync::atomic::AtomicUsize::new(workers));
         for _ in 0..workers { let (qrx, tx, cancel, rp, left) = (qrx.clone(), self.tx.clone(), self.cancel.clone(), self.repaint.clone(), left.clone());
             std::thread::Builder::new().name("mixstudio-analyse".into()).spawn(move || {
-                while let Ok(p) = qrx.recv() { if cancel.load(Ordering::Relaxed) { break; } let r = analyse(&p); let _ = tx.send(Event::Analysed(p, r)); rp(); }
-                if left.fetch_sub(1, Ordering::Relaxed) == 1 { let _ = tx.send(Event::AnalysisDone); rp(); }
+                while let Ok(p) = qrx.recv() { if cancel.load(Ordering::Relaxed) { break; } let r = analyse(&p); let _ = tx.send(Event::Analysed(cancel.clone(), p, r)); rp(); }
+                if left.fetch_sub(1, Ordering::Relaxed) == 1 { let _ = tx.send(Event::AnalysisDone(cancel.clone())); rp(); }
             }).ok(); }
     }
     /// Apply background results; call once per frame.
@@ -295,11 +377,12 @@ impl Library {
                 self.index = Index { version: INDEX_VERSION, entries: ix.entries.into_iter().filter(|e| keep.contains(&e.folder)).collect() };
                 self.states = st.into_iter().collect(); self.report = Some(rep); let _ = save_index(&self.data_dir, &self.index); self.reindex();
                 if self.rescan_pending { self.rescan_pending = false; self.rescan(); } else { self.start_analysis(); } }
-            Event::Analysed(p, r) => { self.analysing.0 += 1;
+            Event::Analysed(cancel, p, r) => { if !Arc::ptr_eq(&cancel,&self.cancel) || cancel.load(Ordering::Relaxed) {continue;} self.analysing.0 += 1;
                 if let Some(&i) = self.pos.get(&p) { let e = &mut self.index.entries[i];
-                    match r { Ok((b, k, d)) => { e.bpm = Some(b); e.key = Some(k); if e.duration <= 0.0 { e.duration = d; } } Err(err) => e.analysis_error = Some(err) } }
+                    e.analysis_version=crate::analysis::ANALYSIS_VERSION;
+                    match r { Ok((b, k, d)) => { e.bpm = Some(b); e.key = Some(k); e.analysis_error=None; if e.duration <= 0.0 { e.duration = d; } } Err(err) => e.analysis_error = Some(err) } }
                 self.gen += 1; self.unsaved += 1; if self.unsaved >= 25 { self.unsaved = 0; let _ = save_index(&self.data_dir, &self.index); } }
-            Event::AnalysisDone => { self.unsaved = 0; let _ = save_index(&self.data_dir, &self.index); self.analysing = (0, 0); }
+            Event::AnalysisDone(cancel) => { if !Arc::ptr_eq(&cancel,&self.cancel) || cancel.load(Ordering::Relaxed) {continue;} self.unsaved = 0; let _ = save_index(&self.data_dir, &self.index); self.analysing = (0, 0); }
         } }
     }
     #[allow(dead_code)]

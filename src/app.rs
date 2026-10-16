@@ -641,9 +641,10 @@ impl eframe::App for App {
         for f in dropped {
             if let Some(p) = f.path { files.push(p); }
             else if let Some(bytes) = f.bytes {
-                let dir = std::env::temp_dir().join("mixstudio-drops"); let _ = std::fs::create_dir_all(&dir);
-                let name = if f.name.is_empty() { format!("drop-{}.wav", files.len()) } else { f.name.clone() };
-                let p = dir.join(name); if std::fs::write(&p, &bytes[..]).is_ok() { files.push(p); }
+                let dir=crate::library::config_dir().join("sources");
+                match crate::library::store_drop(&dir,&f.name,&bytes) {
+                    Ok(p)=>files.push(p), Err(e)=>self.status=format!("Could not preserve dropped audio: {e}"),
+                }
             }
         }
         let dirs: Vec<PathBuf> = files.iter().filter(|p| p.is_dir()).cloned().collect();
@@ -1475,7 +1476,7 @@ impl App {
                 let t = &mut self.mix.tracks[ti]; let mut x = xb(pp.x) - t.start_beat; if self.snapping != Snapping::Off { x = (x * 4.0).round() / 4.0; }
                 if let Some(p) = t.auto.get_mut(k) { if i < p.len() {
                     let lo = if i > 0 { p[i - 1].0 + 1e-3 } else { f64::MIN }; let hi = if i + 1 < p.len() { p[i + 1].0 - 1e-3 } else { f64::MAX };
-                    p[i] = (x.clamp(lo, hi), v); self.status = format!("{}: {}", crate::model::AUTO_PARAMS[k], if k == 0 { format!("{:.0} %", v * 100.0) } else { format!("{:+.0} %", v * 100.0) }); } }
+                    p[i] = (if lo <= hi { x.clamp(lo, hi) } else { p[i].0 }, v); self.status = format!("{}: {}", crate::model::AUTO_PARAMS[k], if k == 0 { format!("{:.0} %", v * 100.0) } else { format!("{:+.0} %", v * 100.0) }); } }
             } } else { self.auto_drag = None; }
         }
         if let Some((ti, what, lane, b)) = stem_act { if ti < self.mix.tracks.len() {
@@ -1826,8 +1827,8 @@ impl App {
                 let editable=!self.lock && t.sections.is_empty();
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(format!("Beatgrid · {}",t.title)).strong());
-                    if let Some((_,a))=self.store.get(&t.path) { ui.label(format!("Analysis {:.2} BPM",a.bpm)); }
-                    ui.label(format!("Grid {:.2} BPM · Mix {:.2} BPM · Ratio ×{:.2}",t.bpm,self.mix.bpm_at(self.beat()),t.beat_mult));
+                    if let Some((_,a))=self.store.get(&t.path) { ui.label(format!("Analysis {:.3} BPM",a.bpm)); }
+                    ui.label(format!("Grid {:.3} BPM · Mix {:.2} BPM · Ratio ×{:.2}",t.bpm,self.mix.bpm_at(self.beat()),t.beat_mult));
                     let cur=if t.grid().dynamic() { t.grid_mode.min(4) as usize } else { 0 };
                     let mut mode=cur;
                     ui.add_enabled_ui(editable,|ui| { egui::ComboBox::from_id_salt("grid_source").selected_text(crate::model::GRID_MODES[cur]).show_ui(ui,|ui| {

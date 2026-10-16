@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.20.0-beta
+
+- Derive precise steady BPM from actual sample-level attack observations with minimum count, span, coverage and residual gates. Remove integer-tempo rounding, interpolate unsupported interior beats between observed attacks, and decline dynamic maps with fewer than 16 supported attacks.
+- Choose stereo rhythm projection using onset evidence with a conservative mid preference; retain opposite-polarity rhythm without cancelling centred kicks under a sustained wide pad. Keep key analysis unchanged.
+- Guard autocorrelation lags for short high-rate audio, bump analysis cache to version 10, refresh old derived library values, and reject stale/cancelled library analysis events.
+- Fix duplicate automation point insertion and invalid drag bounds, preserve explicit split ratios, resolve Auto-tempo reorders against the requested order, and parse arbitrary UTF-8 keys safely.
+- Preserve byte-backed drops in unique persistent source paths with exclusive writes instead of overwriting same-named temporary audio.
+- Add synthetic ground-truth, stereo, sparse/ramp, library migration/race, edit and file-safety regressions; document the substantial audit and open priorities.
+
 ## 0.19.0-beta
 
 - Keep independent background recovery snapshots of changed projects, offer recoverable copies at startup, and require Save as after restoration. Provide recovery status, explicit discard, and corruption/version handling.

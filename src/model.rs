@@ -289,7 +289,7 @@ impl Mix {
     pub fn length_beats(&self) -> f64 { self.tracks.iter().map(|t| t.end(self.bpm)).fold(0.0, f64::max) }
     /// lay main tracks out in current order with `overlap_bars` overlap, alternating decks
     pub fn relayout(&mut self, order: &[usize], overlap_bars: f64) {
-        self.resolve_ratios();
+        self.resolve_ratios_in(order);
         let mut cursor = 0.0f64;
         for (k, &i) in order.iter().enumerate() {
             let bpm = self.bpm;
@@ -317,7 +317,7 @@ impl Mix {
 /// Camelot distance (0 = same, 1 = adjacent/relative)
 #[allow(dead_code)]
 pub fn camelot_dist(a: &str, b: &str) -> i32 {
-    let p = |s: &str| -> Option<(i32, char)> { let (n, l) = s.split_at(s.len().checked_sub(1)?); Some((n.parse().ok()?, l.chars().next()?)) };
+    let p = crate::automix::camelot;
     match (p(a), p(b)) {
         (Some((na, la)), Some((nb, lb))) => { let d = (na - nb).rem_euclid(12); let d = d.min(12 - d); d + if la != lb { 1 } else { 0 } }
         _ => 6,
@@ -337,14 +337,14 @@ impl Mix {
             let (vs,ve)=(t.vis_start(0.0),t.end(0.0)); if b-vs<0.1 || ve-b<0.1 { return None; }
             let mut right=t.clone(); right.set_sections(t.section_spans(b,ve)); right.start_beat+=b-vs;
             for points in &mut right.auto { for p in points { p.0-=b-vs; } }
-            right.fade_in=0.0; right.trans=Default::default(); right.locked=false;
+            right.fade_in=0.0; right.trans=Transition {ratio:t.trans.ratio,..Default::default()}; right.locked=false;
             let spans=t.section_spans(vs,b); self.tracks[ti].set_sections(spans); self.tracks[ti].fade_out=0.0;
             self.tracks.push(right); return Some(self.tracks.len()-1);
         }
         let s = t.sec_at(b);
         if s <= t.trim_in + 0.05 || s >= t.duration - t.trim_out - 0.05 { return None; }
         let mut right = t.clone();
-        right.trim_in = s; right.fade_in = 0.0; right.trans = Default::default(); right.locked = false;
+        right.trim_in = s; right.fade_in = 0.0; right.trans = Transition {ratio:t.trans.ratio,..Default::default()}; right.locked = false;
         let left = &mut self.tracks[ti]; left.trim_out = left.duration - s; left.fade_out = 0.0;
         self.tracks.push(right); Some(self.tracks.len() - 1)
     }
@@ -427,7 +427,9 @@ impl Track {
     /// Insert or replace a point (track-relative beat x) keeping the lane sorted; returns its index.
     pub fn auto_set(&mut self, k: usize, x: f64, v: f32) -> usize {
         while self.auto.len() < AUTO_PARAMS.len() { self.auto.push(vec![]); }
-        let p = &mut self.auto[k]; let i = p.partition_point(|q| q.0 < x); p.insert(i, (x, v)); i
+        let p = &mut self.auto[k];
+        p.retain(|q| (q.0-x).abs() >= 1e-6);
+        let i = p.partition_point(|q| q.0 < x); p.insert(i, (x, v)); i
     }
 }
 
@@ -454,9 +456,12 @@ impl Mix {
     /// Resolve every track's beat ratio (explicit, or auto against the previous track in Auto tempo,
     /// otherwise against the mix tempo where the track starts). The downbeat stays on its mix beat.
     pub fn resolve_ratios(&mut self) -> bool {
+        self.resolve_ratios_in(&self.main_order())
+    }
+    fn resolve_ratios_in(&mut self, order: &[usize]) -> bool {
         let fixed_curve = if self.tempo_mode == 1 { vec![] } else { self.tempo_curve() };
-        let order = self.main_order(); let mut prev: Option<f64> = None; let mut res = vec![];
-        for &i in &order { let t = &self.tracks[i];
+        let mut prev: Option<f64> = None; let mut res = vec![];
+        for &i in order { let t = &self.tracks[i];
             let m = match RATIOS[(t.trans.ratio as usize).min(RATIOS.len() - 1)].1 { Some(m) => m,
                 None => if self.tempo_mode == 1 { prev.map(|p| auto_mult(t.bpm, p)).unwrap_or(1.0) } else { auto_mult(t.bpm, bpm_on(&fixed_curve, self.bpm, t.start_beat)) } };
             prev = Some(t.bpm * m); res.push((i, m)); }
@@ -470,6 +475,43 @@ impl Mix {
     pub fn bpm_at(&self, b: f64) -> f64 { bpm_on(&self.tempo_curve(), self.bpm, b) }
     /// Seconds between two mix beats along the tempo curve.
     pub fn secs(&self, a: f64, b: f64) -> f64 { secs_on(&self.tempo_curve(), self.bpm, a, b) }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    fn track(bpm: f64, start: f64) -> Track {
+        serde_json::from_value(serde_json::json!({"path":"test.wav","title":"Test","artist":"Test","bpm":bpm,"offset":0.0,"key":"8A","duration":120.0,"start_beat":start,"lane":0,"trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]}})).unwrap()
+    }
+    #[test]
+    fn reordered_auto_tempo_layout_survives_next_frame() {
+        let mut m=Mix::default(); m.tempo_mode=1;
+        m.tracks=vec![track(70.0,0.0),track(140.0,200.0),track(140.0,400.0)];
+        m.resolve_ratios(); m.relayout(&[1,0,2],16.0);
+        let before=m.transitions();
+        assert!(!m.resolve_ratios(), "layout used ratios from the old order");
+        assert_eq!(m.transitions(),before);
+        assert!(before.iter().all(|x| (x.3-x.2-64.0).abs()<0.01));
+    }
+    #[test]
+    fn automation_replaces_a_point_at_the_same_time() {
+        let mut t=track(120.0,0.0);
+        for v in [0.1,0.5,0.9] { t.auto_set(0,8.0,v); }
+        assert_eq!(t.auto[0],vec![(8.0,0.9)]);
+    }
+    #[test]
+    fn split_keeps_explicit_timing_ratio() {
+        for arranged in [false,true] {
+            let mut m=Mix::default(); m.bpm=120.0;
+            let mut t=track(80.0,0.0); t.trans.ratio=4;
+            if arranged { t.set_sections(vec![(0.0,40.0),(50.0,120.0)]); }
+            m.tracks.push(t); m.resolve_ratios();
+            let end=m.tracks[0].end(m.bpm);
+            let right=m.split(0,100.0).unwrap(); m.resolve_ratios();
+            assert!((m.tracks[right].vis_start(m.bpm)-100.0).abs()<1e-8);
+            assert!((m.tracks[right].end(m.bpm)-end).abs()<1e-8);
+        }
+    }
 }
 pub fn bpm_on(c: &[(f64, f64)], bpm: f64, b: f64) -> f64 {
     if c.is_empty() { return bpm; } let v: Vec<(f64, f32)> = vec![]; let _ = v;

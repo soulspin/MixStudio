@@ -31,12 +31,126 @@ mod grid_recommendation_tests {
     }
 }
 
+#[cfg(test)]
+mod precision_tests {
+    use super::*;
+
+    #[test]
+    fn fractional_tempo_does_not_accumulate_integer_rounding_drift() {
+        for expected in [127.98, 128.025] {
+            let sr = 22050;
+            let times: Vec<_> = (0..768).map(|k| 0.37 + k as f64 * 60.0 / expected).collect();
+            let (m, _) = crate::testgen::synth_kicks(&times, (times.last().unwrap() + 1.0) as f32, sr);
+            let (bpm, _, beats) = detect_beats(&m, sr);
+            let mut errors: Vec<_> = times[4..times.len()-4].iter().map(|t| beats.iter().map(|b| (b-t).abs()).fold(f64::INFINITY, f64::min)).collect();
+            errors.sort_by(f64::total_cmp);
+            let drift = (bpm / expected - 1.0).abs() * 360.0;
+            eprintln!("precision expected={expected} bpm={bpm:.7} drift360={drift:.6}s median={:.6}s p95={:.6}s", errors[errors.len()/2], errors[errors.len()*95/100]);
+            assert!(drift < 0.005, "fractional tempo drift: {drift:.6}s over six minutes ({bpm:.7} vs {expected})");
+            assert!(errors[errors.len()*95/100] < 0.005, "beat p95 exceeds 5ms");
+            let matched:Vec<_>=times[4..times.len()-4].iter().map(|t|beats.iter().enumerate().min_by(|a,b|(a.1-t).abs().total_cmp(&(b.1-t).abs())).unwrap().0).collect();
+            assert!(matched.windows(2).all(|w|w[1]==w[0]+1),"grid skipped or added beats inside the evaluated span");
+        }
+    }
+
+    #[test]
+    fn opposite_polarity_stereo_retains_rhythm() {
+        let sr = 22050;
+        let times: Vec<_> = (0..96).map(|k| 0.37 + k as f64 * 60.0 / 123.4).collect();
+        let (l, _) = crate::testgen::synth_kicks(&times, 48.0, sr);
+        let r = l.iter().map(|x| -x).collect();
+        let an = analyse(&Audio {sr, l, r}, "Polarity".into(), String::new(), Path::new("polarity.wav"));
+        assert!((an.bpm - 123.4).abs() < 0.01, "lost stereo rhythm: {}", an.bpm);
+        assert!(times[4..90].iter().all(|t| an.beats.iter().any(|b| (b-t).abs() < 0.005)), "lost beat positions");
+    }
+
+    #[test]
+    fn wide_sustained_pad_cannot_hide_centred_kicks() {
+        let sr=22050;
+        let times:Vec<_>=(0..96).map(|k|0.37+k as f64*60.0/123.4).collect();
+        let (kick,_)=crate::testgen::synth_kicks(&times,48.0,sr);
+        let mut l=Vec::new(); let mut r=Vec::new();
+        for (i,k) in kick.iter().enumerate() {
+            let pad=0.5*(2.0*std::f32::consts::PI*440.0*i as f32/sr as f32).sin();
+            l.push(k+pad); r.push(k-pad);
+        }
+        let (bpm,_,_)=detect_beats(&rhythm_mono(&Audio {sr,l,r}),sr);
+        assert!((bpm-123.4).abs()<0.01,"sustained side channel stole tempo: {bpm}");
+    }
+
+    #[test]
+    fn short_audio_at_normal_sample_rates_does_not_panic() {
+        for sr in [22050, 44100, 48000, 96000] {
+            let mut m = vec![0.0; sr as usize]; m[sr as usize/2]=0.5;
+            let (bpm, offset, _) = detect_beats(&m, sr);
+            assert!(bpm.is_finite() && offset.is_finite());
+        }
+    }
+
+    #[test]
+    fn beat_precision_across_sample_rates_tempos_and_missing_kicks() {
+        for (sr,expected) in [(22050,90.25),(44100,123.4),(48000,128.025),(96000,170.3)] {
+            let times:Vec<_>=(0..160).map(|k|3.37+k as f64*60.0/expected).collect();
+            let audible:Vec<_>=times.iter().enumerate().filter(|(i,_)| !(48..64).contains(i) && i%13!=0).map(|(_,t)|*t).collect();
+            let (m,_)=crate::testgen::synth_kicks(&audible,(times.last().unwrap()+1.0) as f32,sr);
+            let (bpm,_,beats)=detect_beats(&m,sr);
+            let mut errors:Vec<_>=times[4..156].iter().map(|t|beats.iter().map(|b|(b-t).abs()).fold(f64::INFINITY,f64::min)).collect();
+            errors.sort_by(f64::total_cmp);
+            eprintln!("matrix sr={sr} expected={expected} bpm={bpm:.6} p95={:.6}s",errors[errors.len()*95/100]);
+            assert!((bpm-expected).abs()<0.01,"incorrect BPM {bpm} vs {expected}");
+            assert!(errors[errors.len()*95/100]<0.005,"beat precision lost at {sr} Hz");
+        }
+    }
+
+    #[test]
+    fn steady_tempo_fit_rejects_a_deliberate_tempo_ramp() {
+        let beats=crate::testgen::ramp_times(120.0,130.0,180.0,0.37);
+        let observed:Vec<_>=beats.iter().enumerate().map(|(i,&t)|(i as f64,t)).collect();
+        assert!(steady_tempo(&observed,125.0).is_none());
+    }
+    #[test]
+    fn isolated_attack_is_not_evidence_for_a_steady_tempo_fit() {
+        let (m,_)=crate::testgen::synth_kicks(&[0.37],60.0,22050);
+        let coarse=detect_bpm(&m,22050).0;
+        let (bpm,_,beats)=detect_beats(&m,22050);
+        assert_eq!(bpm,coarse,"inferred silent beats changed BPM");
+        assert!(beats.is_empty(),"one attack must not produce a trusted dynamic grid");
+    }
+    #[test]
+    fn end_to_end_ramp_keeps_variable_timing_instead_of_claiming_a_steady_fit() {
+        let times=crate::testgen::ramp_times(120.0,130.0,180.0,0.37);
+        let (m,_)=crate::testgen::synth_kicks(&times,181.0,22050);
+        let coarse=detect_bpm(&m,22050).0;
+        let (bpm,_,beats)=detect_beats(&m,22050);
+        assert_eq!(bpm,coarse,"variable attacks must not qualify for a steady fit");
+        assert!(beats.windows(2).all(|w|w[1]>w[0]));
+        let mut errors:Vec<_>=times[8..times.len()-8].iter().map(|t|beats.iter().map(|b|(b-t).abs()).fold(f64::INFINITY,f64::min)).collect();
+        errors.sort_by(f64::total_cmp);
+        assert!(errors[errors.len()*95/100]<0.010,"ramp beat p95 exceeded10ms");
+    }
+
+    #[test]
+    #[ignore = "requires local source recordings; reports estimates without claiming ground truth"]
+    fn inspect_saved_sources_without_changing_the_project() {
+        let path=std::env::var("MIXSTUDIO_DIAGNOSTIC_PROJECT").unwrap();
+        let bytes=std::fs::read(&path).unwrap();
+        let mix:crate::model::Mix=serde_json::from_slice(&bytes).unwrap();
+        for (i,t) in mix.tracks.iter().enumerate() {
+            let (audio,title,artist)=decode(Path::new(&t.path)).unwrap();
+            let an=analyse(&audio,title,artist,Path::new(&t.path));
+            eprintln!("source {} sr={} old_bpm={:.7} new_bpm={:.7} beats={} duration={:.2}s",i+1,audio.sr,t.bpm,an.bpm,an.beats.len(),an.duration);
+            assert!(an.bpm.is_finite() && an.beats.windows(2).all(|w| w[1]>w[0]));
+        }
+        assert_eq!(std::fs::read(path).unwrap(),bytes);
+    }
+}
+
 pub struct Audio { pub sr: u32, pub l: Vec<f32>, pub r: Vec<f32> }
 impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } }
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 9;
+pub const ANALYSIS_VERSION: u32 = 10;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -109,6 +223,22 @@ pub fn decode(path: &Path) -> anyhow::Result<(Audio, String, String)> {
 }
 
 fn mono(a: &Audio) -> Vec<f32> { a.l.iter().zip(&a.r).map(|(x, y)| 0.5 * (x + y)).collect() }
+
+/// Keep a single, stable stereo projection for rhythm analysis. A side-dominant
+/// recording must not lose its attacks through L+R cancellation. Key analysis
+/// continues to use the original mid signal.
+fn rhythm_mono(a: &Audio) -> Vec<f32> {
+    let mid=mono(a);
+    let side:Vec<_>=a.l.iter().zip(&a.r).map(|(&l,&r)|0.5*(l-r)).collect();
+    // Broadband power would select a loud sustained pad over a quieter kick.
+    // Compare changes in energy instead, excluding file-edge transients, and
+    // prefer the conventional mid projection when rhythmic evidence is close.
+    let strength=|m:&[f32]| {
+        let (onset,_)=onset_env(m,a.sr);
+        onset.get(8..onset.len().saturating_sub(8)).unwrap_or(&[]).iter().map(|&v|v as f64).sum::<f64>()
+    };
+    if strength(&side)>strength(&mid)*1.5+1e-6 {side} else {mid}
+}
 
 /// Onset envelope: half-wave rectified difference of log energy (low-passed signal emphasised), hop 512.
 fn onset_env(m: &[f32], sr: u32) -> (Vec<f32>, f64) {
@@ -228,10 +358,11 @@ fn regress_grid(o: &[f32], period: f64, phase: f64) -> Option<(f64, f64)> {
 }
 
 pub fn detect_bpm(m: &[f32], sr: u32) -> (f64, f64) {
+    if sr == 0 { return (128.0, 0.0); }
     let (o, fps) = onset_env(m, sr);
     if o.len() < 64 { return (128.0, 0.0); }
     // 1) coarse tempo: autocorrelation over the whole track, 60..200 BPM, with a mild prior around 125.
-    let ac_at = |lag: f64| -> f64 { let li = lag as usize; let f = (lag - li as f64) as f32; let mut ac = 0f32;
+    let ac_at = |lag: f64| -> f64 { let li = lag as usize; if li + 1 >= o.len() { return 0.0; } let f = (lag - li as f64) as f32; let mut ac = 0f32;
         for i in 0..o.len().saturating_sub(li + 1) { ac += o[i] * (o[i + li] * (1.0 - f) + o[i + li + 1] * f); } ac as f64 / (o.len() - li) as f64 };
     let mut best = (0f64, 128.0f64);
     let mut bpm = 60.0;
@@ -258,13 +389,7 @@ pub fn detect_bpm(m: &[f32], sr: u32) -> (f64, f64) {
     for k in 0..64 { let p = ph - period * 0.25 + period * 0.5 * k as f64 / 64.0; let s = comb(&o, period, p.max(0.0)); if s > comb(&o, period, ph) { ph = p.max(0.0); } }
     // 3) refine by regression of the actual beat onsets across the whole track
     if let Some((p, q)) = regress_grid(&o, period, ph) { period = p; ph = q; }
-    let mut bpm = fps * 60.0 / period;
-    if (bpm - bpm.round()).abs() < 0.03 { // snap to the integer tempo most productions use, re-fit phase
-        bpm = bpm.round(); period = fps * 60.0 / bpm;
-        let mut best = (f32::MIN, ph);
-        for k in 0..128 { let p = ph - period * 0.1 + period * 0.2 * k as f64 / 128.0; let s = comb(&o, period, p.max(0.0)); if s > best.0 { best = (s, p.max(0.0)); } }
-        ph = best.1;
-    }
+    let bpm = fps * 60.0 / period;
     // onset frame i covers samples [i*hop, (i+1)*hop); with the symmetric smoothing its peak sits at the attack (~2 ms on synthetic kicks)
     let off_beat = (ph / fps).rem_euclid(60.0 / bpm);
     let off = downbeat(m, sr, bpm, off_beat, &o, fps);
@@ -395,9 +520,10 @@ pub fn load(path: &Path) -> anyhow::Result<(Audio, Analysis)> {
 
 pub fn analyse(audio: &Audio, title: String, artist: String, path: &Path) -> Analysis {
     let m = mono(audio);
-    let (bpm, offset, beats) = detect_beats(&m, audio.sr);
+    let rhythm = rhythm_mono(audio);
+    let (bpm, offset, beats) = detect_beats(&rhythm, audio.sr);
     let key = detect_key(&m, audio.sr);
-    let flex = flex_beats(&m, audio.sr, bpm).0;
+    let flex = flex_beats(&rhythm, audio.sr, bpm).0;
     // Segment boundaries alone are not evidence of a reliable beat map: real tracks
     // can produce large Flex timing jumps even when their Dynamic grid is stable.
     let recommended_grid_mode = 1;
@@ -493,14 +619,22 @@ fn downbeat_idx(m: &[f32], sr: u32, beats: &[f64], onset: &[f32], fps: f64) -> u
 
 /// Full beat analysis: (global BPM, first downbeat seconds, beat map seconds).
 pub fn detect_beats(m: &[f32], sr: u32) -> (f64, f64, Vec<f64>) {
+    if sr == 0 || m.is_empty() || !m.iter().any(|x| x.abs() > 1e-8) { return (128.0, 0.0, vec![]); }
     let (bpm, off_lin) = detect_bpm(m, sr);
     let (o, fps) = onset_env(m, sr);
     let mut beats = track_beats(&o, fps, fps * 60.0 / bpm, off_lin * fps);
     while beats.first().is_some_and(|&b| b < -0.05) { beats.remove(0); }
-    beats = refine_attacks(m, sr, &beats);
+    let (refined,observed)=refine_attacks(m, sr, &beats);
+    beats=refined;
+    if observed.len()<16 {return (bpm,off_lin,vec![]); }
     while beats.first().is_some_and(|&b| b < -0.02) { beats.remove(0); }
     if let Some(b) = beats.first_mut() { *b = b.max(0.0); }
     if beats.len() < 16 { return (bpm, off_lin, vec![]); }
+    // The coarse energy envelope locates the tempo family. For steady material,
+    // fit the final sample-level attacks instead: frame quantisation and phase
+    // aliasing in a long-track comb must not become a wrong fixed BPM. Retain
+    // the original estimate for variable/uncertain grids.
+    let bpm = steady_tempo(&observed, bpm).unwrap_or(bpm);
     // bar phase from the global grid (robust), snapped to the nearest tracked beat; offset = first such downbeat
     let near = beats.iter().enumerate().min_by(|x, y| (x.1 - off_lin).abs().partial_cmp(&(y.1 - off_lin).abs()).unwrap()).map(|x| x.0).unwrap_or(0);
     let _ = downbeat_idx;
@@ -508,11 +642,29 @@ pub fn detect_beats(m: &[f32], sr: u32) -> (f64, f64, Vec<f64>) {
     (bpm, beats[k], beats)
 }
 
+fn steady_tempo(beats: &[(f64,f64)], coarse_bpm: f64) -> Option<f64> {
+    if beats.len() < 32 { return None; }
+    let points = &beats[2..beats.len()-2];
+    let span=points.last()?.0-points.first()?.0;
+    if span<32.0 || points.len() as f64/(span+1.0)<0.6 {return None;}
+    let centre = points.iter().map(|p|p.0).sum::<f64>()/points.len() as f64;
+    let mean = points.iter().map(|p|p.1).sum::<f64>() / points.len() as f64;
+    let (mut xx, mut xy) = (0.0, 0.0);
+    for &(beat,t) in points { let x = beat-centre; xx += x*x; xy += x*(t-mean); }
+    let period = xy / xx;
+    let bpm = 60.0 / period;
+    if !bpm.is_finite() || (bpm/coarse_bpm-1.0).abs() > 0.02 { return None; }
+    let mut residuals: Vec<_> = points.iter().map(|&(beat,t)| (t-mean-(beat-centre)*period).abs()).collect();
+    residuals.sort_by(f64::total_cmp);
+    if residuals[residuals.len()*9/10] > 0.010 { return None; }
+    Some(bpm)
+}
+
 /// Sample-accurate refinement: move every beat to the steepest rise of the low-band (kick) envelope
 /// within +-25 ms, then re-smooth with a +-8 beat weighted local regression. Beats without a clear
 /// attack keep their position with a small weight.
-fn refine_attacks(m: &[f32], sr: u32, beats: &[f64]) -> Vec<f64> {
-    let n = beats.len(); if n < 16 { return beats.to_vec(); }
+fn refine_attacks(m: &[f32], sr: u32, beats: &[f64]) -> (Vec<f64>,Vec<(f64,f64)>) {
+    let n = beats.len(); if n < 16 { return (beats.to_vec(),vec![]); }
     let a = (-2.0 * std::f32::consts::PI * 150.0 / sr as f32).exp(); let ae = (-1.0 / (0.002 * sr as f32)).exp();
     let (mut y1, mut y2, mut ev) = (0f32, 0f32, 0f32);
     // ripple-free quadrature envelope of the low band (|y| combined with its derivative scaled to ~60 Hz), so the
@@ -538,7 +690,19 @@ fn refine_attacks(m: &[f32], sr: u32, beats: &[f64]) -> Vec<f64> {
         obs[k] = (best.1 as f64 / sr as f64, best.0 as f64);
     }
     let mut rs: Vec<f64> = obs.iter().map(|o| o.1).collect(); rs.sort_by(|a, b| a.partial_cmp(b).unwrap()); let med = rs[n / 2].max(1e-9);
-    let pts: Vec<(f64, f64)> = obs.iter().zip(beats).map(|(o, &t)| if o.1 > 0.3 * med { (o.0, (o.1 / med).min(3.0)) } else { (t, 0.01) }).collect();
+    let reliable:Vec<usize>=(0..n).filter(|&k|obs[k].1>0.3*med).collect();
+    let pts: Vec<(f64, f64)> = obs.iter().enumerate().map(|(k,o)| {
+        if o.1>0.3*med { return (o.0,(o.1/med).min(3.0)); }
+        // Do not let quantised DP predictions pull the grid during a breakdown.
+        // Missing attacks are interpolated between actual attacks, never treated
+        // as new observations. Retain weak weight at uncertain intro/outro edges.
+        let next=reliable.partition_point(|&j|j<k);
+        let t=if next>0 && next<reliable.len() {
+            let (a,b)=(reliable[next-1],reliable[next]);
+            obs[a].0+(obs[b].0-obs[a].0)*(k-a) as f64/(b-a) as f64
+        } else { beats[k] };
+        (t,0.01)
+    }).collect();
     let h = 8i64;
     let mut out: Vec<f64> = (0..n).map(|k| {
         let (mut sw, mut sx, mut sy, mut sxx, mut sxy) = (1e-12, 0.0, 0.0, 0.0, 0.0);
@@ -548,7 +712,8 @@ fn refine_attacks(m: &[f32], sr: u32, beats: &[f64]) -> Vec<f64> {
         let den = sw * sxx - sx * sx; if den.abs() > 1e-15 { let b = (sw * sxy - sx * sy) / den; (sy - b * sx) / sw } else { beats[k] } }).collect();
     let p = (beats[n - 1] - beats[0]) / (n - 1) as f64;
     for k in 1..n { if out[k] < out[k - 1] + 0.7 * p { out[k] = out[k - 1] + 0.7 * p; } }
-    out
+    let observed=reliable.iter().map(|&k|(k as f64,obs[k].0)).collect();
+    (out,observed)
 }
 
 /// Flex beat map for tracks with deliberate tempo changes (jumps such as 100 -> 128 BPM, or ramps):

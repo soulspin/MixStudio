@@ -2,13 +2,23 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.19](https://img.shields.io/badge/status-beta%200.19-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.20](https://img.shields.io/badge/status-beta%200.20-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.19:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.20:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.19: recover an unsaved project copy](docs/screenshots/recovery.png)
+
+## New in 0.20
+
+- **More precise beat/BPM analysis:** fit steady tempo from supported sample-level attacks, preserve fractional BPM, interpolate missing kicks between supported attacks, and retain rhythm in side-dominant stereo without letting a sustained stereo pad hide centred kicks. Sparse attacks cannot qualify as a precise steady fit. Dynamic remains the default; deliberate ramps keep variable timing.
+- **Existing libraries refresh:** detector version 10 invalidates old derived library BPM/key values while retaining tags. Cancelled analysis jobs cannot overwrite a newer scan.
+- **Editing and source safety:** fix duplicate automation points and drag crashes, preserve explicit beat ratios when splitting, resolve Auto-tempo reorder against the requested order, handle Unicode keys safely, and keep dropped audio in unique persistent source paths.
+
+Existing project grids and manual edits stay saved as they were. Reopen a project to load the new analysis, then use **Beatgrid → Reset to analysis** on an uncut source clip to adopt it. Correct the grid before making section edits. A displayed decimal is precision of representation, not a confidence guarantee.
+
+Read the [full audit and prioritised open issues](docs/AUDIT-2026-10-16.md). The controlled test results are not a guarantee of perfect beat counts or musical downbeats on arbitrary recordings. Audio-engine timing, long-set key lock and split-transition fixes take priority over new features.
 
 ## New in 0.19
 
@@ -92,7 +102,7 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 
 ![Non-destructive section editing](docs/screenshots/sections.png)
 
-Captured on Linux using the app's generated demo music. Recovery shows 0.19, Compare shows 0.18, Beatgrid and Track show 0.17, and the other views show 0.16.
+Captured on Linux using the app's generated demo music. Beatgrid shows 0.20, Recovery 0.19, Compare 0.18, Track 0.17, and the other views 0.16.
 
 | Transition editing | Track properties |
 |---|---|
