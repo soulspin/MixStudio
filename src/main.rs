@@ -10,6 +10,7 @@ mod fx;
 mod dialogs;
 mod beatmap;
 mod beatcheck;
+mod gridtools;
 mod app;
 mod audio;
 mod engine;

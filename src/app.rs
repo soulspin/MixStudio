@@ -1,3 +1,4 @@
+mod comparison;
 use crate::analysis::{self, Analysis, Audio, PEAK_HOP};
 use crate::engine::{self, Cmd, Shared, Snap};
 use crate::model::{Mix, Preset, StemMode, Track};
@@ -23,7 +24,7 @@ const SAMPLE_H: f32 = 25.0;
 const TEMPO_H: f32 = 22.0;
 
 #[derive(PartialEq, Clone, Copy)]
-enum Tab { Zoom, Library, Playlist, Transition, Track, Grid, Video, Effects, Master, Samples }
+enum Tab { Zoom, Library, Playlist, Transition, Track, Grid, Compare, Video, Effects, Master, Samples }
 #[derive(PartialEq, Clone, Copy)]
 enum Snapping { Off, Free, Half, Full }
 
@@ -44,13 +45,14 @@ struct BmDrag { ti: usize, k: i64, i: usize, pivot: usize, span: f64, lastx: f32
 #[derive(Clone)]
 enum TlDrag { Edge { ti: usize, left: bool, original: Box<Track> }, Fade { ti: usize, left: bool }, Trans { ti: usize, grab: f64, orig: f64 } }
 
-struct BeatCheckState { stamp:Vec<u64>, incoming:usize, result:Option<Result<crate::beatcheck::Report,String>> }
+struct BeatCheckState { evidence:Vec<crate::beatcheck::BeatEvidence>, stamp:Vec<u64>, incoming:usize, result:Option<Result<crate::beatcheck::Report,String>> }
 
-enum Msg { BeatCheck(Vec<u64>,Result<crate::beatcheck::Report,String>), Found(Vec<PathBuf>), ImportPick(PathBuf), Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>), Clip(Track, Audio, Analysis) }
+enum Msg { BeatCheck(Vec<u64>,Result<crate::beatcheck::Report,String>,Vec<crate::beatcheck::BeatEvidence>), Found(Vec<PathBuf>), ImportPick(PathBuf), Picked(Vec<PathBuf>, Option<usize>), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>), Status(String), Opened(PathBuf), SaveTo(PathBuf), ExportTo(PathBuf), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>), Clip(Track, Audio, Analysis) }
 
 struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::AtomicU32> }
 
 pub struct App {
+    comparison:comparison::Comparison, active_loop:Option<(f64,f64)>,
     beat_check: Option<BeatCheckState>,
     section_state: Vec<u64>, select_sections: bool, section_range: Option<(usize, f64, f64)>, section_drag: Option<(usize, f64)>, section_copy: Option<crate::sections::SectionCopy>,
     mix: Mix, store: HashMap<String, (Arc<Audio>, Arc<Analysis>)>,
@@ -143,7 +145,7 @@ impl App {
             let r = crate::stems::get_or_separate(&key, &j.audio, &dl, &j.prog);
             if let Ok(e) = crate::stems::session_info() { *ep.lock().unwrap() = e; }
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
-        let mut a = App { beat_check:None, section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
+        let mut a = App { comparison:Default::default(), active_loop:None, beat_check:None, section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
             file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, scratch_win: false, scratch_play: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib,
@@ -172,6 +174,7 @@ impl App {
                     a.sel=Some(first); a.select_sections=true; a.section_range=Some((first,at,at+32.0)); a.remember_section();
                     a.tab=Tab::Playlist; a.ppb=4.5; a.scroll=72.0; a.seek(at); a.status="Demo: 8 bars repeated · source audio untouched · Undo restores edits".into();
                 }
+                Ok("compare") => { let i=a.sel_in.unwrap(); a.open_comparison(i); a.request_beat_check(i,ctx); }
                 Ok("grid") => { a.tab=Tab::Grid; a.sel=Some(0); a.ppb=28.0; a.scroll=48.0; a.seek(64.0); }
                 Ok("effects") => {
                     a.tab=Tab::Effects; a.fx_target=0;
@@ -193,6 +196,11 @@ impl App {
     fn fix_sel(&mut self) { self.clear_section(); let n = self.mix.tracks.len(); if self.sel.is_some_and(|s| s >= n) { self.sel = None; } if self.sel_in.is_some_and(|s| s >= n) { self.sel_in = None; } }
     fn beat(&self) -> f64 { self.out.shared.beat() }
     fn playing(&self) -> bool { self.out.shared.playing.load(std::sync::atomic::Ordering::Relaxed) }
+    fn set_loop(&mut self,range:Option<(f64,f64)>) { self.active_loop=range; let _=self.out.tx.send(Cmd::Loop(range)); }
+    fn toggle_playback(&mut self) {
+        if self.playing() && self.comparison.audition!=0 { self.stop_comparison(); }
+        else { let _=self.out.tx.send(Cmd::Play(!self.playing())); }
+    }
     fn seek(&self, b: f64) { self.out.shared.beat.store(b.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed); let _ = self.out.tx.send(Cmd::Seek(b.max(0.0))); }
     fn sec(&self, b: f64) -> f64 { self.mix.secs(0.0, b) }
 
@@ -533,8 +541,9 @@ impl App {
         }
     }
     fn clear_section(&mut self) {
+        self.stop_comparison();
         self.section_range=None; self.section_drag=None; self.section_state.clear();
-        if self.loop_on { self.loop_on=false; let _=self.out.tx.send(Cmd::Loop(None)); }
+        if self.loop_on { self.loop_on=false; self.set_loop(None); }
     }
     // 0 copy, 1 paste, 2 repeat, 3 delete, 4 audition loop.
     fn section_action(&mut self, action: u8) {
@@ -550,7 +559,7 @@ impl App {
             } return;
         }
         let Some((ti,a,b))=self.section_range else { self.status="Choose Select, then drag a range on a song".into(); return; };
-        if action==4 { self.loop_on=true; let _=self.out.tx.send(Cmd::Loop(Some((a,b)))); self.seek(a); let _=self.out.tx.send(Cmd::Play(true)); return; }
+        if action==4 { self.loop_on=true; self.set_loop(Some((a,b))); self.seek(a); let _=self.out.tx.send(Cmd::Play(true)); return; }
         let Some(t)=self.mix.tracks.get(ti) else { self.clear_section(); return; };
         let copy=match t.copy_section(a,b) { Ok(c)=>c,Err(e)=>{self.status=e; return;} };
         if action==0 { self.section_copy=Some(copy); self.status=format!("Copied {:.1} beats · paste within this song",b-a); return; }
@@ -594,7 +603,7 @@ impl eframe::App for App {
         self.mix.resolve_ratios();
         self.validate_section();
         while let Ok(m) = self.rx.try_recv() { match m {
-            Msg::BeatCheck(stamp,r) => { if let Some(state)=&mut self.beat_check { if state.stamp==stamp { state.result=Some(r); } } },
+            Msg::BeatCheck(stamp,r,evidence) => { if let Some(state)=&mut self.beat_check { if state.stamp==stamp { state.result=Some(r); state.evidence=evidence; } } },
             Msg::Found(v) => { self.status = if v.is_empty() { "No DJ libraries found in the usual places: use Browse… or paste the file path".into() } else { format!("Found {} DJ libraries (Library tab)", v.len()) }; self.lib_found = v; }
             Msg::ImportPick(p) => self.import_file(p),
             Msg::Picked(v, s) => self.load_files(v, s),
@@ -628,9 +637,10 @@ impl eframe::App for App {
         if !dirs.is_empty() { self.add_lib_folders(dirs); }
         files.retain(|p| crate::library::is_audio(p));
         if !files.is_empty() { self.load_files(files, None); }
-        let _ = self.out.tx.send(Cmd::Snap(Arc::new(self.build_snap())));
+        self.validate_comparison();
+        let _ = self.out.tx.send(Cmd::Snap(Arc::new(self.build_playback_snap())));
         if !ctx.wants_keyboard_input() {
-            if ctx.input(|i| i.key_pressed(egui::Key::Space)) { let _ = self.out.tx.send(Cmd::Play(!self.playing())); }
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) { self.toggle_playback(); }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) { if ctx.input(|i| i.modifiers.shift) { self.do_redo() } else { self.do_undo() } }
             if ctx.input(|i| i.key_pressed(egui::Key::Delete)) { if self.section_range.is_some() { self.section_action(3); } else if !self.select_sections { self.remove_sel(); } }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C)) { self.section_action(0); }
@@ -643,7 +653,7 @@ impl eframe::App for App {
         if self.playing() || self.loading > 0 || self.lib.scanning { ctx.request_repaint(); } else { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
         self.top_bar(ctx);
         self.tab_bar(ctx);
-        egui::TopBottomPanel::bottom("bottom").exact_height(if self.tab == Tab::Library { 340.0 } else { 232.0 }).frame(egui::Frame::none().fill(C::from_rgb(28, 29, 33)).inner_margin(10.0)).show(ctx, |ui| self.bottom(ui));
+        egui::TopBottomPanel::bottom("bottom").exact_height(if self.tab==Tab::Compare {380.0} else if self.tab==Tab::Library {340.0} else {232.0}).frame(egui::Frame::none().fill(C::from_rgb(28, 29, 33)).inner_margin(10.0)).show(ctx, |ui| self.bottom(ui));
         self.transport(ctx);
         egui::SidePanel::right("master").exact_width(42.0).resizable(false).frame(egui::Frame::none().fill(BG)).show(ctx, |ui| self.master_meter(ui));
         self.timeline_rect = egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| self.timeline(ui)).response.rect;
@@ -718,12 +728,12 @@ impl App {
 
     fn tab_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("tabs").exact_height(40.0).frame(egui::Frame::none().fill(PANEL).inner_margin(6.0)).show(ctx, |ui| {
-            ui.horizontal_centered(|ui| {
-                let tabs = [(Tab::Zoom, "🔍 Zoom"), (Tab::Library, "📚 Library"), (Tab::Playlist, "☰ Playlist"), (Tab::Transition, "🔀 Transition"), (Tab::Track, "♫ Track"), (Tab::Grid, "▥ Beatgrid"), (Tab::Video, "🎥 Video"), (Tab::Effects, "✨ Effects"), (Tab::Master, "🔊 Master"), (Tab::Samples, "⚙ Samples")];
-                ui.add_space((ui.available_width() / 2.0 - 415.0).max(0.0));
+            egui::ScrollArea::horizontal().id_salt("bottom_tab_scroll").show(ui,|ui| { ui.horizontal_centered(|ui| {
+                let tabs = [(Tab::Zoom, "🔍 Zoom"), (Tab::Library, "📚 Library"), (Tab::Playlist, "☰ Playlist"), (Tab::Transition, "🔀 Transition"), (Tab::Track, "♫ Track"), (Tab::Grid, "▥ Beatgrid"), (Tab::Compare, "Compare"), (Tab::Video, "🎥 Video"), (Tab::Effects, "✨ Effects"), (Tab::Master, "🔊 Master"), (Tab::Samples, "⚙ Samples")];
+                ui.add_space((ui.available_width() / 2.0 - 460.0).max(0.0));
                 egui::Frame::none().fill(C::from_rgb(28, 29, 33)).rounding(8.0).inner_margin(3.0).show(ui, |ui| { ui.horizontal(|ui| {
                     for (t, n) in tabs { if seg_button(ui, n, self.tab == t).clicked() { self.tab = t; } } }); });
-            });
+            }); });
         });
     }
 
@@ -761,10 +771,10 @@ impl App {
                 if flat(ui, "⏪", "To start").clicked() { self.seek(0.0); }
                 if circ(ui, "⏺", C::from_rgb(50, 52, 58), C::from_rgb(230, 40, 40), "Record: export the mix").clicked() { self.dialog(true, 2); }
                 let pl = self.playing();
-                if ui.add(egui::Button::new(egui::RichText::new(if pl { "⏸" } else { "▶" }).color(C::BLACK).size(18.0)).fill(ACCENT).rounding(18.0).min_size(vec2(38.0, 36.0))).on_hover_text("Play/pause (space)").clicked() { let _ = self.out.tx.send(Cmd::Play(!pl)); }
+                if ui.add(egui::Button::new(egui::RichText::new(if pl { "⏸" } else { "▶" }).color(C::BLACK).size(18.0)).fill(ACCENT).rounding(18.0).min_size(vec2(38.0, 36.0))).on_hover_text("Play/pause (space)").clicked() { self.toggle_playback(); }
                 let lb = egui::Button::new(egui::RichText::new("🔁").size(16.0).color(if self.loop_on { ACCENT } else { TXT })).frame(false).min_size(vec2(30.0, 30.0));
-                if ui.add(lb).on_hover_text("Loop the selected section, or the bar length from the current bar").clicked() { self.loop_on = !self.loop_on;
-                    let s = (b / 4.0).floor() * 4.0; let _ = self.out.tx.send(Cmd::Loop(if self.loop_on { Some(self.section_range.map(|(_,a,b)| (a,b)).unwrap_or((s, s + self.bars as f64 * 4.0))) } else { None })); }
+                if ui.add(lb).on_hover_text("Loop the selected section, or the bar length from the current bar").clicked() { self.stop_comparison(); self.loop_on = !self.loop_on;
+                    let s = (b / 4.0).floor() * 4.0; self.set_loop(if self.loop_on { Some(self.section_range.map(|(_,a,b)| (a,b)).unwrap_or((s, s + self.bars as f64 * 4.0))) } else { None }); }
                 if flat(ui, "⏭", "Next track").clicked() { if let Some(s) = self.mix.main_order().iter().map(|&i| self.mix.tracks[i].vis_start(bpm)).find(|&s| s > b + 0.5) { self.seek(s); } }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add(egui::Button::new("⌨").min_size(vec2(30.0, 28.0))).on_hover_text("Space: play · Ctrl+scroll: zoom · Scroll: pan · Delete: remove · Ctrl+Z / Ctrl+Shift+Z");
@@ -1583,6 +1593,7 @@ impl App {
             Tab::Transition => self.transition_tab(ui),
             Tab::Track => self.track_tab(ui),
             Tab::Grid => self.beatgrid_tab(ui),
+            Tab::Compare => self.comparison_tab(ui),
             Tab::Zoom => { ui.heading("Zoom"); ui.add(egui::Slider::new(&mut self.ppb, 0.3..=80.0).logarithmic(true).text("pixels per beat"));
                 if ui.button("Fit whole mix").clicked() { self.ppb = (ui.available_width() / self.mix.length_beats().max(64.0) as f32).max(0.3); self.scroll = 0.0; }
                 ui.label(dim("Tip: Ctrl + scroll zooms around the pointer, scroll moves in time.")); }
@@ -1769,10 +1780,10 @@ impl App {
         let a=self.mix.tracks[o].clone(); let b=self.mix.tracks[i].clone();
         let aa=self.store[&a.path].0.clone(); let ab=self.store[&b.path].0.clone();
         let curve=self.mix.tempo_curve(); let bpm=self.mix.bpm; let tx=self.tx.clone(); let ctx=ctx.clone();
-        self.beat_check=Some(BeatCheckState {stamp:stamp.clone(),incoming,result:None});
+        self.beat_check=Some(BeatCheckState {evidence:vec![],stamp:stamp.clone(),incoming,result:None});
         std::thread::spawn(move || {
-            let report=crate::beatcheck::measure(&a,&aa,&b,&ab,s,e,|beat|crate::model::bpm_on(&curve,bpm,beat));
-            let _=tx.send(Msg::BeatCheck(stamp,report)); ctx.request_repaint();
+            let (report,evidence)=crate::beatcheck::inspect(&a,&aa,&b,&ab,s,e,|beat|crate::model::bpm_on(&curve,bpm,beat));
+            let _=tx.send(Msg::BeatCheck(stamp,report,evidence)); ctx.request_repaint();
         });
     }
     fn apply_beat_check(&mut self) {
@@ -1852,6 +1863,7 @@ impl App {
         let Some(mut incoming)=self.sel_in.filter(|i|trans.iter().any(|x|x.1==*i)).or_else(||trans.first().map(|x|x.1)) else { ui.label("Beatmatch: add two overlapping tracks to compare their bass attacks."); return; };
         ui.horizontal_wrapped(|ui| {
             ui.strong("Beatmatch check");
+            if self.tab!=Tab::Compare && ui.button("Compare waveforms + anchors").clicked(){self.open_comparison(incoming);}
             egui::ComboBox::from_id_salt("check_transition").width(230.0).selected_text(format!("→ {}",self.mix.tracks[incoming].title)).show_ui(ui,|ui| {
                 for &(o,i,_,_) in &trans { ui.selectable_value(&mut incoming,i,format!("{} → {}",self.mix.tracks[o].title,self.mix.tracks[i].title)); }
             });
@@ -1873,7 +1885,7 @@ impl App {
                 }); }
             }
         }
-        ui.label(egui::RichText::new("Compares bass attacks, not musical phrasing. Positive offset = incoming attacks late. Listen after every correction; silence and unclear drums cannot establish alignment.").color(DIM).size(11.0));
+        ui.label(egui::RichText::new("Compares bass and percussion attacks, not musical phrasing. Positive offset = incoming attacks late. Listen after every correction; silence and unclear drums cannot establish alignment.").color(DIM).size(11.0));
     }
 
 }
@@ -2126,6 +2138,52 @@ mod section_ui_tests {
         })
     }
     #[test]
+    fn comparison_waveform_click_assigns_the_selected_target_and_preserves_project() {
+        let (mut a,ctx,_rx,dir)=setup(); let mut b=a.mix.tracks[0].clone(); b.lane=1; b.start_beat=16.0; a.mix.tracks.push(b); a.open_comparison(1);
+        let before=serde_json::to_string(&a.mix).unwrap();
+        let draw=|a:&mut App,events|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,380.0))),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|a.comparison_tab(ui));});
+        draw(&mut a,vec![]); let out=draw(&mut a,vec![]);
+        let y=out.shapes.iter().find_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape { if t.galley.text()=="B incoming · 2" {Some(t.pos.y+t.galley.size().y*0.5)}else{None} }else{None}).expect("Incoming waveform label should be visible");
+        let pos=pos2(550.0,y); let pointer=|pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:egui::Modifiers::default()};
+        draw(&mut a,vec![egui::Event::PointerMoved(pos),pointer(true)]); draw(&mut a,vec![pointer(false)]);
+        let anchor=a.comparison.anchors[0].expect("Click must assign anchor A"); assert_eq!(anchor.beat,40.0); assert!((10.0..14.0).contains(&anchor.source));
+        assert_eq!(a.comparison.slot,1); assert_eq!(serde_json::to_string(&a.mix).unwrap(),before); assert!(a.undo.is_empty());
+        drop(a); std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn comparison_preview_hears_proposed_grid_and_restores_the_exact_suspended_loop() {
+        let (mut a,_ctx,rx,dir)=setup(); let mut b=a.mix.tracks[0].clone(); b.lane=1; b.start_beat=16.0; a.mix.tracks.push(b);
+        a.open_comparison(1); a.comparison.anchors=[Some(crate::gridtools::Anchor{beat:24.0,source:4.020}),Some(crate::gridtools::Anchor{beat:48.0,source:16.050})];
+        a.loop_on=true; a.set_loop(Some((0.0,32.0))); a.seek(20.0); rx.try_iter().for_each(drop);
+        a.start_comparison_preview(2,20.0,24.0); assert_eq!(a.active_loop,None);
+        let snap=a.build_playback_snap(); assert_eq!(snap.tracks[0].grid.section_id(48.0),a.build_playback_snap().tracks[0].grid.section_id(48.0),"Unchanged preview must retain the same WSOLA grid identity"); assert_eq!(snap.tracks.len(),1); assert!((snap.tracks[0].grid.sec(48.0)-16.050).abs()<1e-9);
+        assert_eq!(a.build_snap().tracks[1].grid.sec(48.0),16.0,"Export must use the original track until Apply");
+        a.mix.tracks[1].stretch=2; a.mix.tracks[1].fade_in=4.0; let changed=a.build_playback_snap();
+        assert_eq!(changed.tracks[0].stretch,2,"Preview must use current stretch setting"); assert_eq!(changed.tracks[0].fade_in,4.0);
+        assert_eq!(changed.tracks[0].grid.section_id(48.0),snap.tracks[0].grid.section_id(48.0));
+        a.out.shared.playing.store(true,std::sync::atomic::Ordering::Relaxed); a.toggle_playback();
+        assert_eq!(a.comparison.audition,0); assert_eq!(a.active_loop,Some((0.0,32.0))); assert!(a.loop_on);
+        let cmds:Vec<_>=rx.try_iter().collect(); let snap=cmds.iter().position(|c|matches!(c,Cmd::Snap(_))).unwrap(); let play=cmds.iter().position(|c|matches!(c,Cmd::Play(true))).unwrap(); assert!(snap<play);
+        drop(a); std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn comparison_preview_is_temporary_and_anchors_are_undoable_and_stale_safe() {
+        let (mut a,_ctx,_rx,dir)=setup();
+        let mut b=a.mix.tracks[0].clone(); b.lane=1; b.start_beat=16.0; a.mix.tracks.push(b); a.sel_in=Some(1);
+        a.open_comparison(1); let original=serde_json::to_string(&a.mix).unwrap();
+        a.comparison.audition=1; a.comparison.metro=true;
+        let dry=a.build_playback_snap(); assert_eq!(dry.tracks.len(),1); assert!(dry.trans.is_empty()); assert!(dry.metro.is_some());
+        let export=a.build_snap(); assert_eq!(export.tracks.len(),2); assert_eq!(export.trans.len(),1); assert!(export.metro.is_none());
+        assert_eq!(serde_json::to_string(&a.mix).unwrap(),original);
+        a.comparison.anchors=[Some(crate::gridtools::Anchor{beat:24.0,source:4.020}),Some(crate::gridtools::Anchor{beat:48.0,source:16.050})];
+        a.apply_comparison_anchors(); assert_eq!(a.undo.len(),1); assert!((a.mix.tracks[1].sec_at(48.0)-16.050).abs()<1e-9);
+        a.do_undo(); assert_eq!(serde_json::to_string(&a.mix).unwrap(),original);
+        a.open_comparison(1); a.comparison.anchors=[Some(crate::gridtools::Anchor{beat:24.0,source:4.020}),Some(crate::gridtools::Anchor{beat:48.0,source:16.050})];
+        a.mix.tracks[1].offset+=0.001; let before=serde_json::to_string(&a.mix).unwrap(); a.apply_comparison_anchors();
+        assert_eq!(serde_json::to_string(&a.mix).unwrap(),before); assert!(a.undo.is_empty());
+        drop(a); std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
     fn grid_correction_is_one_undo_step_and_stale_alignment_cannot_apply() {
         let (mut a,_ctx,_rx,dir)=setup(); let before=serde_json::to_string(&a.mix).unwrap();
         a.grid_correction(0,crate::model::GridScope::Single,16.0,0.01); assert_eq!(a.undo.len(),1);
@@ -2133,10 +2191,10 @@ mod section_ui_tests {
         let mut b=a.mix.tracks[0].clone(); b.lane=1; b.start_beat=16.0; a.mix.tracks.push(b);
         let stamp=a.alignment_stamp(1).unwrap();
         let report=crate::beatcheck::Report {verdict:crate::beatcheck::Verdict::Stable,offset_ms:10.0,drift_ms:0.0,jitter_ms:0.0,correction_seconds:0.01,pairs:20,sampled:20};
-        a.beat_check=Some(BeatCheckState {stamp,incoming:1,result:Some(Ok(report.clone()))});
+        a.beat_check=Some(BeatCheckState {evidence:vec![],stamp,incoming:1,result:Some(Ok(report.clone()))});
         a.mix.tracks[1].offset+=0.001; let before=serde_json::to_string(&a.mix).unwrap(); a.apply_beat_check();
         assert!(a.beat_check.is_none()); assert_eq!(serde_json::to_string(&a.mix).unwrap(),before); assert!(a.undo.is_empty());
-        let stamp=a.alignment_stamp(1).unwrap(); a.beat_check=Some(BeatCheckState {stamp,incoming:1,result:Some(Ok(report))});
+        let stamp=a.alignment_stamp(1).unwrap(); a.beat_check=Some(BeatCheckState {evidence:vec![],stamp,incoming:1,result:Some(Ok(report))});
         a.apply_beat_check(); assert_eq!(a.undo.len(),1); a.do_undo(); assert_eq!(serde_json::to_string(&a.mix).unwrap(),before);
         drop(a); std::fs::remove_dir_all(dir).ok();
     }

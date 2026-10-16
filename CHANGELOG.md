@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.18.0-beta
+
+- Combine bass attack evidence with broadband percussion onsets, reject conflicting timing, and expose weak versus supported sampled beats in the transition comparison view.
+- Add aligned outgoing/incoming waveforms, 2–32 beat zoom, navigation, source-time anchor picking and a preview metronome.
+- Audition outgoing, incoming or both tracks before transition processing. Preview is temporary, stops at the visible range end or normal pause, restores the exact suspended loop, and never alters export snapshots.
+- Fit two manual source attacks to mix beats, preview the resulting BPM and audio/grid before explicit Apply, and undo the correction in one step. Preserve fractional anchors, active-map shape and internal map ratios. Protect edited sections and invalidate stale anchors after timing/audio changes.
+- Reuse the proposed grid between playback snapshots to keep WSOLA identity stable; reflect current non-timing clip settings in preview.
+- Add percussion, affine-fit, stale/Undo, waveform-click, loop restoration and preview/export isolation regressions.
+
 ## 0.17.0-beta
 
 - Add a dedicated, scrollable Beatgrid tab with persistent whole-grid / following / single-beat modes, ±1/±10 ms corrections, beat navigation, zoom, downbeat, fixed/tap BPM and reset to analysis.

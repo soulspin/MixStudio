@@ -2,13 +2,28 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.17](https://img.shields.io/badge/status-beta%200.17-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.18](https://img.shields.io/badge/status-beta%200.18-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.17:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.18:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
-![MixStudio 0.16: select and repeat a song section](docs/screenshots/sections.png)
+![MixStudio 0.18: compare transition attacks and correct phase and drift](docs/screenshots/compare.png)
+
+## New in 0.18
+
+- **Richer rhythm evidence:** combine bass attacks with broadband percussion onsets. Sparse, sustained or conflicting evidence stays uncertain. The comparison view marks weak sampled beats in yellow and supported pairs in green/cyan; unmarked beats have not been measured.
+- **Compare view:** outgoing and incoming source waveforms share a mix-beat axis, with 2–32 beat zoom, navigation, separate **Listen A / B / both** buttons and a preview metronome. Dry audition bypasses transition curves, EQ, FX and stem automation and stops at the visible range's end. It restores the exact suspended loop and stays out of project/export data.
+- **Two manual anchors:** assign two incoming source attacks to known mix beats, inspect the proposed BPM and hear/see the proposed grid before applying it. One Undo restores the old grid. The correction fits phase and a uniform tempo error while preserving the existing grid's local shape.
+
+### Correct an overlap with two anchors
+
+1. Open **Compare** (or **Beatgrid → Compare waveforms + anchors**) and select the transition. **Measure overlap** adds evidence markers; uncertain evidence does not prevent manual inspection.
+2. Choose **Set A**, set its **Target mix beat**, then click the corresponding attack in the yellow incoming waveform. Beat numbers in this view start at 1. Fine-adjust the source time below the waveforms if needed.
+3. Navigate later in the overlap, choose **Set B**, and assign a second clear attack to its target beat. Separate A and B by at least four beats; a longer interval makes drift easier to judge.
+4. Toggle **Preview proposed grid**, listen to A/B/both with the metronome, then choose **Apply both anchors** when satisfied. Until Apply, saved projects and exports retain the original grid.
+
+Anchors correct the incoming source clip and currently require unlocked editing, an uncut clip and a 1:1 beat ratio. They do not infer musical phrasing or remove arbitrary local timing errors. Correct the source grid before arranging sections; use single/following-beat edits for remaining local errors.
 
 ## New in 0.17
 
@@ -35,7 +50,7 @@ Live DJ software is built for performing: two decks, a crossfader, and one shot 
 
 It's native, fast, and doesn't need an account. No sign-up, no license keys, no cloud. It's your music on your machine.
 
-## Features (Beta 0.17)
+## Features (Beta 0.18)
 
 - **Timeline decks:** songs alternate on Deck 1 and Deck 2 as coloured clips with 3-band waveforms (low/mid/high), beat and bar lines, bar numbers and heuristic phrase tags (Intro / Build / Drop / Breakdown / Outro). There's an overview strip, a time ruler, zoom (Ctrl+scroll), scrolling, a playhead, click-to-seek, and clip dragging with snapping (off / beat / half bar / bar).
 - **Automatic analysis:** global BPM (tempogram + full-track comb + beat regression, about 0.02 BPM), musical key (chromagram plus Krumhansl profiles) shown as **Camelot** codes, and bar 1. Results and waveforms are cached and re-analysed automatically when the analysis improves.
@@ -64,7 +79,9 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 
 ## Screenshots
 
-Captured on Linux using the app's generated demo music. Beatgrid and Track show 0.17; the other views show 0.16.
+![Non-destructive section editing](docs/screenshots/sections.png)
+
+Captured on Linux using the app's generated demo music. Compare shows 0.18, Beatgrid and Track show 0.17, and the other views show 0.16.
 
 | Transition editing | Track properties |
 |---|---|
