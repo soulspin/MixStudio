@@ -29,6 +29,7 @@ fn atomic_write(path:&Path,bytes:&[u8])->io::Result<()> {
     if result.is_err() { let _=fs::remove_file(&tmp); } result
 }
 pub fn save_project(path:&Path,mix:&Mix)->io::Result<()> {
+    crate::validation::validate_mix(mix).map_err(json_error)?;
     let bytes=serde_json::to_vec_pretty(mix).map_err(json_error)?;
     let _:Mix=serde_json::from_slice(&bytes).map_err(json_error)?;
     match fs::read(path) { Ok(old)=>atomic_write(&backup_path(path),&old)?,Err(e) if e.kind()==io::ErrorKind::NotFound=>{},Err(e)=>return Err(e) }
@@ -40,6 +41,7 @@ impl Record { pub fn new(original:Option<PathBuf>,mix:Mix)->Self {Self{version:1
 #[derive(Clone)]
 pub struct Entry { pub path:PathBuf, pub record:Record }
 pub fn write_record(dir:&Path,r:&Record)->io::Result<PathBuf> {
+    crate::validation::validate_mix(&r.mix).map_err(json_error)?;
     if r.id.is_empty() || !r.id.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'-') { return Err(json_error("Invalid recovery id")); }
     fs::create_dir_all(dir)?; let path=dir.join(format!("{}.recovery.json",r.id));
     let bytes=serde_json::to_vec(r).map_err(json_error)?;
@@ -50,7 +52,8 @@ pub fn write_record(dir:&Path,r:&Record)->io::Result<PathBuf> {
 pub fn read_record(path:&Path)->io::Result<Record> {
     if fs::metadata(path)?.len()>MAX_RECORD_BYTES as u64 {return Err(json_error("Recovery file exceeds 64 MB"));}
     let r:Record=serde_json::from_slice(&fs::read(path)?).map_err(json_error)?;
-    if r.version!=1 {return Err(json_error("Unsupported recovery version"));} Ok(r)
+    if r.version!=1 {return Err(json_error("Unsupported recovery version"));}
+    crate::validation::validate_mix(&r.mix).map_err(json_error)?; Ok(r)
 }
 pub fn scan(dir:&Path)->(Vec<Entry>,usize) {
     let mut entries=vec![];let mut bad=0;
@@ -104,6 +107,17 @@ mod tests {
         save_project(&path,&mix).unwrap(); assert_eq!(std::fs::read(backup_path(&path)).unwrap(),old);
         let current=std::fs::read(&path).unwrap(); std::fs::remove_file(backup_path(&path)).unwrap(); std::fs::create_dir(backup_path(&path)).unwrap();
         mix.name="Must not replace original".into(); assert!(save_project(&path,&mix).is_err()); assert_eq!(std::fs::read(&path).unwrap(),current);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+    #[test]
+    fn semantically_invalid_recovery_and_project_writes_are_rejected() {
+        let d=dir(); let target=d.join("mix.json"); let good=Mix::default(); save_project(&target,&good).unwrap();
+        let before=fs::read(&target).unwrap(); let mut bad=good.clone(); bad.bpm=0.0;
+        assert!(save_project(&target,&bad).is_err(),"zero tempo was saved");
+        assert_eq!(fs::read(&target).unwrap(),before);
+        let record=Record::new(None,bad); let path=d.join("bad.recovery.json");
+        fs::write(&path,serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(read_record(&path).is_err(),"invalid recovery was accepted");
         std::fs::remove_dir_all(d).unwrap();
     }
     #[test]

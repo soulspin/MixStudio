@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.0-beta
+
+- Resolve the prioritised renderer/editor/storage audit findings; record changes, regressions and remaining limits in docs/MAINTENANCE-2026-10-16.md.
+- Prepare and retire variable-sized WSOLA/FX state outside realtime callbacks; remove hidden voice/effect caps, persist effect identity, preserve unchanged histories and reset deleted/replaced state. Retain the host-default audio buffer.
+- Integrate tempo exactly, including the 20 BPM floor; preserve loop time and stretched-audio phase, reset all seek history, and process transition/FX timing per sample.
+- Preserve logical split transitions, ratios, source-cut smoothing and Auto tempo; map phrases through source grids/sections, stabilise Manual/ramp layout and move logical groups coherently. Compare includes split fragments and protects unsupported grouped corrections.
+- Validate project/recovery semantics, guard overcrowded beat edits, detect trustworthy decode truncation/integrity failures, retain partial-scan metadata, verify cached model bytes, include FX export tails and isolate MP3 scratch ownership.
+
 ## 0.20.0-beta
 
 - Derive precise steady BPM from actual sample-level attack observations with minimum count, span, coverage and residual gates. Remove integer-tempo rounding, interpolate unsupported interior beats between observed attacks, and decline dynamic maps with fewer than 16 supported attacks.

@@ -76,6 +76,20 @@ pub struct Index { pub version: u32, pub entries: Vec<Entry> }
 mod audit_tests {
     use super::*;
     #[test]
+    fn partial_scan_preserves_blocked_subtree_but_applies_known_deletions() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-partial-{}",crate::recovery::unique_id()));
+        let mut blocked=dir.clone(); for _ in 0..42 { blocked=blocked.join("deep"); } std::fs::create_dir_all(&blocked).unwrap();
+        let folder=dir.display().to_string();
+        let keep=Entry {path:blocked.join("keep.wav").display().to_string(),folder:folder.clone(),title:"Keep metadata".into(),bpm:Some(123.4),..Default::default()};
+        let deleted=Entry {path:dir.join("deleted.wav").display().to_string(),folder:folder.clone(),..Default::default()};
+        let old=Index {version:INDEX_VERSION,entries:vec![keep.clone(),deleted]};
+        let (next,report,states)=scan(&[folder],&old,&Arc::new(AtomicBool::new(false)),&|_,_|{});
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(next.entries.len(),1,"scan dropped metadata below traversal depth limit");
+        assert_eq!(next.entries[0].title,keep.title); assert_eq!(next.entries[0].bpm,keep.bpm);
+        assert_eq!(report.removed,1); assert!(report.errors>0); assert!(!matches!(states[0].1,FolderState::Available(_)));
+    }
+    #[test]
     fn dropped_sources_with_the_same_name_never_replace_each_other() {
         let dir=std::env::temp_dir().join(format!("mixstudio-drop-{}",crate::recovery::unique_id()));
         let first=store_drop(&dir,"song.wav",b"first").unwrap();
@@ -131,7 +145,7 @@ mod audit_tests {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum FolderState { Available(usize), Missing, NotResponding }
+pub enum FolderState { Available(usize), Partial(usize), Missing, NotResponding }
 
 #[derive(Clone, Debug, Default)]
 pub struct ScanReport { pub files: usize, pub added: usize, pub updated: usize, pub unchanged: usize, pub removed: usize, pub errors: usize, pub timed_out: usize, pub missing: Vec<String>, pub ms: u128 }
@@ -162,15 +176,18 @@ pub fn with_timeout<T: Send + 'static>(t: Duration, f: impl FnOnce() -> T + Send
 
 fn mtime(m: &std::fs::Metadata) -> u64 { m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0) }
 
-fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64, u64)>, errors: &mut usize, depth: usize, cancel: &AtomicBool) {
-    if depth > 40 || cancel.load(Ordering::Relaxed) { return; }
-    let rd = match std::fs::read_dir(dir) { Ok(r) => r, Err(_) => { *errors += 1; return; } };
+fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64, u64)>, failed: &mut Vec<PathBuf>, depth: usize, cancel: &AtomicBool) {
+    if depth > 40 || cancel.load(Ordering::Relaxed) { failed.push(dir.to_path_buf()); return; }
+    let rd = match std::fs::read_dir(dir) { Ok(r) => r, Err(_) => { failed.push(dir.to_path_buf()); return; } };
     for e in rd {
-        let Ok(e) = e else { *errors += 1; continue };
-        let Ok(ft) = e.file_type() else { *errors += 1; continue };
+        // A failed entry cannot be named, so retain old entries throughout this directory.
+        let Ok(e) = e else { failed.push(dir.to_path_buf()); continue };
         let p = e.path();
-        if ft.is_dir() { if !e.file_name().to_string_lossy().starts_with('.') { walk(&p, out, errors, depth + 1, cancel); } }
-        else if is_audio(&p) { match std::fs::metadata(&p) { Ok(m) if m.is_file() => out.push((p, m.len(), mtime(&m))), Ok(_) => {}, Err(_) => *errors += 1 } }
+        let Ok(ft) = e.file_type() else { failed.push(p); continue };
+        if ft.is_dir() { if !e.file_name().to_string_lossy().starts_with('.') { walk(&p, out, failed, depth + 1, cancel); } }
+        else if is_audio(&p) { match std::fs::metadata(&p) {
+            Ok(m) if m.is_file() => out.push((p, m.len(), mtime(&m))), Ok(_) => {}, Err(_) => failed.push(p),
+        } }
     }
 }
 
@@ -206,18 +223,21 @@ pub fn scan(folders: &[String], old: &Index, cancel: &Arc<AtomicBool>, progress:
         let fp = PathBuf::from(f); let fc = fp.clone();
         let st = match with_timeout(Duration::from_secs(10), move || fc.is_dir()) {
             Some(true) => { let fc = fp.clone(); let cc = cancel.clone();
-                match with_timeout(WALK_TIMEOUT, move || { let mut v = vec![]; let mut e = 0; walk(&fc, &mut v, &mut e, 0, &cc); (v, e) }) {
-                    Some((files, errs)) => { rep.errors += errs; let n = files.len();
+                match with_timeout(WALK_TIMEOUT, move || { let mut v = vec![]; let mut failed = vec![]; walk(&fc, &mut v, &mut failed, 0, &cc); (v, failed) }) {
+                    Some((files, failed)) => { rep.errors += failed.len(); let n = files.len();
                         for (p, size, mt) in files { let ps = p.display().to_string(); if !seen.insert(ps.clone()) { continue; }
                             match oldmap.get(ps.as_str()) { Some(e) if e.size == size && e.mtime == mt => { let mut e = (*e).clone(); e.folder = f.clone(); out.push(e); rep.unchanged += 1; }
                                 Some(_) => { rep.updated += 1; todo.push((p, size, mt, f.clone())); }
                                 None => { rep.added += 1; todo.push((p, size, mt, f.clone())); } } }
-                        FolderState::Available(n) }
+                        for e in old.entries.iter().filter(|e| e.folder == *f && failed.iter().any(|p| Path::new(&e.path).starts_with(p))) {
+                            if seen.insert(e.path.clone()) { out.push(e.clone()); }
+                        }
+                        if failed.is_empty() { FolderState::Available(n) } else { FolderState::Partial(n) } }
                     None => FolderState::NotResponding } }
             Some(false) => FolderState::Missing,
             None => FolderState::NotResponding,
         };
-        if !matches!(st, FolderState::Available(_)) {
+        if matches!(st, FolderState::Missing | FolderState::NotResponding) {
             rep.missing.push(f.clone());
             for e in old.entries.iter().filter(|e| e.folder == *f) { if seen.insert(e.path.clone()) { out.push(e.clone()); } }
         }
@@ -243,7 +263,7 @@ pub fn scan(folders: &[String], old: &Index, cancel: &Arc<AtomicBool>, progress:
         }
         progress(done, total);
     }
-    let avail: HashSet<&str> = states.iter().filter(|s| matches!(s.1, FolderState::Available(_))).map(|s| s.0.as_str()).collect();
+    let avail: HashSet<&str> = states.iter().filter(|s| matches!(s.1, FolderState::Available(_) | FolderState::Partial(_))).map(|s| s.0.as_str()).collect();
     rep.removed = old.entries.iter().filter(|e| avail.contains(e.folder.as_str()) && !seen.contains(&e.path)).count()
         + old.entries.iter().filter(|e| !folders.contains(&e.folder)).count();
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -350,7 +370,7 @@ impl Library {
         self.index.entries.retain(|e| e.folder != f); let _ = save_index(&self.data_dir, &self.index); self.reindex(); self.rescan();
     }
     fn start_analysis(&mut self) {
-        let todo: Vec<String> = self.index.entries.iter().filter(|e| e.bpm.is_none() && e.error.is_none() && e.analysis_error.is_none() && self.states.get(&e.folder).is_some_and(|s| matches!(s, FolderState::Available(_)))).map(|e| e.path.clone()).collect();
+        let todo: Vec<String> = self.index.entries.iter().filter(|e| e.bpm.is_none() && e.error.is_none() && e.analysis_error.is_none() && self.states.get(&e.folder).is_some_and(|s| matches!(s, FolderState::Available(_) | FolderState::Partial(_)))).map(|e| e.path.clone()).collect();
         if todo.is_empty() { return; }
         self.analysing = (0, todo.len());
         // limited concurrency so the computer stays usable: 1 worker per 4 cores, at most 2

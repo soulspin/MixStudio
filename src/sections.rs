@@ -12,6 +12,9 @@ pub struct SectionCopy {
 
 impl Track {
     pub fn set_sections(&mut self, spans: Vec<(f64,f64)>) {
+        let previous=self.source_spans();
+        if spans.first().map(|p|p.0)!=previous.first().map(|p|p.0) { self.trans.splice_fades[0]=false; }
+        if spans.last().map(|p|p.1)!=previous.last().map(|p|p.1) { self.trans.splice_fades[1]=false; }
         let mut merged: Vec<(f64,f64)>=vec![];
         for (a,b) in spans { if let Some(last)=merged.last_mut() { if (last.1-a).abs()<1e-8 { last.1=b; continue; } } merged.push((a,b)); }
         if merged.len()==1 && (merged[0].0-self.trim_in).abs()<1e-8 && (merged[0].1-(self.duration-self.trim_out)).abs()<1e-8 { merged.clear(); }
@@ -119,6 +122,24 @@ mod tests {
     use crate::model::{Mix, Track};
     fn track() -> Track {
         serde_json::from_str(r#"{"path":"test.wav","title":"Test","artist":"Test","bpm":120.0,"offset":0.0,"key":"8A","duration":32.0,"start_beat":0.0,"lane":0,"trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]}}"#).unwrap()
+    }
+    #[test]
+    fn split_at_source_cut_preserves_the_rendered_splice_fade() {
+        use std::sync::Arc;
+        for mult in [1.0,2.0] {
+            let mut m=Mix::default();m.bpm=120.0;let mut t=track();t.stretch=2;t.beat_mult=mult;t.trans.ratio=if mult==1.0 {1} else {2};
+            t.set_sections(vec![(0.0,4.0),(12.0,20.0)]);m.tracks.push(t);
+            let cut=8.0*mult;
+            let audio=Arc::new(crate::analysis::Audio{sr:8000,l:vec![0.2;256000],r:vec![0.2;256000]});
+            let before=crate::engine::render_offline(Arc::new(crate::engine::Snap::build(&m,&[Some(audio.clone())])),8000,cut-0.1,cut+0.1).0;
+            let right=m.split(0,cut).unwrap();m.split(right,cut+4.0*mult).unwrap();m.split(0,4.0*mult).unwrap();m.sync_transition(0);
+            assert!(!m.resolve_ratios());
+            let restored:Mix=serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+            let audios=vec![Some(audio);restored.tracks.len()];
+            let after=crate::engine::render_offline(Arc::new(crate::engine::Snap::build(&restored,&audios)),8000,cut-0.1,cut+0.1).0;
+            let diff=before.iter().zip(after).map(|(a,b)|(a-b).abs()).fold(0.0f32,f32::max);
+            assert!(diff<1e-6,"split changed source-cut fade by {diff} at ratio {mult}");
+        }
     }
     #[test]
     fn repeat_then_delete_preserves_source_and_playlist_identity() {

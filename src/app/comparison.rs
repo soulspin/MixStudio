@@ -12,8 +12,23 @@ impl Default for Comparison {
     fn default()->Self { Self{cache:Default::default(),incoming:None,stamp:vec![],center:0.0,span:8.0,anchors:[None,None],slot:0,target:0.0,proposed:true,audition:0,metro:false,preview_end:None,restore_loop:None} }
 }
 impl App {
+    pub(super) fn transition_members(&self,incoming:usize)->Option<[Vec<usize>;2]> {
+        let (o,i,s,e)=self.mix.logical_transitions().into_iter().find(|x|x.1==incoming)?;
+        let same=|a:usize,b:usize| {
+            let (a,b)=(&self.mix.tracks[a],&self.mix.tracks[b]);
+            a.trans.fragment_group!=0 && a.trans.fragment_group==b.trans.fragment_group && a.path==b.path && a.lane==b.lane
+        };
+        let mut members=[vec![],vec![]];
+        for (a,b,from,to) in self.mix.transitions() {
+            if from==s && to==e && (a==o || same(a,o)) && (b==i || same(b,i)) {
+                if !members[0].contains(&a) {members[0].push(a);}
+                if !members[1].contains(&b) {members[1].push(b);}
+            }
+        }
+        Some(members)
+    }
     pub(super) fn open_comparison(&mut self,incoming:usize) {
-        let Some((_,_,s,e))=self.mix.transitions().into_iter().find(|x|x.1==incoming) else { return; };
+        let Some((_,_,s,e))=self.mix.logical_transitions().into_iter().find(|x|x.1==incoming) else { return; };
         self.stop_comparison(); self.sel_in=Some(incoming); self.sel=Some(incoming); self.tab=Tab::Compare;
         self.comparison=Comparison{incoming:Some(incoming),stamp:self.alignment_stamp(incoming).unwrap_or_default(),center:(s+e)*0.5,target:((s+e)*0.5).round(),..Default::default()};
     }
@@ -40,8 +55,8 @@ impl App {
         if self.comparison.audition==0 { return normal; }
         let Some(i)=self.comparison.incoming else { return normal; };
         if self.alignment_stamp(i).as_ref()!=Some(&self.comparison.stamp) { return normal; }
-        let Some((o,i,_,_))=self.mix.transitions().into_iter().find(|x|x.1==i) else { return normal; };
-        let indices=match self.comparison.audition { 1=>vec![o],2=>vec![i],_=>vec![o,i] };
+        let Some(members)=self.transition_members(i) else {return normal;};
+        let indices=match self.comparison.audition {1=>members[0].clone(),2=>members[1].clone(),_=>members.into_iter().flatten().collect()};
         let proposed=self.proposed_track();
         let mut mix=self.mix.clone(); mix.tracks=indices.iter().map(|&k|if k==i {proposed.clone().unwrap_or_else(||self.mix.tracks[k].clone())} else {self.mix.tracks[k].clone()}).collect();
         // Hear source attacks before transition curves, EQ, FX and stem automation.
@@ -58,12 +73,13 @@ impl App {
         }
         self.comparison.audition=side; self.comparison.preview_end=Some(to);
         // Queue the audition snapshot before playback, avoiding a frame of the full mix.
-        let _=self.out.tx.send(Cmd::Snap(Arc::new(self.build_playback_snap())));
+        let _=self.out.snapshot(Arc::new(self.build_playback_snap()));
         self.seek(from.max(0.0)); let _=self.out.tx.send(Cmd::Play(true));
     }
     fn proposed_track(&self)->Option<Track> {
         if !self.comparison.proposed { return None; }
         let i=self.comparison.incoming?;
+        if self.transition_members(i)?.iter().any(|group|group.len()>1) {return None;}
         if self.alignment_stamp(i).as_ref()!=Some(&self.comparison.stamp) { return None; }
         let [Some(a),Some(b)]=self.comparison.anchors else { return None; };
         let mut key=self.comparison.stamp.clone(); key.extend([a.beat.to_bits(),a.source.to_bits(),b.beat.to_bits(),b.source.to_bits()]);
@@ -79,6 +95,7 @@ impl App {
     pub(super) fn apply_comparison_anchors(&mut self) {
         if self.lock { self.status="Unlock editing to apply anchors.".into(); return; }
         let Some(i)=self.comparison.incoming else { return; };
+        if self.transition_members(i).is_some_and(|groups|groups.iter().any(|g|g.len()>1)) {self.status="Correct source grids before splitting clips.".into();return;}
         if self.alignment_stamp(i).as_ref()!=Some(&self.comparison.stamp) { self.validate_comparison(); self.status="Timing changed. Set the anchors again.".into(); return; }
         let [Some(a),Some(b)]=self.comparison.anchors else { return; };
         match crate::gridtools::anchored(&self.mix.tracks[i],a,b) {
@@ -91,12 +108,12 @@ impl App {
     pub(super) fn comparison_tab(&mut self,ui:&mut egui::Ui) {
         egui::ScrollArea::vertical().id_salt("comparison_workbench").show(ui,|ui| {
             self.beatmatch_ui(ui);
-            let Some(i)=self.sel_in.filter(|i|self.mix.transitions().iter().any(|x|x.1==*i)) else { return; };
+            let Some(i)=self.sel_in.filter(|i|self.mix.logical_transitions().iter().any(|x|x.1==*i)) else { return; };
             if self.comparison.incoming!=Some(i) { self.open_comparison(i); }
             if self.alignment_stamp(i).as_ref()!=Some(&self.comparison.stamp) {
                 self.stop_comparison(); self.comparison.anchors=[None,None]; self.comparison.stamp=self.alignment_stamp(i).unwrap_or_default();
             }
-            let Some((o,i,s,e))=self.mix.transitions().into_iter().find(|x|x.1==i) else { return; };
+            let Some((o,i,s,e))=self.mix.logical_transitions().into_iter().find(|x|x.1==i) else { return; };
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Compare attacks");
                 if ui.button("← 4 beats").clicked(){self.comparison.center-=4.0;}
@@ -109,7 +126,8 @@ impl App {
             self.comparison.center=self.comparison.center.clamp(s,e);
             let half=self.comparison.span*0.5; let from=(self.comparison.center-half).max(s); let to=(self.comparison.center+half).min(e);
             if to-from<0.01 { ui.label("No visible overlap."); return; }
-            let editable=!self.lock && self.mix.tracks[i].sections.is_empty() && (self.mix.tracks[i].beat_mult-1.0).abs()<1e-9;
+            let members=self.transition_members(i).unwrap_or([vec![o],vec![i]]);
+            let editable=!self.lock && members.iter().all(|g|g.len()==1) && self.mix.tracks[i].sections.is_empty() && (self.mix.tracks[i].beat_mult-1.0).abs()<1e-9;
             ui.horizontal_wrapped(|ui| {
                 for (side,label) in [(1,"Listen A"),(2,"Listen B"),(3,"Listen both")] {
                     if ui.selectable_label(self.comparison.audition==side,label).clicked(){self.start_comparison_preview(side,from,to);}
@@ -139,9 +157,14 @@ impl App {
                     painter.rect_filled(Rect::from_min_max(pos2(x((ev.beat-0.45).max(from)),r.top()),pos2(x((ev.beat+0.45).min(to)),r.bottom())),0.0,C::from_rgba_unmultiplied(230,170,30,32));
                 } }
                 let t=if row==1 {proposed.as_ref().unwrap_or(&self.mix.tracks[ti])}else{&self.mix.tracks[ti]}; let grid=t.grid();
+                let grids:Vec<_>=if row==1 && proposed.is_some() {vec![(t.vis_start(0.0),t.end(0.0),grid.clone())]} else {
+                    members[row].iter().map(|&k|{let t=&self.mix.tracks[k];(t.vis_start(0.0),t.end(0.0),t.grid())}).collect()
+                };
                 if let Some((audio,_))=self.store.get(&t.path) {
                     let n=r.width().max(1.0) as usize;
                     for px in 0..n { let b0=from+(to-from)*px as f64/n as f64; let b1=from+(to-from)*(px+1) as f64/n as f64;
+                        let Some((_,end,grid))=grids.iter().find(|(a,b,_)|b0>=*a && b0<*b) else {continue;};
+                        let b1=b1.min(*end);
                         let a=(grid.sec(b0)*audio.sr as f64).max(0.0) as usize; let b=(grid.region_sec(b1,b0)*audio.sr as f64).max(0.0) as usize;
                         let end=b.max(a+1).min(audio.l.len().min(audio.r.len())); let step=((end.saturating_sub(a))/64).max(1);
                         let peak=(a.min(end)..end).step_by(step).map(|k|audio.l[k].abs().max(audio.r[k].abs())).fold(0.0_f32,f32::max).min(1.0);

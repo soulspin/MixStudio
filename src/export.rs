@@ -3,6 +3,25 @@ use std::path::Path;
 
 pub const FORMATS: [(&str, &str); 4] = [("WAV 16-bit", "wav"), ("WAV 24-bit", "wav"), ("FLAC 24-bit", "flac"), ("MP3 320 kbps (ffmpeg)", "mp3")];
 
+pub fn end_beat(mix: &crate::model::Mix) -> f64 {
+    mix.fx.iter().map(|f|f.end()+0.5).fold(mix.length_beats()+16.0,f64::max)
+}
+
+/// Own only a fresh private directory; cleanup cannot unlink adjacent user files.
+struct TemporaryWav { dir: std::path::PathBuf, path: std::path::PathBuf }
+impl TemporaryWav {
+    fn new() -> std::io::Result<Self> {
+        let dir=std::env::temp_dir().join(format!("mixstudio-export-{}",crate::recovery::unique_id()));
+        let mut builder=std::fs::DirBuilder::new();
+        #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; builder.mode(0o700); }
+        builder.create(&dir)?;
+        Ok(Self {path:dir.join("audio.wav"),dir})
+    }
+}
+impl Drop for TemporaryWav {
+    fn drop(&mut self) { let _=std::fs::remove_file(&self.path); let _=std::fs::remove_dir(&self.dir); }
+}
+
 pub fn wav(path: &Path, l: &[f32], r: &[f32], sr: u32, bits: u16) -> std::io::Result<()> {
     let n = l.len() as u32; let bps = (bits / 8) as u32; let mut v = Vec::with_capacity(44 + (n * 2 * bps) as usize);
     v.extend(b"RIFF"); v.extend((36 + n * 2 * bps).to_le_bytes()); v.extend(b"WAVEfmt "); v.extend(16u32.to_le_bytes());
@@ -28,13 +47,37 @@ pub fn has_ffmpeg() -> bool { std::process::Command::new("ffmpeg").arg("-version
 
 pub fn mp3(path: &Path, l: &[f32], r: &[f32], sr: u32) -> Result<(), String> {
     if !has_ffmpeg() { return Err("MP3 export needs ffmpeg (Arch/CachyOS: sudo pacman -S ffmpeg). Use WAV or FLAC instead.".into()); }
-    let tmp = path.with_extension("mixstudio-tmp.wav");
-    wav(&tmp, l, r, sr, 24).map_err(|e| e.to_string())?;
-    let o = std::process::Command::new("ffmpeg").args(["-y", "-loglevel", "error", "-i"]).arg(&tmp).args(["-codec:a", "libmp3lame", "-b:a", "320k"]).arg(path).output();
-    let _ = std::fs::remove_file(&tmp);
+    let tmp = TemporaryWav::new().map_err(|e| e.to_string())?;
+    wav(&tmp.path, l, r, sr, 24).map_err(|e| e.to_string())?;
+    let o = std::process::Command::new("ffmpeg").args(["-y", "-loglevel", "error", "-i"]).arg(&tmp.path).args(["-codec:a", "libmp3lame", "-b:a", "320k"]).arg(path).output();
     match o { Ok(o) if o.status.success() => Ok(()), Ok(o) => Err(format!("ffmpeg failed: {}", String::from_utf8_lossy(&o.stderr).trim())), Err(e) => Err(e.to_string()) }
 }
 
 pub fn write(path: &Path, l: &[f32], r: &[f32], sr: u32, fmt: u8) -> Result<(), String> {
     match fmt { 0 => wav(path, l, r, sr, 16).map_err(|e| e.to_string()), 1 => wav(path, l, r, sr, 24).map_err(|e| e.to_string()), 2 => flac(path, l, r, sr), _ => mp3(path, l, r, sr) }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn export_includes_the_complete_effect_tail_and_release() {
+        let mut mix=crate::model::Mix::default();
+        let mut echo=crate::fx::FxBlock::new(crate::fx::FxKind::Echo,4,10.0); echo.len=8.0; echo.tail=64.0;
+        mix.fx.push(echo);
+        assert_eq!(end_beat(&mix),82.5);
+    }
+    #[test]
+    fn mp3_export_does_not_touch_a_same_named_user_wav() {
+        if !has_ffmpeg() { return; }
+        let dir=std::env::temp_dir().join(format!("mixstudio-mp3-test-{}",crate::recovery::unique_id()));
+        std::fs::create_dir(&dir).unwrap();
+        let output=dir.join("set.mp3"); let existing=dir.join("set.mixstudio-tmp.wav");
+        std::fs::write(&existing,b"user audio - must survive").unwrap();
+        mp3(&output,&vec![0.1;4410],&vec![0.1;4410],44100).unwrap();
+        assert_eq!(std::fs::read(existing).unwrap(),b"user audio - must survive");
+        assert!(std::fs::metadata(output).unwrap().len()>100);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(),2,"temporary export files leaked");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

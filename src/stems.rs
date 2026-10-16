@@ -40,10 +40,39 @@ fn sha256_file(p: &Path) -> std::io::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+fn cached_model(p: &Path, size: u64, expected_sha256: &str) -> anyhow::Result<bool> {
+    let metadata = match std::fs::metadata(p) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    if !metadata.is_file() || metadata.len() != size || sha256_file(p)? != expected_sha256 {
+        anyhow::bail!("cached model failed integrity verification: {}. Move it aside or remove it to download a fresh copy", p.display());
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+    #[test]
+    fn cached_model_checks_bytes_and_preserves_corrupt_file() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-model-{}",crate::recovery::unique_id())); std::fs::create_dir(&dir).unwrap();
+        let p=dir.join("fake.onnx"); let valid=b"valid fake model";
+        std::fs::write(&p,valid).unwrap(); let hash=sha256_file(&p).unwrap();
+        assert!(cached_model(&p,valid.len() as u64,&hash).unwrap());
+        std::fs::write(&p,b"wrong fake model").unwrap();
+        let corrupt=cached_model(&p,valid.len() as u64,&hash);
+        let bytes=std::fs::read(&p).unwrap(); std::fs::remove_dir_all(dir).unwrap();
+        assert!(corrupt.is_err(),"same-size corrupt cache accepted without hashing");
+        assert_eq!(bytes,b"wrong fake model");
+    }
+}
+
 /// Download (if needed) and verify the model. `progress` receives 0..1000.
 pub fn ensure_model(progress: &AtomicU32) -> anyhow::Result<PathBuf> {
     let p = model_path();
-    if p.exists() && std::fs::metadata(&p)?.len() == MODEL_SIZE { return Ok(p); }
+    if cached_model(&p, MODEL_SIZE, MODEL_SHA256)? { return Ok(p); }
     std::fs::create_dir_all(models_dir())?;
     let tmp = p.with_extension("part");
     let resp = ureq::get(MODEL_URL).call().map_err(|e| anyhow::anyhow!("model download failed: {e}"))?;
@@ -85,7 +114,8 @@ pub fn session_info() -> Result<String, String> {
     let envr = &ENV.get().unwrap().as_ref().unwrap().0;
     let mut s = SESSION.lock().unwrap();
     if let Some((_, ep)) = s.as_ref() { return Ok(ep.clone()); }
-    let path = model_path(); if !path.exists() { return Err("model not downloaded".into()); }
+    let path = model_path();
+    if !cached_model(&path, MODEL_SIZE, MODEL_SHA256).map_err(|e| e.to_string())? { return Err("model not downloaded".into()); }
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).saturating_sub(1).max(1);
     let mk = |cuda: bool| -> Result<(ort::session::Session, String), String> {
         let mut b = ort::session::Session::builder(envr).map_err(|e| e.to_string())?;

@@ -46,6 +46,7 @@ impl Persistence {
 }
 impl App {
     pub(super) fn request_project(&mut self,target:Target) {
+        if let Err(e)=crate::validation::validate_mix(&target.mix) {self.status=e;return;}
         if self.persistence.pending.is_some(){self.status="Protecting the current project; please wait.".into();return;}
         let body=serde_json::to_string(&self.mix).unwrap();
         if self.persistence.enabled && body!=self.persistence.saved {

@@ -3,18 +3,28 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender};
 use std::sync::Arc;
 
-pub struct Audio { pub tx: Sender<Cmd>, pub shared: Arc<Shared>, pub _stream: Option<cpal::Stream>, pub info: String }
+pub struct Audio { preparation: std::sync::Mutex<crate::engine::SnapshotBuilder>, sr: f32, pub tx: Sender<Cmd>, pub shared: Arc<Shared>, pub _stream: Option<cpal::Stream>, pub info: String }
 
+impl Audio {
+    pub fn snapshot(&self, snap: Arc<crate::engine::Snap>) -> Result<(), crossbeam_channel::SendError<Cmd>> {
+        let mut builder=self.preparation.lock().unwrap_or_else(|e|e.into_inner());
+        self.tx.send(Cmd::Prepared(builder.prepare(snap,self.sr)))
+    }
+    #[cfg(test)]
+    pub fn test_output(tx: Sender<Cmd>, shared: Arc<Shared>) -> Self {
+        Self {tx,shared,_stream:None,info:String::new(),sr:44100.0,preparation:Default::default()}
+    }
+}
 pub fn start() -> Audio {
     let (tx, rx) = crossbeam_channel::bounded::<Cmd>(1024);
     let shared = Arc::new(Shared::new());
     match build(rx, shared.clone()) {
-        Ok((s, info)) => Audio { tx, shared, _stream: Some(s), info },
-        Err(e) => Audio { tx, shared, _stream: None, info: format!("No audio: {e}") },
+        Ok((s, info, sr)) => Audio { tx, shared, _stream: Some(s), info, sr:sr as f32, preparation:Default::default() },
+        Err(e) => Audio { tx, shared, _stream: None, info: format!("No audio: {e}"), sr:44100.0, preparation:Default::default() },
     }
 }
 
-fn build(rx: Receiver<Cmd>, shared: Arc<Shared>) -> anyhow::Result<(cpal::Stream, String)> {
+fn build(rx: Receiver<Cmd>, shared: Arc<Shared>) -> anyhow::Result<(cpal::Stream, String, u32)> {
     let host = cpal::default_host();
     let dev = host.default_output_device().ok_or_else(|| anyhow::anyhow!("no audio device"))?;
     let def = dev.default_output_config()?;
@@ -36,9 +46,11 @@ fn build(rx: Receiver<Cmd>, shared: Arc<Shared>) -> anyhow::Result<(cpal::Stream
             }, err, None)?,
             cpal::SampleFormat::I16 => dev.build_output_stream(cfg, move |out: &mut [i16], _| {
                 while let Ok(c) = rx.try_recv() { eng.handle(c); }
-                if tmp.len() < out.len() { tmp.resize(out.len(), 0.0); }
-                eng.render(&mut tmp[..out.len()], ch);
-                for (o, x) in out.iter_mut().zip(tmp.iter()) { *o = (x * 32767.0) as i16; }
+                let capacity=(tmp.len()/ch.max(1))*ch.max(1);
+                for chunk in out.chunks_mut(capacity) {
+                    eng.render(&mut tmp[..chunk.len()],ch);
+                    for (o,x) in chunk.iter_mut().zip(tmp.iter()) {*o=(x*32767.0) as i16;}
+                }
             }, err, None)?,
             f => anyhow::bail!("audio format {f:?} not supported"),
         };
@@ -49,7 +61,7 @@ fn build(rx: Receiver<Cmd>, shared: Arc<Shared>) -> anyhow::Result<(cpal::Stream
         Err(_) => { let c2: cpal::StreamConfig = def.config(); mk(&c2, rx, shared)? }
     };
     stream.play()?;
-    Ok((stream, format!("{name} · {sr} Hz")))
+    Ok((stream, format!("{name} · {sr} Hz"),sr))
 }
 
 #[cfg(test)]
@@ -63,10 +75,10 @@ mod device_diagnostics {
         let audio:Vec<_>=mix.tracks.iter().map(|t|Some(Arc::new(crate::analysis::load(std::path::Path::new(&t.path)).unwrap().0))).collect();
         let out=start(); println!("Device: {}",out.info); assert!(out._stream.is_some());
         let from=mix.transitions()[0].2+24.0;
-        out.tx.send(Cmd::Snap(Arc::new(crate::engine::Snap::build(&mix,&audio)))).unwrap();
+        out.snapshot(Arc::new(crate::engine::Snap::build(&mix,&audio))).unwrap();
         out.tx.send(Cmd::Seek(from)).unwrap();out.tx.send(Cmd::Play(true)).unwrap();
         let begin=std::time::Instant::now();
-        for _ in 0..250 { out.tx.send(Cmd::Snap(Arc::new(crate::engine::Snap::build(&mix,&audio)))).unwrap();std::thread::sleep(std::time::Duration::from_millis(16)); }
+        for _ in 0..250 { out.snapshot(Arc::new(crate::engine::Snap::build(&mix,&audio))).unwrap();std::thread::sleep(std::time::Duration::from_millis(16)); }
         let elapsed=begin.elapsed().as_secs_f64(); let progressed=(out.shared.beat()-from)*60.0/mix.bpm;
         out.tx.send(Cmd::Play(false)).unwrap();
         println!("Device wall time {elapsed:.3}s, audio timeline progressed {progressed:.3}s, ratio {:.3}",progressed/elapsed);

@@ -185,7 +185,10 @@ impl Analysis {
 }
 
 pub fn decode(path: &Path) -> anyhow::Result<(Audio, String, String)> {
-    let f = std::fs::File::open(path)?;
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(path)?;
+    let mut header = [0u8; 12]; f.read_exact(&mut header)?; f.rewind()?;
+    let wave = &header[..4] == b"RIFF" && &header[8..] == b"WAVE";
     let mss = MediaSourceStream::new(Box::new(f), Default::default());
     let mut hint = Hint::new();
     if let Some(e) = path.extension().and_then(|e| e.to_str()) { hint.with_extension(e); }
@@ -201,13 +204,25 @@ pub fn decode(path: &Path) -> anyhow::Result<(Audio, String, String)> {
     let mut fmt = probed.format;
     if let Some(r) = fmt.metadata().current() { read_meta(r); }
     let track = fmt.default_track().ok_or_else(|| anyhow::anyhow!("no audio track"))?.clone();
-    let mut dec = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
+    let codecs = symphonia::default::get_codecs();
+    let mut dec = codecs.make(&track.codec_params, &DecoderOptions { verify: true })?;
+    // WAVE PCM and native FLAC declare samples. Other container durations may
+    // include delay/padding or be estimates. Symphonia 0.5's AIFF count includes
+    // the SSND header bytes, so it cannot serve as an exact sample count either.
+    let flac = track.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_FLAC;
+    let exact_frames = if flac || (wave && codecs.get_codec(track.codec_params.codec).is_some_and(|c| c.short_name.starts_with("pcm_"))) {
+        track.codec_params.n_frames.filter(|&n| n > 0)
+    } else { None };
     let mut sr = track.codec_params.sample_rate.unwrap_or(44100);
     let (mut l, mut r) = (Vec::new(), Vec::new());
     loop {
-        let pkt = match fmt.next_packet() { Ok(p) => p, Err(_) => break };
+        let pkt = match fmt.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(anyhow::anyhow!("audio packet error: {e}")),
+        };
         if pkt.track_id() != track.id { continue; }
-        let buf = match dec.decode(&pkt) { Ok(b) => b, Err(symphonia::core::errors::Error::DecodeError(_)) => continue, Err(_) => break };
+        let buf = dec.decode(&pkt).map_err(|e| anyhow::anyhow!("audio decode error: {e}"))?;
         let spec = *buf.spec();
         sr = spec.rate;
         let ch = spec.channels.count().max(1);
@@ -219,6 +234,17 @@ pub fn decode(path: &Path) -> anyhow::Result<(Audio, String, String)> {
         }
     }
     if l.is_empty() { anyhow::bail!("could not decode audio"); }
+    if let Some(expected) = exact_frames {
+        let actual = l.len() as u64;
+        // flacenc pads its last fixed block with zeros and includes those zeros
+        // in its checksum. Verify the complete decoded stream before trimming.
+        let padded_flac = flac && actual > expected
+            && actual - expected < dec.codec_params().max_frames_per_packet.unwrap_or(0)
+            && l[expected as usize..].iter().chain(&r[expected as usize..]).all(|&s| s == 0.0);
+        if actual != expected && !padded_flac { anyhow::bail!("incomplete audio: expected {expected} frames, decoded {actual}"); }
+    }
+    if dec.finalize().verify_ok == Some(false) { anyhow::bail!("audio integrity check failed"); }
+    if flac { if let Some(expected) = exact_frames { l.truncate(expected as usize); r.truncate(expected as usize); } }
     Ok((Audio { sr, l, r }, title, artist))
 }
 
@@ -800,4 +826,52 @@ fn flex_attacks(m: &[f32], sr: u32, beats: &[f64]) -> Vec<f64> {
     out.retain(|&t| t >= 0.0);
     for k in 1..out.len() { if out[k] <= out[k - 1] + 0.05 { out[k] = out[k - 1] + 0.05; } }
     out
+}
+
+#[cfg(test)]
+mod decode_integrity_tests {
+    use super::*;
+    fn wav(frames: usize) -> Vec<u8> {
+        let mut b=Vec::new();
+        b.extend_from_slice(b"RIFF"); b.extend_from_slice(&(36+frames as u32*2).to_le_bytes()); b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes()); b.extend_from_slice(&1u16.to_le_bytes()); b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&8000u32.to_le_bytes()); b.extend_from_slice(&16000u32.to_le_bytes()); b.extend_from_slice(&2u16.to_le_bytes()); b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data"); b.extend_from_slice(&(frames as u32*2).to_le_bytes()); b.resize(44+frames*2,0); b
+    }
+    #[test]
+    fn flac_decode_checks_complete_samples_and_integrity() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-flac-{}",crate::recovery::unique_id())); std::fs::create_dir(&dir).unwrap();
+        let path=dir.join("audio.flac");
+        let samples:Vec<_>=(0..32000).map(|i| (i as f32*0.137).sin()*0.4).collect();
+        crate::export::flac(&path,&samples,&samples,44100).unwrap();
+        let decoded=decode(&path).unwrap().0; assert_eq!(decoded.l.len(),samples.len());
+        let mut bytes=std::fs::read(&path).unwrap(); let n=bytes.len(); bytes[n-64]^=0x20;
+        std::fs::write(&path,&bytes).unwrap(); let corrupt=decode(&path);
+        bytes.truncate(n*3/4); std::fs::write(&path,&bytes).unwrap(); let truncated=decode(&path);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(corrupt.is_err(),"corrupted FLAC payload accepted"); assert!(truncated.is_err(),"truncated FLAC accepted");
+    }
+    #[test]
+    fn compressed_delay_and_padding_are_not_exact_pcm_counts() {
+        // Exercise both a duration-estimating raw MP3 and Xing/LAME delay/padding.
+        if std::process::Command::new("ffmpeg").arg("-version").output().is_err() { return; }
+        let dir=std::env::temp_dir().join(format!("mixstudio-lossy-{}",crate::recovery::unique_id())); std::fs::create_dir(&dir).unwrap();
+        let source=dir.join("source.wav"); std::fs::write(&source,wav(10001)).unwrap();
+        for (name,opts) in [("xing.mp3",vec!["-c:a","libmp3lame"]),("raw.mp3",vec!["-c:a","libmp3lame","-write_xing","0"]),("audio.m4a",vec!["-c:a","aac"]),("audio.ogg",vec!["-c:a","libvorbis"]),("audio.aiff",vec!["-c:a","pcm_s16be"]),("alac.m4a",vec!["-c:a","alac"])] {
+            let path=dir.join(name);
+            let status=std::process::Command::new("ffmpeg").args(["-v","error","-nostdin","-i"]).arg(&source).args(opts).arg(&path).status().unwrap();
+            assert!(status.success(),"fixture encoder failed: {name}");
+            let result=decode(&path); assert!(result.is_ok(),"valid {name} rejected: {:?}",result.err());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn truncated_wav_is_not_successful_audio() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-decode-{}",crate::recovery::unique_id())); std::fs::create_dir(&dir).unwrap();
+        let path=dir.join("audio.wav"); let mut bytes=wav(8000); std::fs::write(&path,&bytes).unwrap();
+        assert_eq!(decode(&path).unwrap().0.l.len(),8000);
+        bytes.truncate(44+4000); std::fs::write(&path,&bytes).unwrap();
+        let result=decode(&path); std::fs::remove_dir_all(dir).unwrap();
+        assert!(result.is_err(),"a WAV missing 75% of its declared samples was accepted");
+    }
 }

@@ -3,6 +3,18 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+    #[test]
+    fn moving_an_overcrowded_beat_keeps_the_map_unchanged() {
+        let mut m=BeatMap {bpm:120.0,beats:(0..16).map(|i|i as f64*0.0001).collect()};
+        let before=m.beats.clone();
+        assert_eq!(m.move_single(1,0.010),0.0);
+        assert_eq!(m.beats,before);
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct BeatMap {
     /// Time (s) of every tracked beat, strictly increasing.
@@ -43,7 +55,7 @@ impl BeatMap {
 /// Mix beat <-> source seconds for one track. Track beat x = mix beat - start_beat; x = 0 is the
 /// downbeat at `offset` seconds. With a beat map the spacing follows the map; otherwise linear.
 #[derive(Clone)]
-pub struct Grid { map: Option<Arc<BeatMap>>, r: f64, u0: f64, bpm: f64, offset: f64, start: f64, regions: Arc<Vec<(f64, f64, f64)>>, revision: u64 }
+pub struct Grid { map: Option<Arc<BeatMap>>, r: f64, u0: f64, bpm: f64, offset: f64, start: f64, regions: Arc<Vec<(f64, f64, f64)>>, revision: u64, outer: Option<(f64,f64,[bool;2])> }
 
 impl Grid {
     pub fn new(map: Option<Arc<BeatMap>>, bpm: f64, offset: f64, start: f64) -> Grid {
@@ -55,7 +67,7 @@ impl Grid {
         };
         let u0 = map.as_ref().map(|m| m.u_of(offset)).unwrap_or(0.0);
         let revision = map.as_ref().map_or(0, |m| Arc::as_ptr(m) as u64);
-        Grid { map, r, u0, bpm, offset, start, regions: Arc::new(vec![]), revision }
+        Grid { map, r, u0, bpm, offset, start, regions: Arc::new(vec![]), revision, outer: None }
     }
     /// Beat ratio: one mix beat covers `1/m` track beats (m = 2: a 70 BPM track runs on a 140 BPM grid).
     pub fn scaled(mut self, m: f64) -> Grid { if m > 0.0 && m != 1.0 { self.r /= m; self.bpm *= m; } self }
@@ -79,13 +91,23 @@ impl Grid {
     }
     fn region(&self, b: f64) -> usize { self.regions.partition_point(|r| r.0 <= b).saturating_sub(1) }
     pub fn section_id(&self, b: f64) -> u64 { self.revision.wrapping_add(self.region(b) as u64) }
+    pub fn outer_fades(mut self,start:f64,end:f64,flags:[bool;2]) -> Self {
+        if flags.iter().any(|v|*v) { self.outer=Some((start,end,flags)); }self
+    }
     pub fn splice_gain(&self, b: f64) -> f64 {
-        if self.regions.is_empty() { return 1.0; }
-        let i = self.region(b); let r = self.regions[i];
-        let width = self.bpm / 60.0 * 0.003;
-        let left = if i>0 { (b-r.0)/width } else { 1.0 };
-        let right = if i+1<self.regions.len() { (r.0+r.2-b)/width } else { 1.0 };
-        left.min(right).clamp(0.0,1.0)
+        let width=self.bpm/60.0*0.003;
+        let mut gain=1.0_f64;
+        if !self.regions.is_empty() {
+            let i=self.region(b);let r=self.regions[i];
+            let left=if i>0 { (b-r.0)/width } else { 1.0 };
+            let right=if i+1<self.regions.len() { (r.0+r.2-b)/width } else { 1.0 };
+            gain=left.min(right);
+        }
+        if let Some((start,end,flags))=self.outer {
+            if flags[0] { gain=gain.min((b-start)/width); }
+            if flags[1] { gain=gain.min((end-b)/width); }
+        }
+        gain.clamp(0.0,1.0)
     }
     pub fn cuts(&self) -> impl Iterator<Item=f64> + '_ { self.regions.iter().skip(1).map(|r| r.0) }
     /// Evaluate within the section containing `at`, also for WSOLA pre-roll outside its edges.
@@ -120,6 +142,7 @@ impl BeatMap {
         let n = self.beats.len(); if i >= n { return 0.0; }
         let lo = if i > 0 { self.beats[i - 1] + 0.005 } else { f64::MIN };
         let hi = if i + 1 < n { self.beats[i + 1] - 0.005 } else { f64::MAX };
+        if lo>hi || !d.is_finite() { return 0.0; }
         let old = self.beats[i]; self.beats[i] = (old + d).clamp(lo, hi); self.beats[i] - old
     }
     /// Move beat `i` by `d` seconds and stretch everything after the pivot (`pivot` < i stays put,

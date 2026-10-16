@@ -18,6 +18,7 @@ mod stems;
 mod model;
 mod sections;
 mod recovery;
+mod validation;
 mod testgen;
 use std::path::Path;
 use std::sync::Arc;

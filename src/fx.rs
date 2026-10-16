@@ -14,6 +14,8 @@ impl FxKind {
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct FxBlock {
+    /// Persistent identity keeps DSP history attached to this block across edits.
+    #[serde(default = "new_id")] pub id: u64,
     pub kind: FxKind,
     /// 0/1 = Deck 1/2, 2/3 = Sample 1/2, 4 = master
     pub target: usize,
@@ -29,11 +31,17 @@ pub struct FxBlock {
     /// Scratch: pattern (see scratch.rs) and easing 0..1
     #[serde(default)] pub pattern: String, #[serde(default)] pub ease: f32,
 }
+pub fn new_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+    NEXT.try_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |v| Some(now.max(v.saturating_add(1)))).unwrap_or(0).saturating_add(1).max(now)
+}
 impl FxBlock {
+    pub fn renew_id(&mut self) { self.id = new_id(); }
     pub fn new(kind: FxKind, target: usize, start: f64) -> FxBlock {
         let (mix, decay, depth, time, tail) = match kind { FxKind::Reverb => (0.4, 0.6, 0.5, 1.0, 8.0), FxKind::Echo => (0.45, 0.5, 0.5, 0.75, 8.0), FxKind::Flanger => (0.6, 0.5, 0.7, 4.0, 0.0), FxKind::FilterSweep => (1.0, 0.5, 0.8, 1.0, 0.0), FxKind::Scratch => (1.0, 0.0, 0.0, 1.0, 0.0) };
         let scratch = kind == FxKind::Scratch;
-        FxBlock { kind, target: if scratch { target.min(3) } else { target }, start, len: if scratch { 4.0 } else { 8.0 }, tail, mix, decay, depth, time,
+        FxBlock { id: new_id(), kind, target: if scratch { target.min(3) } else { target }, start, len: if scratch { 4.0 } else { 8.0 }, tail, mix, decay, depth, time,
             pattern: if scratch { crate::scratch::PRESETS[0].1.to_string() } else { String::new() }, ease: 0.6 }
     }
     pub fn end(&self) -> f64 { self.start + self.len + if self.kind.has_tail() { self.tail } else { 0.0 } }
@@ -61,21 +69,25 @@ impl FxState {
         let k = sr / 44100.0;
         let comb = [0, 1].map(|c| COMB.map(|n| vec![0.0; ((n + 23 * c) as f32 * k) as usize + 1]));
         let ap = [0, 1].map(|c| AP.map(|n| vec![0.0; ((n + 23 * c) as f32 * k) as usize + 1]));
-        FxState { comb, cpos: [[0; 4]; 2], cfilt: [[0.0; 4]; 2], ap, apos: [[0; 2]; 2], dl: vec![[0.0; 2]; (sr * 4.0) as usize], dpos: 0, fl: vec![[0.0; 2]; 2048], fpos: 0, svf: [[0.0; 2]; 2], active: false, sr }
+        FxState { comb, cpos: [[0; 4]; 2], cfilt: [[0.0; 4]; 2], ap, apos: [[0; 2]; 2], dl: vec![[0.0; 2]; ((sr * 4.0) as usize).max(2)], dpos: 0, fl: vec![[0.0; 2]; 2048], fpos: 0, svf: [[0.0; 2]; 2], active: false, sr }
     }
     pub fn reset(&mut self) {
         for c in 0..2 { for v in &mut self.comb[c] { v.iter_mut().for_each(|x| *x = 0.0); } for v in &mut self.ap[c] { v.iter_mut().for_each(|x| *x = 0.0); } }
+        self.cpos = [[0; 4]; 2]; self.apos = [[0; 2]; 2]; self.dpos = 0; self.fpos = 0;
         self.cfilt = [[0.0; 4]; 2]; self.dl.iter_mut().for_each(|x| *x = [0.0; 2]); self.fl.iter_mut().for_each(|x| *x = [0.0; 2]); self.svf = [[0.0; 2]; 2]; self.active = false;
     }
     /// Process `buf` in place for mix beats b0 + i * bpb. `live` ignores the block's time range.
-    pub fn process(&mut self, b: &FxBlock, buf: &mut [[f32; 2]], b0: f64, bpb: f64, bpm: f64, live: bool) {
+    pub fn process(&mut self, b: &FxBlock, buf: &mut [[f32; 2]], beats: &[f64], snap: &crate::engine::Snap, live: bool) {
         if b.kind == FxKind::Scratch { return; } // handled per track in the engine
-        let n = buf.len(); let b1 = b0 + bpb * n as f64;
-        if !live && (b1 < b.start || b0 > b.end() + 0.5) { if self.active { self.reset(); } return; }
-        self.active = true;
+        let n = buf.len();
         let sr = self.sr; let send_end = b.start + b.len; let ramp = 0.02;
         for i in 0..n {
-            let t = b0 + bpb * i as f64;
+            let t = beats[i];
+            // State begins and ends on the actual sample, independent of which
+            // callback happens to contain a block boundary.
+            if !live && (t<b.start || t>b.end()+0.5) {if self.active {self.reset();}continue;}
+            self.active=true;
+            let bpm=snap.bpm_at(t);
             let send = if live { 1.0 } else { (((t - b.start) / ramp).min((send_end - t) / ramp)).clamp(0.0, 1.0) as f32 };
             let gate = if live { 1.0 } else { (((t - b.start + ramp) / ramp).min((b.end() + 0.5 - t) / 0.5)).clamp(0.0, 1.0) as f32 };
             let x = buf[i];

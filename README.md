@@ -2,13 +2,24 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.20](https://img.shields.io/badge/status-beta%200.20-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.21](https://img.shields.io/badge/status-beta%200.21-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.20:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.21:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.19: recover an unsaved project copy](docs/screenshots/recovery.png)
+
+## New in 0.21
+
+This maintenance release addresses the prioritised renderer, editing and storage findings in the [application audit](docs/AUDIT-2026-10-16.md). See the [fixes and verification record](docs/MAINTENANCE-2026-10-16.md) for scope and remaining limits.
+
+- **Playback:** remove the hidden 64-track key-lock and 16-effect limits, prepare DSP state outside the audio callback, retain unchanged effect history, and clear deleted/replaced effects safely. Seek resets filters and transport history.
+- **Timing:** accurate tempo integration and loop boundaries, including tempo-floor crossings; identical rendered output across tested callback partitions. Tiny loops reanchor stretched audio. Effect starts/releases follow sample timing.
+- **Editing:** retain full transition envelopes and source-cut smoothing after splitting, keep logical fragments together when changing transition position/length, lanes or ratios, and map phrases through the source grid and arranged occurrences. Layout remains stable on later frames.
+- **File safety:** validate projects/recovery before activation or replacement, reject damaged sources where integrity can be checked, retain library metadata under unreadable subfolders, verify cached model hashes, preserve complete FX export tails, and isolate MP3 scratch files.
+
+Compare dry audition includes every split fragment. Automatic beatmatch measurement/correction and two-anchor correction require unsplit clips; correct source grids before splitting. Existing split projects saved before this release lack logical fragment identity and are not automatically regrouped. A layout that oscillates between automatic half/double ratios keeps only the conflicting ratios explicit; Undo restores the previous layout.
 
 ## New in 0.20
 
@@ -18,7 +29,7 @@
 
 Existing project grids and manual edits stay saved as they were. Reopen a project to load the new analysis, then use **Beatgrid → Reset to analysis** on an uncut source clip to adopt it. Correct the grid before making section edits. A displayed decimal is precision of representation, not a confidence guarantee.
 
-Read the [full audit and prioritised open issues](docs/AUDIT-2026-10-16.md). The controlled test results are not a guarantee of perfect beat counts or musical downbeats on arbitrary recordings. Audio-engine timing, long-set key lock and split-transition fixes take priority over new features.
+Read the [full audit and prioritised open issues](docs/AUDIT-2026-10-16.md). The controlled test results are not a guarantee of perfect beat counts or musical downbeats on arbitrary recordings. The renderer timing, long-set key-lock and split-transition findings were subsequently addressed in 0.21; analysis confidence and broader music validation remain ongoing work.
 
 ## New in 0.19
 
@@ -102,7 +113,7 @@ It's native, fast, and doesn't need an account. No sign-up, no license keys, no 
 
 ![Non-destructive section editing](docs/screenshots/sections.png)
 
-Captured on Linux using the app's generated demo music. Beatgrid shows 0.20, Recovery 0.19, Compare 0.18, Track 0.17, and the other views 0.16.
+Captured on Linux using the app's generated demo music. Beatgrid shows 0.21, Recovery 0.19, Compare 0.18, Track 0.17, and the other views 0.16.
 
 | Transition editing | Track properties |
 |---|---|
