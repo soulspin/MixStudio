@@ -746,11 +746,17 @@ impl App {
                     });
                     ui.add(egui::Button::new("?").min_size(vec2(28.0, 28.0))).on_hover_text("Space = play/pause · Ctrl+scroll = zoom · scroll = pan · Ctrl+Z = undo · Delete = remove track · drop audio files on the window");
                     if ui.add(egui::Button::new("Export").min_size(vec2(60.0, 28.0))).on_hover_text("Export the whole mix (format in the Master tab)").clicked() { self.dialog(true, 2); }
-                    if self.loading > 0 { ui.spinner(); ui.label(format!("Analysing {}…", self.loading)); }
-                    else if !self.status.is_empty() { ui.label(egui::RichText::new(&self.status).color(DIM).size(12.0)); }
                 });
             });
         });
+        if self.loading > 0 || !self.status.is_empty() {
+            egui::TopBottomPanel::top("status").exact_height(26.0)
+                .frame(egui::Frame::none().fill(PANEL).inner_margin(egui::Margin::symmetric(10.0, 3.0)))
+                .show(ctx, |ui| { ui.horizontal_centered(|ui| {
+                    let text=if self.loading > 0 { ui.spinner();format!("Analysing {}…",self.loading) } else { self.status.clone() };
+                    ui.add(egui::Label::new(egui::RichText::new(&text).color(DIM).size(12.0)).truncate()).on_hover_text(text);
+                }); });
+        }
     }
 
     fn tab_bar(&mut self, ctx: &egui::Context) {
@@ -2203,6 +2209,28 @@ mod section_ui_tests {
         ctx.run(egui::RawInput {screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(width,800.0))),events,..Default::default()},|ctx| {
             egui::CentralPanel::default().show(ctx,|ui|app.timeline(ui));
         })
+    }
+    #[test]
+    fn header_status_does_not_overlap_navigation() {
+        let (mut a,ctx,_rx,dir)=setup();
+        a.status="Auto-order (Balanced): 2/4 smooth transitions, score 1.08 → 1.05 in 0 ms, 4 outro→intro phrase overlaps. Undo restores the old order.".into();
+        for width in [1000.0,1183.0,1600.0] {
+            for loading in [0,4] {
+                a.loading=loading;
+                let draw=|a:&mut App|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(width,800.0))),..Default::default()},|ctx|a.top_bar(ctx));
+                draw(&mut a);let out=draw(&mut a);
+                let texts:Vec<_>=out.shapes.iter().filter_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape{Some(t)}else{None}).collect();
+                let status=texts.iter().find(|t|t.galley.text().starts_with(if loading>0 {"Analysing"}else{"Auto-order"})).expect("visible status");
+                let sr=Rect::from_min_size(status.pos,status.galley.size());
+                for t in &texts {
+                    if ["▭ Carousel","☰ Playlist","|||\\ Library","〰 Studio","Export","?","⚙"].contains(&t.galley.text()) {
+                        assert!(!sr.intersects(Rect::from_min_size(t.pos,t.galley.size())),"status overlaps {} at {width}",t.galley.text());
+                    }
+                }
+                assert!(sr.min.x>=0.0&&sr.max.x<=width,"status exceeds viewport at {width}: {sr:?}");
+            }
+        }
+        a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
     }
     #[test]
     fn recovery_window_restore_button_opens_a_copy_and_close_protects_it() {

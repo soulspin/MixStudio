@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.21.1-beta
+
+- Give analysis and action status messages a separate row below navigation. Long messages truncate to the available width and show their full text on hover, preventing overlap with menu and export buttons.
+
 ## 0.21.0-beta
 
 - Resolve the prioritised renderer/editor/storage audit findings; record changes, regressions and remaining limits in docs/MAINTENANCE-2026-10-16.md.
