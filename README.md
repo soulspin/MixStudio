@@ -2,13 +2,17 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.21](https://img.shields.io/badge/status-beta%200.21-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.21.2](https://img.shields.io/badge/status-beta%200.21.2-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.21:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.21.2:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.19: recover an unsaved project copy](docs/screenshots/recovery.png)
+
+## New in 0.21.2
+
+Key lock now uses Signalsmith Stretch for cleaner vocals and polyphonic music during tempo changes. A buffered audio worker prepares playback ahead of the device callback; transport changes discard stale queued audio and the playhead follows consumed samples. See the [playback verification record](docs/PLAYBACK-2026-10-16.md).
 
 ## New in 0.21
 
@@ -146,12 +150,12 @@ On Linux, MixStudio prefers X11/XWayland when it's available, because winit does
 
 ## Building
 
-You need stable Rust (1.92 or newer).
+You need stable Rust (1.92 or newer), a C++14 compiler and libclang (for the Signalsmith Stretch bindings). Time-stretch dependency notices are in [TIME-STRETCH-LICENSES.md](docs/TIME-STRETCH-LICENSES.md).
 
 ```sh
-# Linux: ALSA development headers
-#   Arch/CachyOS: sudo pacman -S alsa-lib
-#   Debian/Ubuntu: sudo apt install libasound2-dev
+# Linux: ALSA development headers, C++ compiler and libclang
+#   Arch/CachyOS: sudo pacman -S alsa-lib base-devel clang
+#   Debian/Ubuntu: sudo apt install libasound2-dev build-essential libclang-dev
 git clone https://github.com/soulspin/MixStudio
 cd MixStudio
 cargo build --release

@@ -116,6 +116,16 @@ impl Grid {
         self.raw_sec(source)
     }
     #[inline] pub fn sec(&self, b: f64) -> f64 { self.region_sec(b, b) }
+    pub fn shares_source_map(&self,other:&Self)->bool {
+        self.r==other.r && self.bpm==other.bpm && match (&self.map,&other.map) {
+            (Some(a),Some(b))=>Arc::ptr_eq(a,b),(None,None)=>true,_=>false
+        }
+    }
+    /// Inverse inside a chosen arranged occurrence, including its lookahead.
+    #[inline] pub fn region_beat(&self, sec: f64, at: f64) -> f64 {
+        let source=self.raw_beat(sec);
+        self.regions.get(self.region(at)).map_or(source,|r|r.0+source-r.1)
+    }
     /// Every arranged occurrence of a source marker; no occurrence when the source was deleted.
     pub fn occurrences(&self, s: f64) -> Vec<f64> {
         let source = self.raw_beat(s);

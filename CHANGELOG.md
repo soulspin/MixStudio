@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.21.2-beta
+
+- Use pinned Signalsmith Stretch for polyphonic key lock, with source-grid mapping, sample-rate conversion and explicit input/output latency compensation. Continue compatible logical fragments without restarting stretcher phase.
+- Render into an eight-block pool on an audio worker; device callbacks copy prepared samples. Epoch changes flush stale audio on seek/pause/loop changes, while consumed sample clocks drive the playhead and meters. Count callback starvation for diagnostics.
+- Match fallback WSOLA waveform similarity and transient energy per stereo channel. Opposite-polarity stereo content can no longer cancel out of the matching signal and suffer severe level loss during key-locked tempo changes.
+- Cover bass and wide stereo stretching with sample-level regressions. Saved-project diagnostics can select a later overlap and exercise the production prepared-snapshot path.
+
 ## 0.21.1-beta
 
 - Give analysis and action status messages a separate row below navigation. Long messages truncate to the available width and show their full text on hover, preventing overlap with menu and export buttons.

@@ -11,7 +11,7 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub struct SnapTrack { pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub mutes: Vec<(u8, f64, f64)>, pub auto: Vec<Vec<(f64, f32)>>, pub stretch: u8 }
+pub struct SnapTrack { pub fragment_group:u64, pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub mutes: Vec<(u8, f64, f64)>, pub auto: Vec<Vec<(f64, f32)>>, pub stretch: u8 }
 impl SnapTrack {
     /// clip gate and fades: 0 outside [vis, end), linear fades in beats
     #[inline] fn edge(&self, b: f64) -> f32 { if b < self.vis || b >= self.end { return 0.0; } let mut g = 1.0;
@@ -30,7 +30,7 @@ impl Snap {
         for (i, t) in mix.tracks.iter().enumerate() {
             if let Some(Some(a)) = audio.get(i) {
                 map[i] = tracks.len();
-                tracks.push(SnapTrack { stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.eff_bpm(), vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect(), auto: t.auto.clone(), stretch: match t.stretch { 0 => if mix.key_lock { 1 } else { 2 }, x => x } });
+                tracks.push(SnapTrack { fragment_group:t.trans.fragment_group, stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.eff_bpm(), vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect(), auto: t.auto.clone(), stretch: match t.stretch { 0 => if mix.key_lock { 1 } else { 2 }, x => x } });
             }
         }
         let tcurves = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX).map(|x| (mix.tracks[x.1].trans.curve_out.clone(), mix.tracks[x.1].trans.curve_in.clone())).collect();
@@ -44,11 +44,11 @@ impl Snap {
 pub struct SnapshotBuilder { voices: usize, effects: Vec<FxKey>, retired_tx: crossbeam_channel::Sender<RetiredState>, retired_rx: crossbeam_channel::Receiver<RetiredState>, pending: Arc<std::sync::atomic::AtomicUsize>, spare_ws: Vec<Option<Wsola>>, spare_fx: Vec<(FxKey,Option<crate::fx::FxState>)> }
 struct RetirementPermit(Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for RetirementPermit {fn drop(&mut self) {self.0.fetch_sub(1,Ordering::Relaxed);}}
-struct RetiredState { _permit: RetirementPermit, _ws: Vec<Option<Wsola>>, _fx: Vec<(FxKey,Option<crate::fx::FxState>)>, _snap: Option<Arc<Snap>> }
+struct RetiredState { _permit: RetirementPermit, _ws: Vec<Option<Wsola>>, _fx: Vec<(FxKey,Option<crate::fx::FxState>)>, _snap: Option<Arc<Snap>>, _order:Vec<usize> }
 impl Default for SnapshotBuilder {
     fn default()->Self { let (retired_tx,retired_rx)=crossbeam_channel::bounded(2048);Self {voices:0,effects:vec![],retired_tx,retired_rx,pending:Arc::new(std::sync::atomic::AtomicUsize::new(0)),spare_ws:vec![],spare_fx:vec![]} }
 }
-pub struct PreparedSnap { permit: RetirementPermit, retired: crossbeam_channel::Sender<RetiredState>, snap: Arc<Snap>, ws: Vec<Option<Wsola>>, fx: Vec<(FxKey, Option<crate::fx::FxState>)> }
+pub struct PreparedSnap { permit: RetirementPermit, retired: crossbeam_channel::Sender<RetiredState>, snap: Arc<Snap>, order:Vec<usize>, ws: Vec<Option<Wsola>>, fx: Vec<(FxKey, Option<crate::fx::FxState>)> }
 type FxKey = (u64, crate::fx::FxKind, usize, usize);
 impl SnapshotBuilder {
     pub fn prepare(&mut self, snap: Arc<Snap>, sr: f32) -> PreparedSnap {
@@ -61,7 +61,7 @@ impl SnapshotBuilder {
         // callback always owns a reserved queue slot and cannot overflow it.
         while self.pending.load(Ordering::Relaxed)>=2048 { let _=self.retired_rx.recv(); }
         self.pending.fetch_add(1,Ordering::Relaxed);
-        let mut ws=std::mem::take(&mut self.spare_ws);ws.extend((0..snap.tracks.len()).map(|i| if i < self.voices { None } else { Some(Wsola::new()) }));
+        let mut ws=std::mem::take(&mut self.spare_ws);ws.extend((0..snap.tracks.len()).map(|i| if i < self.voices { None } else { Some(Wsola::new(sr)) }));
         let mut keys: Vec<_>=snap.fx.iter().enumerate().map(|(i,f)| {
             let occurrence=snap.fx[..i].iter().filter(|p|p.id==f.id && p.kind==f.kind && p.target==f.target).count();
             (f.id,f.kind,f.target,occurrence)
@@ -69,14 +69,15 @@ impl SnapshotBuilder {
         keys.push(snap.live.as_ref().map(|f|(f.id,f.kind,f.target,usize::MAX)).unwrap_or((0,crate::fx::FxKind::Scratch,4,usize::MAX)));
         let mut fx=std::mem::take(&mut self.spare_fx);fx.extend(keys.iter().map(|key| (*key, if self.effects.contains(key) { None } else { Some(crate::fx::FxState::new(sr)) })));
         self.voices=snap.tracks.len();self.effects=keys;
-        PreparedSnap { permit:RetirementPermit(self.pending.clone()), retired:self.retired_tx.clone(), snap, ws, fx }
+        let mut order:Vec<_>=(0..snap.tracks.len()).collect();order.sort_by(|&a,&b|snap.tracks[a].vis.total_cmp(&snap.tracks[b].vis));
+        PreparedSnap { order, permit:RetirementPermit(self.pending.clone()), retired:self.retired_tx.clone(), snap, ws, fx }
     }
 }
 pub enum Cmd { Snap(Arc<Snap>), Prepared(PreparedSnap), Play(bool), Seek(f64), Loop(Option<(f64, f64)>) }
 
-pub struct Shared { pub beat: AtomicU64, pub playing: AtomicBool, pub meter: [AtomicU32; 2], pub deck_meter: [AtomicU32; 4] }
+pub struct Shared { pub underruns:AtomicU64, pub beat: AtomicU64, pub playing: AtomicBool, pub meter: [AtomicU32; 2], pub deck_meter: [AtomicU32; 4] }
 impl Shared {
-    pub fn new() -> Self { Shared { beat: AtomicU64::new(0f64.to_bits()), playing: AtomicBool::new(false), meter: Default::default(), deck_meter: Default::default() } }
+    pub fn new() -> Self { Shared { underruns:AtomicU64::new(0), beat: AtomicU64::new(0f64.to_bits()), playing: AtomicBool::new(false), meter: Default::default(), deck_meter: Default::default() } }
     pub fn beat(&self) -> f64 { f64::from_bits(self.beat.load(Ordering::Relaxed)) }
     pub fn get(a: &AtomicU32) -> f32 { f32::from_bits(a.load(Ordering::Relaxed)) }
 }
@@ -167,27 +168,28 @@ pub const WH: usize = 512;  // synthesis hop (75% overlap)
 const WTOL: i64 = 256;      // search tolerance (source samples); small so transients stay within ~6 ms of the beat map
 
 /// Per-track WSOLA state (preallocated; no allocation in the audio thread).
-pub struct Wsola { id: (usize, u64, u64, u64, u64), acc: Vec<[f32; 2]>, fifo: Vec<[f32; 2]>, rd: usize, prev: Option<f64>, next_beat: f64, active: bool, tiny_loop: Option<(u64,u64)>, win: Vec<f32> }
+pub struct Wsola { poly: Polyphonic, id: (usize, u64, u64, u64, u64), acc: Vec<[f32; 2]>, fifo: Vec<[f32; 2]>, rd: usize, prev: Option<f64>, next_beat: f64, active: bool, tiny_loop: Option<(u64,u64)>, win: Vec<f32> }
 impl Wsola {
-    pub fn new() -> Self { let win = (0..WN).map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / WN as f32).cos()).collect();
-        Wsola { id: (0, 0, 0, 0, 0), acc: vec![[0.0; 2]; WN], fifo: vec![[0.0; 2]; WH], rd: WH, prev: None, next_beat: f64::NAN, active: false, tiny_loop: None, win } }
-    fn reset(&mut self) { self.acc.iter_mut().for_each(|x| *x = [0.0; 2]); self.rd = WH; self.prev = None; self.active = false; self.tiny_loop=None; }
+    pub fn new(sr:f32) -> Self { let win = (0..WN).map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / WN as f32).cos()).collect();
+        Wsola { poly:Polyphonic::new(sr), id: (0, 0, 0, 0, 0), acc: vec![[0.0; 2]; WN], fifo: vec![[0.0; 2]; WH], rd: WH, prev: None, next_beat: f64::NAN, active: false, tiny_loop: None, win } }
+    fn reset(&mut self) { self.poly.ready=false; self.acc.iter_mut().for_each(|x| *x = [0.0; 2]); self.rd = WH; self.prev = None; self.active = false; self.tiny_loop=None; }
     /// Produce one grain at mix beat `gb`; `pos_of` maps beat -> source sample position.
     fn grain(&mut self, a: &Audio, gb: f64, at: f64, t: &SnapTrack, rs: f64, sg: Option<&[f32; 4]>) {
         let comb = combine(sg.copied(), t.mute_gain(t.grid.region_sec(gb, at))); let sg = comb.as_ref();
         let ideal = t.grid.region_sec(gb, at) * a.sr as f64; // beat map: stretch ratio follows tempo drift
-        let get = |p: i64| -> f32 { if p >= 0 && (p as usize) < a.l.len() { a.l[p as usize] + a.r[p as usize] } else { 0.0 } };
+        // Compare channel energies separately: summing L+R erases wide/anti-phase audio.
+        let get = |p: i64| -> [f32;2] { if p >= 0 && (p as usize) < a.l.len() { [a.l[p as usize],a.r[p as usize]] } else { [0.0;2] } };
         let mut start = ideal;
         if let Some(prev) = self.prev {
             let nat = prev + WH as f64 * rs; // natural continuation of the previous grain
             let (ni, ii) = (nat.round() as i64, ideal.round() as i64);
             let len = (WN / 2) as i64; let st = |rs: f64, j: i64| (j as f64 * rs) as i64;
             let score = |d: i64, step: usize| -> f32 { let mut c = 0f32; let mut e = 1e-9f32; let mut j = 0i64;
-                while j < len { let x = get(ii + d + st(rs, j)); c += x * get(ni + st(rs, j)); e += x * x; j += step as i64; } c / e.sqrt() };
+                while j < len { let x = get(ii + d + st(rs, j)); let y=get(ni + st(rs, j)); c += x[0]*y[0]+x[1]*y[1]; e += x[0]*x[0]+x[1]*x[1]; j += step as i64; } c / e.sqrt() };
             // transient guard: if a sharp energy rise (kick/snare attack) falls inside this grain, place the grain
             // exactly at its beat-map position. A similarity shift here would move the attack by up to WTOL,
             // in a direction that depends on whether the track is sped up or slowed down.
-            let blk = 256i64; let be = |p: i64| { let mut e = 1e-7f32; let mut j = 0; while j < blk { let x = get(p + j); e += x * x; j += 2; } e };
+            let blk = 256i64; let be = |p: i64| { let mut e = 1e-7f32; let mut j = 0; while j < blk { let x = get(p + j); e += x[0]*x[0]+x[1]*x[1]; j += 2; } e };
             let mut transient = false; let mut prev_e = be(ii - blk); let mut q = ii;
             while q < ii + WN as i64 { let e = be(q); if e > 4.0 * prev_e && e > 1e-4 * blk as f32 { transient = true; break; } prev_e = e; q += blk; }
             if transient { start = ideal; } else {
@@ -215,17 +217,71 @@ impl Wsola {
     }
 }
 
+/// Polyphonic key lock, primed and read ahead so output stays on the source grid.
+struct Polyphonic {
+    stretch:signalsmith_stretch::Stretch, sr:f64, input:Vec<f32>, output:[f32;WH*2],
+    position:i64, ready:bool, history:usize,
+}
+impl Polyphonic {
+    fn new(sr:f32)->Self {
+        let block=(sr as usize*12/100).max(32);let interval=(sr as usize*3/100).max(8);
+        Self {stretch:signalsmith_stretch::Stretch::new(2,block,interval),sr:sr as f64,
+            input:vec![0.0;65536usize.max(block+interval+16)*2],output:[0.0;WH*2],position:0,ready:false,history:block+interval}
+    }
+    fn boundary(&self,snap:&Snap,t:&SnapTrack,b:f64,at:f64,elapsed:usize)->i64 {
+        (t.grid.region_sec(snap.advance(b,elapsed as f64/self.sr),at)*self.sr).round() as i64+self.stretch.input_latency() as i64
+    }
+    fn fill(&mut self,snap:&Snap,ti:usize,at:f64,from:i64,n:usize) {
+        let t=&snap.tracks[ti];let a=&t.audio;let ratio=a.sr as f64/self.sr;
+        for i in 0..n {
+            let p=(from+i as i64) as f64*ratio;let k=p.floor() as i64;let frac=(p-k as f64) as f32;
+            let sec=p/a.sr as f64;let b=t.grid.region_beat(sec,at);
+            let gains=combine(track_mods(snap,ti,b).stem,t.mute_gain(sec));
+            for c in 0..2 {
+                let read=|k:i64|if k<0 || k as usize>=a.l.len(){0.0}else{let k=k as usize;match (&gains,t.stems.as_deref()) {
+                    (Some(g),Some(st))=>st.mixed(a,c,k,g),_=>if c==0{a.l[k]}else{a.r[k]}
+                }};
+                self.input[i*2+c]=read(k)*(1.0-frac)+read(k+1)*frac;
+            }
+        }
+    }
+    fn feed(&mut self,snap:&Snap,ti:usize,b:f64,at:f64,elapsed:usize,count:usize,dest:Option<&mut[[f32;2]]>) {
+        let t=&snap.tracks[ti];let mut done=0;let mut dest=dest;
+        while done<count {
+            let mut n=(count-done).min(WH);let mut end=self.boundary(snap,t,b,at,elapsed+done+n);
+            while end-self.position>(self.input.len()/2) as i64 && n>1 {n=(n/2).max(1);end=self.boundary(snap,t,b,at,elapsed+done+n);}
+            let amount=(end-self.position).max(0) as usize;
+            assert!(amount<=self.input.len()/2,"source grid exceeds preallocated stretch range");
+            self.fill(snap,ti,at,self.position,amount);
+            self.stretch.process(&self.input[..amount*2],&mut self.output[..n*2]);self.position=end;
+            if let Some(d)=dest.as_deref_mut() {for i in 0..n {d[done+i]=[self.output[i*2],self.output[i*2+1]];}}
+            done+=n;
+        }
+    }
+    fn grain(&mut self,snap:&Snap,ti:usize,b:f64,at:f64,dest:&mut[[f32;2]]) {
+        let latency=self.stretch.output_latency();
+        if !self.ready {
+            self.stretch.reset();self.position=self.boundary(snap,&snap.tracks[ti],b,at,0);
+            self.fill(snap,ti,at,self.position-self.history as i64,self.history);
+            let next=self.boundary(snap,&snap.tracks[ti],b,at,WH);
+            self.stretch.seek(&self.input[..self.history*2],(next-self.position) as f64/WH as f64);
+            self.feed(snap,ti,b,at,0,latency,None);self.ready=true;
+        }
+        self.feed(snap,ti,b,at,latency,WH,Some(dest));
+    }
+}
+
 struct DeckState { settings: [f32;4], lowsh: Biquad, mid: Biquad, hish: Biquad, lpf: Biquad, hpf: Biquad, kill: Biquad, delay: Vec<[f32; 2]>, dpos: usize }
 
 pub struct Engine {
     pub sr: f32, pub shared: Arc<Shared>, snap: Option<Arc<Snap>>, beat: f64, playing: bool, loop_r: Option<(f64, f64)>,
-    decks: Vec<DeckState>, buf: Vec<[f32; 2]>, dbuf: [Vec<[f32; 2]>; 4], ws: Vec<Option<Wsola>>, click: (f32, f32), click_ph: f32, click_beat: Option<i64>, pub metro_enabled: bool, fx: Vec<(FxKey, Option<crate::fx::FxState>)>,
+    order:Vec<usize>, sample_beats:[f64;256], decks: Vec<DeckState>, buf: Vec<[f32; 2]>, dbuf: [Vec<[f32; 2]>; 4], ws: Vec<Option<Wsola>>, click: (f32, f32), click_ph: f32, click_beat: Option<i64>, pub metro_enabled: bool, fx: Vec<(FxKey, Option<crate::fx::FxState>)>,
 }
 
 impl Engine {
     pub fn new(sr: f32, shared: Arc<Shared>) -> Self {
         let decks = (0..4).map(|_| DeckState { settings:[f32::NAN;4], lowsh: Biquad::default(), mid: Biquad::default(), hish: Biquad::default(), lpf: Biquad::default(), hpf: Biquad::default(), kill: Biquad::default(), delay: vec![[0.0; 2]; ((sr * 3.0) as usize).max(2)], dpos: 0 }).collect();
-        Engine { sr, shared, snap: None, beat: 0.0, playing: false, loop_r: None, decks, buf: Vec::with_capacity(512), dbuf: std::array::from_fn(|_| Vec::with_capacity(256)), ws: vec![], click: (0.0, 0.0), click_ph: 0.0, click_beat: None, metro_enabled: true, fx: vec![] }
+        Engine { order:vec![], sample_beats:[0.0;256], sr, shared, snap: None, beat: 0.0, playing: false, loop_r: None, decks, buf: Vec::with_capacity(512), dbuf: std::array::from_fn(|_| Vec::with_capacity(256)), ws: vec![], click: (0.0, 0.0), click_ph: 0.0, click_beat: None, metro_enabled: true, fx: vec![] }
     }
     pub fn handle(&mut self, c: Cmd) {
         match c {
@@ -245,6 +301,15 @@ impl Engine {
         for (key,state) in &mut p.fx { if state.is_none() { if let Some(old)=self.fx.iter_mut().find(|f|f.0==*key) { *state=old.1.take(); } } }
         if let Some(old)=&self.snap {
             let envelope_changed=old.tempo!=p.snap.tempo || old.bpm!=p.snap.bpm || old.trans!=p.snap.trans || old.tcurves!=p.snap.tcurves;
+            let timing_changed=old.tempo!=p.snap.tempo || old.bpm!=p.snap.bpm;
+            let stem_availability_changed=old.tracks.iter().map(|t|t.stems.is_some()).ne(p.snap.tracks.iter().map(|t|t.stems.is_some()));
+            let stem_routes_changed=old.trans.iter().map(|e|(e.0,e.1,e.2,e.3,e.5)).ne(p.snap.trans.iter().map(|e|(e.0,e.1,e.2,e.3,e.5)));
+            for (i,w) in p.ws.iter_mut().enumerate() {
+                let source_changed=old.tracks.get(i).zip(p.snap.tracks.get(i)).is_none_or(|(a,b)|a.mutes!=b.mutes || match (&a.stems,&b.stems) {(Some(a),Some(b))=>!Arc::ptr_eq(a,b),(None,None)=>false,_=>true});
+                if timing_changed || source_changed || (p.snap.tracks[i].stems.is_some() && (stem_routes_changed || stem_availability_changed)) {
+                    if let Some(w)=w {w.reset();}
+                }
+            }
             for (i,w) in p.ws.iter_mut().enumerate() {
                 if let Some(w)=w.as_mut().filter(|w|w.tiny_loop.is_some()) {
                     let source_changed=old.tracks.get(i).zip(p.snap.tracks.get(i)).is_none_or(|(a,b)|a.mutes!=b.mutes || match (&a.stems,&b.stems) {(Some(a),Some(b))=>!Arc::ptr_eq(a,b),(None,None)=>false,_=>true});
@@ -252,7 +317,7 @@ impl Engine {
                 }
             }
         }
-        let retired=RetiredState {_permit:p.permit,_ws:std::mem::replace(&mut self.ws,p.ws),_fx:std::mem::replace(&mut self.fx,p.fx),_snap:self.snap.replace(p.snap)};
+        let retired=RetiredState {_order:std::mem::replace(&mut self.order,p.order),_permit:p.permit,_ws:std::mem::replace(&mut self.ws,p.ws),_fx:std::mem::replace(&mut self.fx,p.fx),_snap:self.snap.replace(p.snap)};
         // Reclaim removed DSP buffers on the snapshot producer, away from the callback.
         match p.retired.try_send(retired) {
             Ok(()) | Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}, // offline producer is short-lived
@@ -269,7 +334,11 @@ impl Engine {
         self.click=(0.0,0.0);self.click_ph=0.0;self.click_beat=None;
     }
     /// Render interleaved output with `ch` channels.
-    pub fn render(&mut self, out: &mut [f32], ch: usize) {
+    pub fn render(&mut self, out: &mut [f32], ch: usize) { self.render_clocked(out,ch,None); }
+    pub fn render_with_clock(&mut self,out:&mut[f32],ch:usize,clock:&mut[f64]) {
+        assert!(clock.len()>=out.len()/ch.max(1));self.render_clocked(out,ch,Some(clock));
+    }
+    fn render_clocked(&mut self,out:&mut[f32],ch:usize,mut clock:Option<&mut[f64]>) {
         let frames = out.len() / ch.max(1);
         let mut done = 0;
         while done < frames {
@@ -286,13 +355,39 @@ impl Engine {
                 }}}
             }
             self.block(n);
+            if let Some(c)=clock.as_deref_mut() {c[done..done+n].copy_from_slice(&self.sample_beats[..n]);}
             for i in 0..n { let f = self.buf[i]; for c in 0..ch { out[(done + i) * ch + c] = if c % 2 == 0 { f[0] } else { f[1] }; } }
             done += n;
+        }
+    }
+    fn same_stem_routes(snap:&Snap,a:usize,b:usize)->bool {
+        let contained=|from,to|snap.trans.iter().all(|e| {
+            if e.0!=from && e.1!=from {return true;}
+            let out=e.0==from;
+            snap.trans.iter().any(|f|if out {f.0==to}else{f.1==to} && e.2==f.2 && e.3==f.3 && e.5==f.5)
+        });
+        contained(a,b) && contained(b,a)
+    }
+    /// A neutral split continues the same stretcher, including its buffered lookahead.
+    fn handoff(ws:&mut[Option<Wsola>],snap:&Snap,ti:usize,b:f64,tolerance:f64,id:(usize,u64,u64,u64,u64)) {
+        let t=&snap.tracks[ti];if t.fragment_group==0 {return;}
+        let previous=snap.tracks.iter().enumerate().find(|&(i,p)| {
+            i!=ti && p.fragment_group==t.fragment_group && p.lane==t.lane && p.stretch==t.stretch &&
+            (p.end-t.vis).abs()<tolerance && Arc::ptr_eq(&p.audio,&t.audio) && p.mutes==t.mutes && p.grid.shares_source_map(&t.grid) &&
+            match (&p.stems,&t.stems) {(Some(a),Some(b))=>Arc::ptr_eq(a,b),(None,None)=>true,_=>false} &&
+            [-0.001,0.0,0.001].iter().all(|d|(p.grid.region_sec(b+d,p.end-1e-8)-t.grid.region_sec(b+d,t.vis+1e-8)).abs()<1e-8) &&
+            (t.stems.is_none() || Self::same_stem_routes(snap,i,ti)) &&
+            ws[i].as_ref().is_some_and(|w|w.poly.ready && w.tiny_loop.is_none() && (w.next_beat-b).abs()<tolerance)
+        }).map(|(i,_)|i);
+        if let Some(previous)=previous {
+            ws.swap(previous,ti);ws[previous].as_mut().unwrap().reset();
+            let w=ws[ti].as_mut().unwrap();w.id=id;w.active=true;
         }
     }
     fn block(&mut self, n: usize) {
         self.buf.clear(); self.buf.resize(n, [0.0; 2]); // capacity reserved in new()
         for d in &mut self.dbuf { d.clear(); d.resize(n, [0.0; 2]); }
+        self.sample_beats[..n].fill(self.beat);
         let Some(snap) = self.snap.clone() else { return; };
         if !self.playing { self.meters(); return; }
         let bpm_now = snap.bpm_at(self.beat);
@@ -300,10 +395,11 @@ impl Engine {
         let b0 = self.beat;
         let mut beats=[0.0;257];beats[0]=b0;
         for i in 0..n { beats[i+1]=snap.advance(beats[i],1.0/self.sr as f64); }
-        let b1=beats[n];
+        let b1=beats[n];self.sample_beats[..n].copy_from_slice(&beats[..n]);
         let short_loop=self.loop_r.filter(|&(s,e)|e>s && snap.secs(s,e)*self.sr as f64<=WH as f64);
         let mut deck_mod = [[Mods::default();256];4]; let mut deck_auto = [[[0f32;4];256];4];
-        for (ti, t) in snap.tracks.iter().enumerate() {
+        for &ti in &self.order {
+            let t=&snap.tracks[ti];
             if b1 < t.vis || b0 > t.end + 8.0 { continue; }
             for i in 0..n {
                 let b=beats[i];let m=track_mods(&snap,ti,b);let dm=&mut deck_mod[t.lane][i];
@@ -316,12 +412,15 @@ impl Engine {
             let rate = bpm_now / t.bpm;
             let scr = snap.scratch.iter().find(|s| s.0 == t.lane && b0 >= s.1 && b0 < s.2);
             if scr.is_none() && t.stretch == 1 && ((rate - 1.0).abs() > 1e-4 || t.grid.dynamic() || snap.tempo.iter().any(|p|(p.1-t.bpm).abs()>1e-4)) && ti < self.ws.len() {
-                let w = self.ws[ti].as_mut().expect("prepared voice state");
                 let rs = srt / self.sr as f64;
                 for i in 0..n {
                     let b = beats[i];
-                    if b<t.vis || b>=t.end {w.active=false;continue;}
+                    if b<t.vis || b>=t.end {self.ws[ti].as_mut().unwrap().active=false;continue;}
                     let id = (Arc::as_ptr(a) as usize, t.start_beat.to_bits(), t.offset.to_bits(), t.bpm.to_bits(), t.grid.section_id(b));
+                    if short_loop.is_none() && (b-t.vis).abs()<bpb*2.0 && !self.ws[ti].as_ref().unwrap().active {
+                        Self::handoff(&mut self.ws,&snap,ti,b,bpb*2.0,id);
+                    }
+                    let w=self.ws[ti].as_mut().expect("prepared voice state");
                     if let Some((ls,le))=short_loop.filter(|&(s,e)|b>=s && b<e) {
                         let key=(ls.to_bits(),le.to_bits());
                         if w.tiny_loop!=Some(key) || w.id!=id || !w.active {
@@ -343,11 +442,9 @@ impl Engine {
                     if w.tiny_loop.is_some() {w.reset();}
                     if w.id != id || !w.active || (w.next_beat-b).abs()>bpb*2.0 {
                         w.reset(); w.id=id; w.active=true;
-                        // Pre-roll within this source span, including immediately after a splice.
-                        for k in (1..WN/WH).rev() { w.grain(a,snap.advance(b,-((k*WH) as f64)/self.sr as f64),b,t,rs,track_mods(&snap,ti,b).stem.as_ref()); }
                         w.next_beat=b; w.rd=WH;
                     }
-                    if w.rd >= WH { let gb=w.next_beat; w.grain(a,gb,b,t,rs,track_mods(&snap,ti,b).stem.as_ref()); }
+                    if w.rd >= WH { let gb=w.next_beat; w.poly.grain(&snap,ti,gb,b,&mut w.fifo);w.rd=0; }
                     let f = w.fifo[w.rd]; w.rd += 1; w.next_beat = beats[i+1];
                     let g = (track_mods(&snap,ti,beats[i]).gain * t.auto_at(0,beats[i]).unwrap_or(1.0)) * t.edge(beats[i]);
                     dst[i][0] += f[0] * g; dst[i][1] += f[1] * g;
@@ -575,7 +672,9 @@ mod saved_mix_diagnostics {
         let path=std::env::var("MIXSTUDIO_DIAGNOSTIC_PROJECT").unwrap();
         let mix:Mix=serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let audio:Vec<_>=mix.tracks.iter().map(|t|Some(Arc::new(crate::analysis::load(std::path::Path::new(&t.path)).unwrap().0))).collect();
-        let (_,_,s,e)=mix.transitions()[0];
+        let transitions=mix.transitions();
+        let index=std::env::var("MIXSTUDIO_DIAGNOSTIC_TRANSITION").ok().and_then(|s|s.parse::<usize>().ok()).unwrap_or(0);
+        let (_,_,s,e)=transitions[index];
         println!("Transition {s:.3}..{e:.3}, {:.2}s, mix BPM {} mode {}",mix.secs(s,e),mix.bpm,mix.tempo_mode);
         for mode in [1,0] {
             let mut compare=mix.clone(); for t in &mut compare.tracks { t.grid_mode=mode; }
@@ -585,12 +684,13 @@ mod saved_mix_diagnostics {
             let snap=Arc::new(Snap::build(&mix,&audio));
             let t0=std::time::Instant::now(); let (l,r)=render_offline(snap.clone(),sr,s-8.0,e+8.0);
             println!("Static {sr}: {:.3}s CPU for {:.3}s audio",t0.elapsed().as_secs_f64(),l.len() as f64/sr as f64);
-            let mut engine=Engine::new(sr as f32,Arc::new(Shared::new()));engine.handle(Cmd::Snap(snap));engine.handle(Cmd::Seek(s-8.0));engine.handle(Cmd::Play(true));
+            let mut builder=SnapshotBuilder::default();
+            let mut engine=Engine::new(sr as f32,Arc::new(Shared::new()));engine.handle(Cmd::Prepared(builder.prepare(snap,sr as f32)));engine.handle(Cmd::Seek(s-8.0));engine.handle(Cmd::Play(true));
             let mut buf=vec![0.0;1024];let mut rendered=0;let mut maxdiff=0.0f32; let mut maxcost=0.0f64; let mut ids=vec![];let t0=std::time::Instant::now();
             while rendered<l.len() {
-                if rendered % (512*4)==0 { engine.handle(Cmd::Snap(Arc::new(Snap::build(&mix.clone(),&audio)))); }
+                if rendered % (512*4)==0 { engine.handle(Cmd::Prepared(builder.prepare(Arc::new(Snap::build(&mix,&audio)),sr as f32))); }
                 let start=std::time::Instant::now();engine.render(&mut buf,2);maxcost=maxcost.max(start.elapsed().as_secs_f64());
-                let next:Vec<_>=engine.ws.iter().take(2).map(|w|w.as_ref().unwrap().id).collect();if ids!=next {println!("WSOLA identity changed at beat {:.3}: {:?}",engine.beat,next);ids=next;}
+                let next:Vec<_>=engine.ws.iter().map(|w|w.as_ref().unwrap().id).collect();if ids!=next {println!("WSOLA identity changed at beat {:.3}: {:?}",engine.beat,next);ids=next;}
                 for i in 0..512.min(l.len()-rendered) {maxdiff=maxdiff.max((buf[i*2]-l[rendered+i]).abs()).max((buf[i*2+1]-r[rendered+i]).abs());} rendered+=512;
             }
             println!("Live {sr}: {:.3}s CPU, max callback {:.3}ms, static/live diff {maxdiff}",t0.elapsed().as_secs_f64(),maxcost*1000.0);
@@ -604,6 +704,40 @@ mod saved_mix_diagnostics {
 #[cfg(test)]
 mod maintenance_tests {
     use super::*;
+    #[test]
+    fn polyphonic_grid_regressions() { assert!(crate::grid_mode_tests()); }
+    #[test]
+    fn keylocked_polyphonic_pitch_remains_concentrated() {
+        let sr=44100;let mut m=Mix::default();m.bpm=125.0;
+        let t:crate::model::Track=serde_json::from_str(r#"{"path":"chord","title":"chord","artist":"test","key":"8A","trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]},"bpm":137.0,"duration":8.0,"offset":0.0,"start_beat":0.0,"lane":0}"#).unwrap();m.tracks.push(t);
+        let frequencies=[173.0,277.0,431.0,346.0,554.0,862.0];
+        let l:Vec<_>=(0..sr*8).map(|i|frequencies.iter().map(|hz|0.08*(std::f64::consts::TAU*hz*i as f64/sr as f64).sin() as f32).sum()).collect();
+        let a=Arc::new(Audio{sr,r:l.clone(),l});let (l,_)=render_offline(Arc::new(Snap::build(&m,&[Some(a)])),sr,2.0,14.0);
+        let n=65536;let mut bins:Vec<_>=l[44100..44100+n].iter().enumerate().map(|(i,x)|rustfft::num_complex::Complex::new(*x*(0.5-0.5*(std::f32::consts::TAU*i as f32/n as f32).cos()),0.0)).collect();
+        rustfft::FftPlanner::new().plan_fft_forward(n).process(&mut bins);
+        let total:f32=bins[1..n/2].iter().map(|z|z.norm_sqr()).sum();
+        let kept:f32=bins[1..n/2].iter().enumerate().filter(|(i,_)|frequencies.iter().any(|f|((*i+1) as f64*sr as f64/n as f64-f).abs()<3.0)).map(|(_,z)|z.norm_sqr()).sum();
+        println!("Polyphonic energy at original harmonics: {:.2}%",100.0*kept/total);
+        assert!(kept/total>0.90,"key lock spreads harmonic energy into metallic sidebands: {}",kept/total);
+    }
+    #[test]
+    fn stretched_bass_and_wide_stereo_keep_their_level() {
+        for hz in [55.0,110.0,440.0] {
+            let mut reference=Vec::new();
+            for phase in [1.0,-1.0] {
+                let sr=44100;let mut m=Mix::default();m.bpm=125.0;m.key_lock=true;
+                let t:crate::model::Track=serde_json::from_str(r#"{"path":"tone","title":"tone","artist":"test","key":"8A","trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]},"bpm":137.0,"duration":8.0,"offset":0.0,"start_beat":0.0,"lane":0}"#).unwrap();m.tracks.push(t);
+                let l:Vec<_>=(0..sr*8).map(|i|0.5*(std::f64::consts::TAU*hz*i as f64/sr as f64).sin() as f32).collect();
+                let r=l.iter().map(|x|x*phase).collect();let a=Arc::new(Audio{sr,l,r});
+                let snap=Arc::new(Snap::build(&m,&[Some(a)]));let (l,_)=render_offline(snap,sr,2.0,14.0);
+                let rms:Vec<_>=l.chunks(4096).filter(|c|c.len()==4096).map(|c|(c.iter().map(|x|x*x).sum::<f32>()/c.len() as f32).sqrt()).collect();
+                let min=rms.iter().copied().fold(f32::INFINITY,f32::min);let max=rms.iter().copied().fold(0.0,f32::max);
+                println!("{hz}Hz phase {phase}: min RMS {min} max {max}");
+                assert!(min>0.25,"stretched {hz}Hz phase {phase} loses level: {min}");
+                if phase==1.0 {reference=l;} else {assert!(reference.iter().zip(&l).all(|(a,b)|(a-b).abs()<1e-6),"right-channel polarity changes left-channel stretching");}
+            }
+        }
+    }
     fn snap() -> Snap { Snap::build(&Mix::default(), &[]) }
     fn tone(s: &mut Snap) {
         let mut mix=Mix::default(); mix.bpm=126.0;
@@ -681,6 +815,16 @@ mod maintenance_tests {
             let diff=a.iter().zip(b).map(|(a,b)|(a-b).abs()).fold(0.0f32,f32::max);assert!(diff<1e-6,"{kind:?} {sr}: {diff}");
         }}
     }
+    #[test]
+    fn polyphonic_tempo_edit_discards_old_lookahead() {
+        let mut original=snap();tone(&mut original);let audio=original.tracks[0].audio.clone();
+        let mut running=engine(original);output(&mut running,1234,128);let beat=running.beat;
+        let make=||{let mut s=snap();tone(&mut s);s.bpm=140.0;s.tracks[0].audio=audio.clone();s};
+        running.handle(Cmd::Snap(Arc::new(make())));
+        let mut reference=engine(make());reference.handle(Cmd::Seek(beat));
+        let expected=output(&mut reference,2048,128);let actual=output(&mut running,2048,128);
+        assert!(actual.iter().zip(expected).all(|(a,b)|(a-b).abs()<1e-6),"old tempo input/FIFO survived a tempo edit");
+    }
     #[test] fn maintenance_review_one_sample_loop_reanchors_audio() {
         let mut s=snap();tone(&mut s);let step=s.bpm/60.0/8000.0;let mut e=engine(s);e.handle(Cmd::Seek(0.503));e.handle(Cmd::Loop(Some((0.503,0.503+step))));
         let mut dry=vec![];for _ in 0..512 {let mut out=[0.0;2];e.render(&mut out,2);dry.push(e.dbuf[0][0][0]);}
@@ -694,7 +838,10 @@ mod maintenance_tests {
         let mut m=Mix::default();m.bpm=126.0;m.tempo_mode=1;m.decks[0].vol=1.0;m.tracks.push(t);
         let middle=m.split(0,32.5).unwrap();let last=m.split(middle,(drift.len()-1) as f64-32.5).unwrap();m.tracks[0].stabilize=true;m.tracks[last].stabilize=true;
         let from=m.tracks[0].vis_start(m.bpm);let to=m.tracks[last].end(m.bpm);
-        let out=render_offline(Arc::new(Snap::build(&m,&[Some(audio.clone()),Some(audio.clone()),Some(audio)])),sr,from,to).0;
+        let out=render_offline(Arc::new(Snap::build(&m,&[Some(audio.clone()),Some(audio.clone()),Some(audio.clone())])),sr,from,to).0;
+        let mut reordered=m.clone();reordered.tracks.swap(middle,last);
+        let reordered=render_offline(Arc::new(Snap::build(&reordered,&[Some(audio.clone()),Some(audio.clone()),Some(audio)])),sr,from,to).0;
+        assert!(out.iter().zip(reordered).all(|(a,b)|(a-b).abs()<1e-6),"fragment storage order changed stretcher handoff");
         for i in [middle,last] {
             let center=(m.secs(from,m.tracks[i].vis_start(m.bpm))*sr as f64) as usize;let width=(0.01*sr as f64) as usize;
             let jump=(center-width..center+width).map(|j|(out[j+1]-out[j]).abs()).fold(0.0f32,f32::max);
