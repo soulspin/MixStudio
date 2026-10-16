@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.23.0-beta
+
+- Remove the unconditional 85–175 BPM fold. Compare supported pulse families using four-pulse accents and separate bass-attack coverage, reducing reproduced 70→140 and 180→90 octave errors.
+- Add source-qualified bar-phase advisories for indistinct bass accents and short clips with insufficient evidence. Treat the optional measured bass margin as a heuristic, not confidence.
+- Add authored tempo/metre references, a read-only evaluator for private waveform annotations and an actual warning-widget regression. Record independent-reference limits and before/after corpus preservation.
+- Upgrade derived analysis cache to v12 while retaining saved project grids and library tags.
+
 ## 0.22.0-beta
 
 - Test ten local audio files (eight byte-distinct streams) using reproducible fresh analysis and separately implemented attack-agreement proxies across temporal thirds. Record limits without claiming annotated ground truth.

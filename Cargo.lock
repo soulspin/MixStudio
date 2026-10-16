@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "mixstudio"
-version = "0.22.0-beta"
+version = "0.23.0-beta"
 dependencies = [
  "anyhow",
  "cpal",

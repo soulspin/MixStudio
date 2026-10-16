@@ -2223,6 +2223,16 @@ mod section_ui_tests {
         a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
     }
     #[test]
+    fn beatgrid_surfaces_ambiguous_source_downbeat() {
+        let (mut a,ctx,_rx,dir)=setup();
+        let ev:crate::analysis::RhythmEvidence=serde_json::from_value(serde_json::json!({"periodicity":0.9,"observed_beats":64,"predicted_beats":64,"supported_fraction":[1.0,1.0,1.0],"grid_supported":true,"downbeat_bass_margin":0.0})).unwrap();
+        Arc::make_mut(&mut a.store.get_mut("test.wav").unwrap().1).rhythm=Some(ev);
+        let draw=|a:&mut App|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,800.0))),..Default::default()},|ctx| {egui::CentralPanel::default().show(ctx,|ui|a.beatgrid_tab(ui));});
+        draw(&mut a);let out=draw(&mut a);
+        assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::epaint::Shape::Text(t) if t.galley.text().contains("Check the downbeat"))),"ambiguous source bar phase was hidden");
+        a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
     fn header_status_does_not_overlap_navigation() {
         let (mut a,ctx,_rx,dir)=setup();
         a.status="Auto-order (Balanced): 2/4 smooth transitions, score 1.08 → 1.05 in 0 ms, 4 outro→intro phrase overlaps. Undo restores the old order.".into();

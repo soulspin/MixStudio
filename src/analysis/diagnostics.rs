@@ -125,7 +125,53 @@ fn inspect_rhythm_evidence_negative_controls() {
         }
     }
     let supported=results.iter().filter(|v|v["rhythm_evidence"]["grid_supported"]==true).count();
-    std::fs::write("/tmp/mixstudio-signal-probe-v11.json",serde_json::to_vec_pretty(&json!({"cases":results,"supported_negative_controls":supported})).unwrap()).unwrap();
-    eprintln!("negative-control sweep: {supported}/{} established grids; details /tmp/mixstudio-signal-probe-v11.json",results.len());
+    let output=format!("/tmp/mixstudio-signal-probe-v{ANALYSIS_VERSION}.json");
+    std::fs::write(&output,serde_json::to_vec_pretty(&json!({"cases":results,"supported_negative_controls":supported})).unwrap()).unwrap();
+    eprintln!("negative-control sweep: {supported}/{} established grids; details {output}",results.len());
     assert_eq!(supported,0,"stationary negative controls must not establish beat grids; inspect diagnostic report");
+}
+
+/// A private manifest supplies source hashes and hand-marked waveform landmarks.
+/// Export mode writes decoder-aligned windows before any reference is annotated.
+/// Attack landmarks are not musical downbeat or tempo-octave annotations.
+#[test]
+#[ignore="requires a private manually annotated waveform-reference manifest"]
+fn inspect_manual_waveform_references() {
+    let manifest=std::env::var("MIXSTUDIO_REFERENCE_MANIFEST").expect("private JSON reference manifest");
+    let cases:Vec<Value>=serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+    assert!(!cases.is_empty());
+    let export=std::env::var("MIXSTUDIO_REFERENCE_EXPORT").ok().map(PathBuf::from);
+    if let Some(dir)=&export {std::fs::create_dir_all(dir).unwrap();}
+    let mut report=Vec::new();
+    for case in cases {
+        let path=Path::new(case["path"].as_str().unwrap());
+        let before=std::fs::metadata(path).unwrap();
+        let hash=format!("{:x}",sha2::Sha256::digest(std::fs::read(path).unwrap()));
+        assert_eq!(hash,case["source_sha256"].as_str().unwrap(),"source differs from annotated recording");
+        let (audio,_,_)=decode(path).unwrap();
+        assert_eq!(audio.l.len() as u64,case["frames"].as_u64().unwrap(),"annotation decoder timebase changed");
+        let id=case["id"].as_str().unwrap();
+        assert!(id.chars().all(|c|c.is_ascii_alphanumeric() || c=='-'));
+        if let Some(dir)=&export {
+            let lo=(case["start_seconds"].as_f64().unwrap()*audio.sr as f64).round() as usize;
+            let hi=(case["end_seconds"].as_f64().unwrap()*audio.sr as f64).round() as usize;
+            crate::engine::write_wav(&dir.join(format!("{id}.wav")),&audio.l[lo..hi],&audio.r[lo..hi],audio.sr).unwrap();
+        } else {
+            let landmarks:Vec<_>=case["attack_seconds"].as_array().unwrap().iter().map(|x|x.as_f64().unwrap()).collect();
+            assert!(landmarks.len()>=4 && landmarks.windows(2).all(|w|w[1]>w[0]));
+            let (bpm,offset,beats,_)=detect_rhythm(&rhythm_mono(&audio),audio.sr);
+            assert!(!beats.is_empty());
+            let matched:Vec<_>=landmarks.iter().map(|t|beats.iter().enumerate().min_by(|a,b|(a.1-t).abs().total_cmp(&(b.1-t).abs())).unwrap()).collect();
+            let residuals:Vec<_>=matched.iter().zip(&landmarks).map(|((_,b),t)|*b-t).collect();
+            let tolerance=case["tolerance_seconds"].as_f64().unwrap();
+            assert!(residuals.iter().all(|x|x.abs()<=tolerance),"{id}: missed independently marked attacks: {residuals:?}");
+            assert!(matched.windows(2).all(|w|w[1].0==w[0].0+1),"{id}: doubled or halved the marked pulse sequence");
+            report.push(json!({"id":id,"bpm_estimate_not_label":bpm,"downbeat_estimate_not_label":offset,"attack_seconds":landmarks,
+                "tolerance_seconds":tolerance,"residuals":distribution(residuals)}));
+        }
+        let after=std::fs::metadata(path).unwrap();assert_eq!(before.len(),after.len());assert_eq!(before.modified().unwrap(),after.modified().unwrap());
+    }
+    let output=std::env::var("MIXSTUDIO_REFERENCE_OUTPUT").unwrap_or_else(|_|"/tmp/mixstudio-manual-reference-results.json".into());
+    std::fs::write(output,serde_json::to_vec_pretty(&json!({"analysis_version":ANALYSIS_VERSION,"cases":report,
+        "interpretation":"Small waveform-landmark pilot marked visually before inspecting detected grids, using the app decoder timebase. Not listening-verified musical beat/downbeat labels or a broad accuracy benchmark."})).unwrap()).unwrap();
 }

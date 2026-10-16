@@ -2,13 +2,19 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.22](https://img.shields.io/badge/status-beta%200.22-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.23](https://img.shields.io/badge/status-beta%200.23-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.22:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.23:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.19: recover an unsaved project copy](docs/screenshots/recovery.png)
+
+## New in 0.23
+
+Tempo analysis no longer forces every result into 85–175 BPM. It compares rhythmic accents and bass-attack coverage when considering half/double tempo, covering explicit slow pulses, fast pulses and eighth-note percussion. Beatgrid advises checking bar 1 when the selected downbeat lacks a distinct bass accent or there is too little evidence to assess it. These checks are heuristics, not musical certainty.
+
+The [tempo and metre verification report](docs/TEMPO-METER-2026-10-16.md) separates authored rhythm references, a small visually marked waveform pilot and the unlabelled music corpus. Cache version 12 refreshes derived analysis; saved grids and edits remain intact. Use **Beatgrid → Reset to analysis** on an uncut source clip to adopt the result. Listen and check its interpretation before arranging sections.
 
 ## New in 0.22
 

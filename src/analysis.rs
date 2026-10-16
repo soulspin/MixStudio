@@ -4,6 +4,10 @@ use std::path::Path;
 use symphonia::core::{audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint};
 
 #[cfg(test)]
+#[path="analysis/meter_tests.rs"]
+mod meter_tests;
+
+#[cfg(test)]
 #[path="analysis/diagnostics.rs"]
 mod corpus_diagnostics;
 
@@ -207,7 +211,7 @@ impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } 
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 11;
+pub const ANALYSIS_VERSION: u32 = 12;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -240,11 +244,15 @@ pub struct RhythmEvidence {
     pub supported_fraction:[f64;3],
     /// Minimum evidence gates passed; not a guarantee of beat/downbeat accuracy.
     pub grid_supported:bool,
+    /// Relative bass-accent separation for the chosen bar phase, not confidence.
+    #[serde(default)] pub downbeat_bass_margin:Option<f64>,
 }
 impl RhythmEvidence {
     pub fn warning(&self)->Option<&'static str> {
         if !self.grid_supported {Some("Source analysis: insufficient rhythm evidence. BPM is provisional; set and check the grid manually.")}
         else if self.supported_fraction.iter().any(|s|*s<0.35) {Some("Source analysis: weak attack support in parts of this song. Check the grid through the intro, middle and outro.")}
+        else if self.downbeat_bass_margin.is_none() {Some("Source analysis: bar-phase evidence is unavailable. Check the downbeat and half/double BPM by listening.")}
+        else if self.downbeat_bass_margin.is_some_and(|m|m<0.10) {Some("Source analysis: bar 1 has no distinct bass accent. Check the downbeat and half/double BPM by listening.")}
         else {None}
     }
 }
@@ -343,6 +351,10 @@ fn rhythm_mono(a: &Audio) -> Vec<f32> {
 
 /// Onset envelope: half-wave rectified difference of log energy (low-passed signal emphasised), hop 512.
 fn onset_env(m: &[f32], sr: u32) -> (Vec<f32>, f64) {
+    onset_env_band(m,sr,1.0)
+}
+
+fn onset_env_band(m:&[f32],sr:u32,full_band_weight:f32)->(Vec<f32>,f64) {
     let hop = 512usize;
     let fps = sr as f64 / hop as f64;
     let a = (-2.0 * std::f32::consts::PI * 150.0 / sr as f32).exp();
@@ -351,7 +363,7 @@ fn onset_env(m: &[f32], sr: u32) -> (Vec<f32>, f64) {
     for ch in m.chunks(hop) {
         let (mut s1, mut s2) = (0f32, 0f32);
         for &x in ch { lp = a * lp + (1.0 - a) * x; s1 += lp * lp; s2 += x * x; }
-        e.push((200.0 * (2.0 * s1 + s2) / ch.len() as f32).ln_1p());
+        e.push((200.0 * (2.0 * s1 + full_band_weight*s2) / ch.len() as f32).ln_1p());
     }
     let mut o = vec![0f32; e.len()];
     for i in 1..e.len() { o[i] = (e[i] - e[i - 1]).max(0.0); }
@@ -458,6 +470,17 @@ fn regress_grid(o: &[f32], period: f64, phase: f64) -> Option<(f64, f64)> {
     Some((p, ph.rem_euclid(p)))
 }
 
+/// Evidence for one distinct accent in a four-pulse cycle. This is a
+/// metrical heuristic, not proof of the listener's preferred tempo octave.
+fn pulse_accents(o:&[f32],period:f64,phase:f64)->(f64,f64) {
+    if (o.len() as f64)<period*32.0 {return (0.0,0.0);}
+    let mut values:Vec<f64>=(0..4).map(|k|comb(o,period*4.0,phase+k as f64*period) as f64).collect();
+    values.sort_by(|a,b|b.total_cmp(a));
+    let peak=values[0];
+    if peak<=1e-20 {return (0.0,0.0);}
+    ((peak-values[1])/peak,values[3]/peak)
+}
+
 pub fn detect_bpm(m: &[f32], sr: u32) -> (f64, f64) {
     if sr == 0 { return (128.0, 0.0); }
     let (o, fps) = onset_env(m, sr);
@@ -476,8 +499,9 @@ pub fn detect_bpm(m: &[f32], sr: u32) -> (f64, f64) {
         if score > best.0 { best = (score, bpm); }
         bpm += 0.1;
     }
-    // octave correction into the dance range 85..175
-    let mut c = best.1; while c < 85.0 { c *= 2.0; } while c > 175.0 { c /= 2.0; }
+    // Preserve the supported pulse: an unconditional dance-range fold invents
+    // intervening beats in slow material and drops real beats in fast material.
+    let c = best.1;
     // 2) fine comb over the full track: +-1 BPM at 0.005 BPM
     let mut fine = (0f32, c, 0.0f64);
     let mut b = c - 1.0;
@@ -490,6 +514,33 @@ pub fn detect_bpm(m: &[f32], sr: u32) -> (f64, f64) {
     for k in 0..64 { let p = ph - period * 0.25 + period * 0.5 * k as f64 / 64.0; let s = comb(&o, period, p.max(0.0)); if s > comb(&o, period, ph) { ph = p.max(0.0); } }
     // 3) refine by regression of the actual beat onsets across the whole track
     if let Some((p, q)) = regress_grid(&o, period, ph) { period = p; ph = q; }
+    // Strong eighth-note percussion can dominate the full-band tempo. A
+    // slower interpretation needs a repeated four-pulse bass accent and bass
+    // attacks on every phase, while the faster grid has nearly empty phases.
+    if fps*30.0/period>=60.0 {
+        let (bass,_)=onset_env_band(m,sr,0.0);
+        let mut bass_ph=ph;
+        for j in 0..9 {
+            let q=(ph-1.0+j as f64*0.25).max(0.0);
+            if comb(&bass,period,q)>comb(&bass,period,bass_ph) {bass_ph=q;}
+        }
+        let (_,base_floor)=pulse_accents(&bass,period,bass_ph);
+        let (half_accent,half_floor)=pulse_accents(&bass,period*2.0,bass_ph);
+        if base_floor<0.25 && half_accent>0.20 && half_floor>0.50 {
+            if comb(&bass,period*2.0,ph+period)>comb(&bass,period*2.0,ph) {ph+=period;}
+            period*=2.0;
+        }
+    }
+    // An autocorrelation maximum can prefer every other real pulse. Promote
+    // the double-tempo family only when all four phases have attack evidence
+    // and it reveals a distinct four-pulse accent absent at the slower rate.
+    // Equal pulses and subdivisions alone cannot make this decision.
+    let (base_accent,_)=pulse_accents(&o,period,ph);
+    let (double_accent,double_floor)=pulse_accents(&o,period*0.5,ph);
+    if fps*120.0/period<=200.0 && base_accent<0.10 && double_accent>0.20 && double_floor>0.50 {
+        period*=0.5;
+        ph=ph.rem_euclid(period);
+    }
     let bpm = fps * 60.0 / period;
     // onset frame i covers samples [i*hop, (i+1)*hop); with the symmetric smoothing its peak sits at the attack (~2 ms on synthetic kicks)
     let off_beat = (ph / fps).rem_euclid(60.0 / bpm);
@@ -718,6 +769,28 @@ fn downbeat_idx(m: &[f32], sr: u32, beats: &[f64], onset: &[f32], fps: f64) -> u
     best.1
 }
 
+/// Separation of the selected bass accent from the other three bar phases.
+/// Weak/absent contrast must not turn an arbitrary phase into a musical label.
+fn downbeat_bass_margin(m:&[f32],sr:u32,beats:&[f64],phase:usize)->Option<f64> {
+    if sr==0 || beats.len()<32 {return None;}
+    let a=(-2.0*std::f32::consts::PI*120.0/sr as f32).exp();
+    let win=(0.08*sr as f64) as usize;
+    let mut sums=[0.0_f64;4];let mut counts=[0_usize;4];
+    for (i,&t) in beats.iter().enumerate() {
+        if t<0.0 || !t.is_finite() {continue;}
+        let start=(t*sr as f64).round() as usize;
+        if start+win>m.len() || win==0 {continue;}
+        let mut lp=0.0_f32;let mut energy=0.0;
+        for &v in &m[start.saturating_sub((0.012*sr as f64) as usize)..start] {lp=a*lp+(1.0-a)*v;}
+        for &v in &m[start..start+win] {lp=a*lp+(1.0-a)*v;energy+=(lp as f64).powi(2);}
+        sums[i%4]+=energy/win as f64;counts[i%4]+=1;
+    }
+    if counts.iter().any(|n|*n<4) {return None;}
+    let means:Vec<_>=(0..4).map(|k|sums[k]/counts[k] as f64).collect();
+    let selected=means[phase%4];let other=(0..4).filter(|k|*k!=phase%4).map(|k|means[k]).fold(0.0,f64::max);
+    Some(if selected>1e-40 {((selected-other)/selected).clamp(0.0,1.0)}else{0.0})
+}
+
 /// Normalised onset covariance at the tempo family. A random noise floor must
 /// not become beat evidence just because DP can select local maxima from it.
 fn tempo_support(onset:&[f32],fps:f64,bpm:f64)->f64 {
@@ -774,6 +847,7 @@ fn detect_rhythm(m:&[f32],sr:u32)->(f64,f64,Vec<f64>,RhythmEvidence) {
     let _ = downbeat_idx;
     let k = near % 4;
     evidence.grid_supported=true;
+    evidence.downbeat_bass_margin=downbeat_bass_margin(m,sr,&beats,k);
     (bpm, beats[k], beats,evidence)
 }
 
