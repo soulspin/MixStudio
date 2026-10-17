@@ -2,13 +2,19 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.23](https://img.shields.io/badge/status-beta%200.23-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.24](https://img.shields.io/badge/status-beta%200.24-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.23:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.24:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
-![MixStudio 0.19: recover an unsaved project copy](docs/screenshots/recovery.png)
+![MixStudio 0.24: source ranges, protected transitions and processed A/B monitoring](docs/screenshots/transition-workbench.png)
+
+## New in 0.24
+
+The Transition tab now shows the outgoing and incoming source intervals, including arranged cuts, alongside the overlap’s mix bars and duration. Processed audition adds before/after bars, repeat, and **Monitor A / Both / Monitor B** without restarting the playhead. Project deck mute/solo is temporarily overridden; shared FX tails continue across switches. Export and saved mixer settings stay unchanged.
+
+**Protect this transition** saves its lock and disables that transition’s preset, stem and volume-curve edits. This first version freezes arrangement moves, trims, cuts, reorder and automatic beat-ratio changes while any transition is protected; unlock in Transition to edit placement. Master, FX and other transitions’ presets remain separately editable. See the [workflow and verification record](docs/TRANSITIONS-2026-10-17.md).
 
 ## New in 0.23
 

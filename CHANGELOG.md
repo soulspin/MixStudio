@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.24.0-beta
+
+- Rework Transition into explicit source A/B intervals, overlap bars/duration, responsive preset/stem controls and processed audition. Respect arranged source cuts and logical split fragments.
+- Add before/after bars, repeat and Monitor A/Both/B switching without seeking. Override monitor mute/solo only in playback snapshots; retain processed routing and shared FX tails. Restore suspended loop settings on stop and clear them on document changes.
+- Persist undoable transition protection with legacy-safe defaults. Protected transitions freeze arrangement placement, trims/cuts/reorder and automatic ratios until unlocked, and protect their own preset/stem/volume curves.
+- Add rendered-audio, command-order/transport, source-range, protection, document-lifecycle and minimum-width UI regressions.
+
 ## 0.23.0-beta
 
 - Remove the unconditional 85–175 BPM fold. Compare supported pulse families using four-pulse accents and separate bass-attack coverage, reducing reproduced 70→140 and 180→90 octave errors.

@@ -78,6 +78,7 @@ impl Mix {
         }
     }
     pub fn insert_section(&mut self, ti: usize, at: f64, copy: &SectionCopy) -> Result<f64,String> {
+        if self.has_transition_locks() {return Err("Unlock protected transitions before editing sections".into());}
         let t = self.tracks.get(ti).ok_or("Select the source song")?;
         if t.path != copy.path { return Err("Paste into the same source song in this version".into()); }
         if !at.is_finite() || at<t.vis_start(0.0)-1e-7 || at>t.end(0.0)+1e-7 { return Err("Place the playhead inside the source song".into()); }
@@ -102,6 +103,7 @@ impl Mix {
         self.ripple_section(ti,at,at,len); Ok(len)
     }
     pub fn delete_section(&mut self, ti: usize, a: f64, b: f64) -> Result<(),String> {
+        if self.has_transition_locks() {return Err("Unlock protected transitions before editing sections".into());}
         let t = self.tracks.get(ti).ok_or("Select a song")?; t.copy_section(a,b)?;
         if t.end(0.0)-t.vis_start(0.0)-(b-a)<0.01 { return Err("Keep at least part of the song; use Remove track to remove it".into()); }
         let mut spans = t.section_spans(t.vis_start(0.0),a); spans.extend(t.section_spans(b,t.end(0.0)));

@@ -16,7 +16,10 @@ impl StemMode { pub const ALL: [StemMode; 4] = [StemMode::None, StemMode::Swap, 
     pub fn name(self) -> &'static str { match self { StemMode::None => "None", StemMode::Swap => "Swap", StemMode::Crossfade => "Crossfade", StemMode::Full => "Full" } } }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
-pub struct Transition { pub preset: Preset, pub stems: [StemMode; 4],
+pub struct Transition {
+    /// Protect transition settings and freeze arrangement placement until unlocked.
+    #[serde(default)] pub locked:bool,
+    pub preset: Preset, pub stems: [StemMode; 4],
     /// custom volume curves over the transition (progress 0..1, gain); empty = preset curve
     #[serde(default)] pub curve_out: Vec<(f32, f32)>, #[serde(default)] pub curve_in: Vec<(f32, f32)>,
     /// beat ratio of the incoming track (RATIOS): 0 = auto (half / double time when clearly closer)
@@ -304,7 +307,9 @@ impl Mix {
         }
     }
     /// Move the incoming logical song, optionally including later logical songs.
+    pub fn has_transition_locks(&self)->bool {self.tracks.iter().any(|t|t.trans.locked)}
     pub fn shift_logical_transition(&mut self,incoming:usize,delta:f64,following:bool) {
+        if self.has_transition_locks() {return;}
         let groups=self.main_groups();
         let Some(k)=groups.iter().position(|g|g.contains(&incoming)) else { return; };
         for group in &groups[k..if following { groups.len() } else { k+1 }] {
@@ -366,6 +371,7 @@ impl Mix {
         self.layout_resolved(order,overlap_bars,None);
     }
     fn layout_resolved(&mut self, order:&[usize],overlap_bars:f64,phrases:Option<&[Vec<(f64,u8)>]>) -> usize {
+        if self.has_transition_locks() {return 0;}
         let mut aligned;
         self.resolve_ratios_in(order);
         // Ratios are discrete; resample after placement until geometry and tempo agree.
@@ -428,6 +434,7 @@ pub fn magnet(b: f64, cands: &[f64], tol: f64) -> Option<f64> {
 impl Mix {
     /// Split track `ti` at mix beat `b`. Both clips keep the source offsets; returns the new clip index.
     pub fn split(&mut self, ti: usize, b: f64) -> Option<usize> {
+        if self.has_transition_locks() {return None;}
         let t = self.tracks.get(ti)?;
         if b-t.vis_start(0.0)<0.1 || t.end(0.0)-b<0.1 { return None; }
         if t.sections.is_empty() { let s=t.sec_at(b); if s<=t.trim_in+0.05 || s>=t.duration-t.trim_out-0.05 { return None; } }
@@ -452,6 +459,7 @@ impl Mix {
     }
     /// Move the left or right edge of a clip to mix beat `b` (trim or extend, at least one beat long).
     pub fn set_edge(&mut self, ti: usize, left: bool, b: f64) {
+        if self.has_transition_locks() {return;}
         let t = &mut self.tracks[ti];
         let edge=if left { t.vis_start(0.0) } else { t.end(0.0) };
         if (edge-b).abs()>1e-8 { t.trans.splice_fades[if left {0} else {1}]=false; }
@@ -468,9 +476,10 @@ impl Mix {
         else { t.trim_out = (t.duration - s).clamp(0.0, (t.duration - t.trim_in - min).max(0.0)); t.fade_out = t.fade_out.min(t.end(0.0) - t.vis_start(0.0)); }
     }
     /// Copy a clip (Alt+drag on a sample); returns the copy's index.
-    pub fn duplicate(&mut self, ti: usize) -> usize { let mut c = self.tracks[ti].clone(); c.trans.fragment_group=0; c.locked = false; self.tracks.push(c); self.tracks.len() - 1 }
+    pub fn duplicate(&mut self, ti: usize) -> usize { let mut c = self.tracks[ti].clone(); c.trans.fragment_group=0; c.trans.locked=false; c.locked = false; self.tracks.push(c); self.tracks.len() - 1 }
     /// Put a clip on `lane` (0/1 = decks, 2/3 = sample lanes); deck clips alternate Deck 1 / Deck 2 in time order.
     pub fn move_to_lane(&mut self, ti: usize, lane: usize) {
+        if self.has_transition_locks() {return;}
         let previous=self.tracks[ti].lane;
         let members=if lane<2 && previous<2 { self.main_groups().into_iter().find(|g|g.contains(&ti)).unwrap_or_else(||vec![ti]) } else {vec![ti]};
         for i in members { self.tracks[i].lane=lane.min(3); }
@@ -595,6 +604,7 @@ impl Mix {
         self.resolve_ratios_in(&self.main_groups().into_iter().flatten().collect::<Vec<_>>())
     }
     fn resolve_ratios_in(&mut self, order: &[usize]) -> bool {
+        if self.has_transition_locks() {return false;}
         let fixed_curve = if self.tempo_mode == 1 { vec![] } else { self.tempo_curve() };
         let mut prev: Option<f64> = None; let mut res = vec![]; let mut groups=std::collections::BTreeMap::new();
         let logical_groups=self.main_groups();
@@ -896,5 +906,25 @@ mod precise_grid_controls {
         let mut t=track();t.sections=vec![(0.0,4.0),(0.0,4.0)];let before=serde_json::to_string(&t).unwrap();
         assert!(t.adjust_grid(GridScope::All,4.0,0.01).is_err());assert_eq!(serde_json::to_string(&t).unwrap(),before);
         let mut t=track();let before=serde_json::to_string(&t).unwrap();assert!(t.adjust_grid(GridScope::Single,1000.0,0.01).is_err());assert_eq!(serde_json::to_string(&t).unwrap(),before);
+    }
+}
+
+#[cfg(test)]
+mod protected_transition_tests {
+    use super::*;
+    #[test]
+    fn protected_transition_survives_layout_shift_and_ratio_resolution() {
+        let mut m:Mix=serde_json::from_str(include_str!("../tests/fixtures/unstable-flex-pair.json")).unwrap();
+        assert!(!m.has_transition_locks(),"legacy project unexpectedly froze arrangement");
+        for t in &mut m.tracks {t.set_grid_mode(1);}
+        let mut value=serde_json::to_value(&m).unwrap();value["tracks"][1]["trans"]["locked"]=serde_json::json!(true);
+        let mut m:Mix=serde_json::from_value(value).unwrap();let before=serde_json::to_string(&m).unwrap();
+        m.set_edge(0,false,32.0);
+        assert!(m.split(0,16.0).is_none());
+        m.move_to_lane(0,2);
+        m.shift_logical_transition(1,16.0,true);
+        m.relayout(&[1,0],4.0);
+        m.resolve_ratios();
+        assert_eq!(serde_json::to_string(&m).unwrap(),before,"protected arrangement was changed");
     }
 }

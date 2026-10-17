@@ -29,7 +29,7 @@ impl App {
     }
     pub(super) fn open_comparison(&mut self,incoming:usize) {
         let Some((_,_,s,e))=self.mix.logical_transitions().into_iter().find(|x|x.1==incoming) else { return; };
-        self.stop_comparison(); self.sel_in=Some(incoming); self.sel=Some(incoming); self.tab=Tab::Compare;
+        self.stop_transition_audition(); self.stop_comparison(); self.sel_in=Some(incoming); self.sel=Some(incoming); self.tab=Tab::Compare;
         self.comparison=Comparison{incoming:Some(incoming),stamp:self.alignment_stamp(incoming).unwrap_or_default(),center:(s+e)*0.5,target:((s+e)*0.5).round(),..Default::default()};
     }
     pub(super) fn stop_comparison(&mut self) {
@@ -50,6 +50,7 @@ impl App {
     }
     pub(super) fn build_playback_snap(&self)->Snap {
         let mut normal=self.build_snap();
+        self.filter_transition_audition(&mut normal);
         if self.tab!=Tab::Compare { return normal; }
         normal.metro=if self.comparison.metro {Some(self.mix.metro_vol)} else {None};
         if self.comparison.audition==0 { return normal; }
@@ -66,6 +67,7 @@ impl App {
         let mut dry=Snap::build(&mix,&audio); dry.trans.clear(); dry.tcurves.clear(); dry.tempo=normal.tempo; dry.metro=normal.metro; dry
     }
     pub(super) fn start_comparison_preview(&mut self,side:u8,from:f64,to:f64) {
+        self.stop_transition_audition();
         if from>=to { return; }
         if self.comparison.audition==0 {
             self.comparison.restore_loop=self.active_loop;
@@ -93,7 +95,7 @@ impl App {
         *self.comparison.cache.borrow_mut()=Some((key,track.clone())); Some(track)
     }
     pub(super) fn apply_comparison_anchors(&mut self) {
-        if self.lock { self.status="Unlock editing to apply anchors.".into(); return; }
+        if self.arrangement_locked() {return;}
         let Some(i)=self.comparison.incoming else { return; };
         if self.transition_members(i).is_some_and(|groups|groups.iter().any(|g|g.len()>1)) {self.status="Correct source grids before splitting clips.".into();return;}
         if self.alignment_stamp(i).as_ref()!=Some(&self.comparison.stamp) { self.validate_comparison(); self.status="Timing changed. Set the anchors again.".into(); return; }
@@ -127,7 +129,7 @@ impl App {
             let half=self.comparison.span*0.5; let from=(self.comparison.center-half).max(s); let to=(self.comparison.center+half).min(e);
             if to-from<0.01 { ui.label("No visible overlap."); return; }
             let members=self.transition_members(i).unwrap_or([vec![o],vec![i]]);
-            let editable=!self.lock && members.iter().all(|g|g.len()==1) && self.mix.tracks[i].sections.is_empty() && (self.mix.tracks[i].beat_mult-1.0).abs()<1e-9;
+            let editable=!self.arrangement_locked() && members.iter().all(|g|g.len()==1) && self.mix.tracks[i].sections.is_empty() && (self.mix.tracks[i].beat_mult-1.0).abs()<1e-9;
             ui.horizontal_wrapped(|ui| {
                 for (side,label) in [(1,"Listen A"),(2,"Listen B"),(3,"Listen both")] {
                     if ui.selectable_label(self.comparison.audition==side,label).clicked(){self.start_comparison_preview(side,from,to);}

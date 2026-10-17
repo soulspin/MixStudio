@@ -1,5 +1,6 @@
 mod persistence;
 mod comparison;
+mod transition_workbench;
 use crate::analysis::{self, Analysis, Audio, PEAK_HOP};
 use crate::engine::{self, Cmd, Shared, Snap};
 use crate::model::{Mix, Preset, StemMode, Track};
@@ -54,6 +55,7 @@ struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::A
 
 pub struct App {
     persistence:persistence::Persistence,
+    transition_audition:Option<transition_workbench::Audition>, transition_pre:u32, transition_post:u32, transition_repeat:bool,
     comparison:comparison::Comparison, active_loop:Option<(f64,f64)>,
     beat_check: Option<BeatCheckState>,
     section_state: Vec<u64>, select_sections: bool, section_range: Option<(usize, f64, f64)>, section_drag: Option<(usize, f64)>, section_copy: Option<crate::sections::SectionCopy>,
@@ -148,7 +150,7 @@ impl App {
             if let Ok(e) = crate::stems::session_info() { *ep.lock().unwrap() = e; }
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let persistence=persistence::Persistence::new(lib.recovery_dir(),&Mix::default(),demo.is_none());
-        let mut a = App { persistence, comparison:Default::default(), active_loop:None, beat_check:None, section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
+        let mut a = App { persistence, transition_audition:None, transition_pre:2, transition_post:1, transition_repeat:true, comparison:Default::default(), active_loop:None, beat_check:None, section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
             file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, scratch_win: false, scratch_play: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib,
@@ -206,6 +208,7 @@ impl App {
     fn playing(&self) -> bool { self.out.shared.playing.load(std::sync::atomic::Ordering::Relaxed) }
     fn set_loop(&mut self,range:Option<(f64,f64)>) { self.active_loop=range; let _=self.out.tx.send(Cmd::Loop(range)); }
     fn toggle_playback(&mut self) {
+        if self.transition_audition.is_some() {self.stop_transition_audition();return;}
         if self.playing() && self.comparison.audition!=0 { self.stop_comparison(); }
         else { let _=self.out.tx.send(Cmd::Play(!self.playing())); }
     }
@@ -290,6 +293,7 @@ impl App {
     }
     /// Reorder the main-deck tracks for key and tempo flow (and the chosen energy curve); undoable.
     fn auto_order(&mut self) {
+        if self.mix.has_transition_locks() {self.status="Unlock protected transitions before Auto-order.".into();return;}
         let o = self.mix.main_order(); if o.len() < 3 { self.status = "Auto-order needs at least 3 tracks".into(); return; }
         let items: Vec<_> = o.iter().map(|&i| self.ao_item(i)).collect();
         let locked: Vec<bool> = o.iter().enumerate().map(|(k, &i)| self.mix.tracks[i].locked || (k == 0 && self.ao_keep_first)).collect();
@@ -305,17 +309,20 @@ impl App {
         self.status = format!("Auto-order ({}): {greens}/{} smooth transitions, score {:.2} → {:.2} in {} ms, {np} outro→intro phrase overlaps. Undo restores the old order.", self.ao_mode.name(), ord.len() - 1, c0, c1, t0.elapsed().as_millis());
     }
     fn remove_sel(&mut self) {
+        if self.arrangement_locked() {self.status="Unlock timeline and protected transitions before removing tracks.".into();return;}
         if let Some(i) = self.sel { self.clear_section(); self.snapshot(); self.mix.tracks.remove(i); self.sel = None; self.sel_in = None;
             self.mix.alternate_main_lanes(); }
     }
     /// Make the audio at mix beat `beat` (inside track ti) the downbeat, placed on the nearest mix bar.
     fn set_downbeat_at(&mut self, ti: usize, beat: f64) {
+        if self.arrangement_locked() {return;}
         let t = &mut self.mix.tracks[ti];
         let sec = t.sec_at(beat); let target = (beat / 4.0).round() * 4.0;
         t.offset = sec; t.start_beat = target; t.normalize_grid();
     }
     /// Shift the beat grid (fixed or beat map) relative to the audio by `dsec` seconds.
     fn nudge(&mut self, ti: usize, dsec: f64) {
+        if self.arrangement_locked() {return;}
         let t = &mut self.mix.tracks[ti];
         if t.grid().dynamic() { t.edit_map(|m| m.shift(dsec)); }
         else { t.offset += dsec; t.normalize_grid(); }
@@ -420,7 +427,7 @@ impl App {
             if (self.mix.fx[k].pattern.clone(), self.mix.fx[k].ease) != before { let now = (self.mix.fx[k].pattern.clone(), self.mix.fx[k].ease);
                 self.mix.fx[k].pattern = before.0; self.mix.fx[k].ease = before.1; self.snapshot(); self.mix.fx[k].pattern = now.0; self.mix.fx[k].ease = now.1; }
         });
-        if preview { let f = &self.mix.fx[k]; let (s, e) = (f.start, f.start + f.len); self.seek((s - 1.0).max(0.0)); let _ = self.out.tx.send(Cmd::Play(true)); self.scratch_play = Some((k, s, e)); }
+        if preview { self.stop_transition_audition(); self.stop_comparison(); let f = &self.mix.fx[k]; let (s, e) = (f.start, f.start + f.len); self.seek((s - 1.0).max(0.0)); let _ = self.out.tx.send(Cmd::Play(true)); self.scratch_play = Some((k, s, e)); }
         if snap_needed { self.snapshot(); self.mix.fx.remove(k); self.fx_sel = None; self.scratch_win = false; }
         if !open { self.scratch_win = false; }
     }
@@ -548,6 +555,7 @@ impl App {
         }
     }
     fn clear_section(&mut self) {
+        self.stop_transition_audition();
         self.stop_comparison();
         self.section_range=None; self.section_drag=None; self.section_state.clear();
         if self.loop_on { self.loop_on=false; self.set_loop(None); }
@@ -555,7 +563,7 @@ impl App {
     // 0 copy, 1 paste, 2 repeat, 3 delete, 4 audition loop.
     fn section_action(&mut self, action: u8) {
         self.validate_section();
-        if self.lock && matches!(action,1..=3) { self.status="Unlock the timeline to edit sections".into(); return; }
+        if self.arrangement_locked() && matches!(action,1..=3) { self.status="Unlock the timeline to edit sections".into(); return; }
         if action==1 {
             let Some(copy)=self.section_copy.clone() else { self.status="Copy a section first (Ctrl+C)".into(); return; };
             let Some(ti)=self.sel else { self.status="Select the source song".into(); return; };
@@ -566,7 +574,7 @@ impl App {
             } return;
         }
         let Some((ti,a,b))=self.section_range else { self.status="Choose Select, then drag a range on a song".into(); return; };
-        if action==4 { self.loop_on=true; self.set_loop(Some((a,b))); self.seek(a); let _=self.out.tx.send(Cmd::Play(true)); return; }
+        if action==4 { self.stop_transition_audition(); self.loop_on=true; self.set_loop(Some((a,b))); self.seek(a); let _=self.out.tx.send(Cmd::Play(true)); return; }
         let Some(t)=self.mix.tracks.get(ti) else { self.clear_section(); return; };
         let copy=match t.copy_section(a,b) { Ok(c)=>c,Err(e)=>{self.status=e; return;} };
         if action==0 { self.section_copy=Some(copy); self.status=format!("Copied {:.1} beats · paste within this song",b-a); return; }
@@ -587,7 +595,7 @@ impl App {
             ui.selectable_value(&mut self.select_sections,false,"↔ Move").on_hover_text("Drag clips to move them");
             if ui.selectable_value(&mut self.select_sections,true,"▧ Select").on_hover_text("Drag a range on one song; uses the timeline's beat/bar snap").changed() { self.drag=None; self.auto_track=None; self.stem_sel=None; }
             ui.separator();
-            let selected=self.section_range.is_some(); let unlocked=!self.lock;
+            let selected=self.section_range.is_some(); let unlocked=!self.arrangement_locked();
             for (id,label,tip,enabled) in [
                 (0,"Copy","Ctrl+C · copy selected source ranges and automation",selected),
                 (1,"Paste","Ctrl+V · insert at playhead within the same song",unlocked && self.section_copy.is_some() && self.sel.is_some()),
@@ -654,6 +662,7 @@ impl eframe::App for App {
         files.retain(|p| crate::library::is_audio(p));
         if !files.is_empty() { self.load_files(files, None); }
         self.validate_comparison();
+        self.validate_transition_audition();
         let _ = self.out.snapshot(Arc::new(self.build_playback_snap()));
         if !ctx.wants_keyboard_input() {
             if ctx.input(|i|i.modifiers.command && i.key_pressed(egui::Key::S)) { if ctx.input(|i|i.modifiers.shift) || self.file.is_none(){self.dialog(true,1);}else if let Some(p)=self.file.clone(){self.save(p);} }
@@ -806,7 +815,7 @@ impl App {
                 let pl = self.playing();
                 if ui.add(egui::Button::new(egui::RichText::new(if pl { "⏸" } else { "▶" }).color(C::BLACK).size(18.0)).fill(ACCENT).rounding(18.0).min_size(vec2(38.0, 36.0))).on_hover_text("Play/pause (space)").clicked() { self.toggle_playback(); }
                 let lb = egui::Button::new(egui::RichText::new("🔁").size(16.0).color(if self.loop_on { ACCENT } else { TXT })).frame(false).min_size(vec2(30.0, 30.0));
-                if ui.add(lb).on_hover_text("Loop the selected section, or the bar length from the current bar").clicked() { self.stop_comparison(); self.loop_on = !self.loop_on;
+                if ui.add(lb).on_hover_text("Loop the selected section, or the bar length from the current bar").clicked() { self.stop_comparison(); self.stop_transition_audition(); self.loop_on = !self.loop_on;
                     let s = (b / 4.0).floor() * 4.0; self.set_loop(if self.loop_on { Some(self.section_range.map(|(_,a,b)| (a,b)).unwrap_or((s, s + self.bars as f64 * 4.0))) } else { None }); }
                 if flat(ui, "⏭", "Next track").clicked() { if let Some(s) = self.mix.main_order().iter().map(|&i| self.mix.tracks[i].vis_start(bpm)).find(|&s| s > b + 0.5) { self.seek(s); } }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -887,6 +896,7 @@ impl App {
 
 impl App {
     fn timeline(&mut self, ui: &mut egui::Ui) {
+        if self.arrangement_locked() {self.drag=None;self.tl_drag=None;self.grid_drag=None;self.bm_drag=None;}
         self.section_toolbar(ui);
         let full = ui.available_rect_before_wrap();
         let mini_h = 14.0;
@@ -1088,7 +1098,7 @@ impl App {
                     tp.rect_filled(r, 0.0, C::from_rgb(pc[0], pc[1], pc[2]));
                     let xm = bx(sb); if xm >= cr.left() && xm <= cr.right() { tp.line_segment([pos2(xm, cr.top()), pos2(xm, cr.bottom())], Stroke::new(1.0_f32, C::from_rgba_unmultiplied(pc[0], pc[1], pc[2], 150))); }
                     if r.width() > 40.0 { tp.text(pos2(r.left().max(tl_x0) + 3.0, r.center().y), Align2::LEFT_CENTER, crate::phrase::LABELS[kind], FontId::proportional(7.5), C::BLACK); }
-                    if !self.lock && !self.select_sections {
+                    if !self.arrangement_locked() && !self.select_sections {
                         let pr = ui.interact(r, ui.id().with(("phrase", ti, k)), Sense::click());
                         let set = |v: Option<Vec<(f64, u8)>>| ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("phr_act"), (t.path.clone(), v)));
                         if pr.clicked() { let mut v = phr.to_vec(); v[k].1 = ((kind + 1) % 5) as u8; set(Some(v)); }
@@ -1118,17 +1128,17 @@ impl App {
             let resp = ui.interact(vis, ui.id().with(("clip", ti)), Sense::click_and_drag());
             if let Some(pp) = resp.interact_pointer_pos() {
                 let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
-                if self.select_sections && !self.lock && resp.drag_started() {
+                if self.select_sections && !self.arrangement_locked() && resp.drag_started() {
                     let anchor = ui.input(|i| i.pointer.press_origin()).map(|p| xb(p.x)).unwrap_or(xb(pp.x));
                     clicked_clip = Some((ti, anchor, 5));
                 }
                 else if self.select_sections && resp.clicked() { clicked_clip = Some((ti, xb(pp.x), 6)); }
                 else if self.select_sections {}
                 else if resp.drag_started() && ui.input(|i| i.modifiers.command) && t.stem_view > 0 && !sample {}
-                else if resp.drag_started() && alt && !sample && t.sections.is_empty() { clicked_clip = Some((ti, xb(pp.x), 2u8)); }
-                else if resp.drag_started() && alt && sample && !self.lock { clicked_clip = Some((ti, xb(pp.x), 4)); }
-                else if resp.drag_started() && !self.lock { clicked_clip = Some((ti, xb(pp.x), 1)); }
-                else if resp.clicked() && shift && !sample && t.sections.is_empty() { clicked_clip = Some((ti, xb(pp.x), 3)); }
+                else if resp.drag_started() && alt && !sample && !self.arrangement_locked() && t.sections.is_empty() { clicked_clip = Some((ti, xb(pp.x), 2u8)); }
+                else if resp.drag_started() && alt && sample && !self.arrangement_locked() { clicked_clip = Some((ti, xb(pp.x), 4)); }
+                else if resp.drag_started() && !self.arrangement_locked() { clicked_clip = Some((ti, xb(pp.x), 1)); }
+                else if resp.clicked() && shift && !sample && !self.arrangement_locked() && t.sections.is_empty() { clicked_clip = Some((ti, xb(pp.x), 3)); }
                 else if resp.clicked() { clicked_clip = Some((ti, xb(pp.x), 0)); }
             }
             if resp.hovered() { if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) { tl_hover = Some((ti, xb(hp.x))); } }
@@ -1218,7 +1228,7 @@ impl App {
                     if ui.button("Unmute all stems on this track").clicked() { stem_act = Some((ti, 4, 0, 0.0)); ui.close_menu(); }
                 });
             }
-            if !self.lock && !self.select_sections {
+            if !self.arrangement_locked() && !self.select_sections {
                 for left in [true, false] {
                     let x = if left { cr.left() } else { cr.right() };
                     if x < vis.left() - 1.0 || x > vis.right() + 1.0 { continue; }
@@ -1246,7 +1256,7 @@ impl App {
                     }
                 }
             }
-            if !self.lock && !self.select_sections && t.sections.is_empty() && !sample && ppb >= 22.0 && (bm_mode==BmMode::Grid || (t.beat_mult-1.0).abs()<1e-9) {
+            if !self.arrangement_locked() && !self.select_sections && t.sections.is_empty() && !sample && ppb >= 22.0 && (bm_mode==BmMode::Grid || (t.beat_mult-1.0).abs()<1e-9) {
                 let k0 = (xb(vis.left()) - t.start_beat).ceil() as i64; let k1 = (xb(vis.right()) - t.start_beat).floor() as i64;
                 for k in k0..=k1 {
                     let x = bx(t.start_beat + k as f64);
@@ -1286,7 +1296,7 @@ impl App {
             if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) { if resp.hovered() { if (hp.x - x0).abs() < 5.0 { edge = 1; } else if (hp.x - x1).abs() < 5.0 { edge = 2; }
                 ui.ctx().set_cursor_icon(if edge > 0 { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::Grab }); } }
             if resp.clicked() { fx_act = Some((k, 9, 0.0)); }
-            if resp.drag_started() && !self.lock { if let Some(pp) = resp.interact_pointer_pos() { let e = if (pp.x - x0).abs() < 5.0 { 1 } else if (pp.x - x1).abs() < 5.0 { 2 } else { 0 }; fx_act = Some((k, e, xb(pp.x))); } }
+            if resp.drag_started() && !self.arrangement_locked() { if let Some(pp) = resp.interact_pointer_pos() { let e = if (pp.x - x0).abs() < 5.0 { 1 } else if (pp.x - x1).abs() < 5.0 { 2 } else { 0 }; fx_act = Some((k, e, xb(pp.x))); } }
             resp.on_hover_text(format!("{} on {}: drag to move, drag an edge to resize, click to edit in Effects", fb.kind.name(), ["Deck 1", "Deck 2", "Sample 1", "Sample 2", "Master"][fb.target.min(4)]));
         }
         if let Some((k, what, b)) = fx_act { self.fx_sel = Some(k); self.tab = Tab::Effects;
@@ -1321,7 +1331,7 @@ impl App {
             }
             let resp = ui.interact(clip(bar), ui.id().with(("tr", k)), Sense::click_and_drag());
             if resp.clicked() { clicked_trans = Some(i); }
-            if resp.drag_started() && !self.lock { if let Some(pp) = resp.interact_pointer_pos() { tl_act = Some(TlDrag::Trans { ti: i, grab: xb(pp.x), orig: self.mix.tracks[i].start_beat }); } }
+            if resp.drag_started() && !self.arrangement_locked() { if let Some(pp) = resp.interact_pointer_pos() { tl_act = Some(TlDrag::Trans { ti: i, grab: xb(pp.x), orig: self.mix.tracks[i].start_beat }); } }
             if resp.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::Grab); }
             resp.on_hover_text(format!("Transition {}: {} ({} bars). Click for settings, drag to move the incoming track.", k + 1, tt.preset.name(), ((e - s) / 4.0).round()));
         }
@@ -1670,7 +1680,7 @@ impl App {
                     if let Some(&nx) = order.get(k + 1) { let (sc, col, lab) = crate::automix::rate(&self.ao_item(i), &self.ao_item(nx));
                         ui.horizontal(|ui| { let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover()); ui.painter().circle_filled(r.center(), 4.5, compat_col(col));
                             ui.label(egui::RichText::new(lab).size(11.0)).on_hover_text(format!("Compatibility {:.0}%", sc * 100.0)); }); } else { ui.label(""); }
-                    ui.horizontal(|ui| { if ui.small_button("⏶").clicked() { act = Some((i, -1)); } if ui.small_button("⏷").clicked() { act = Some((i, 1)); } if ui.small_button("✖").clicked() { act = Some((i, 9)); } });
+                    ui.add_enabled_ui(!self.arrangement_locked(),|ui| {ui.horizontal(|ui| { if ui.small_button("⏶").clicked() { act = Some((i, -1)); } if ui.small_button("⏷").clicked() { act = Some((i, 1)); } if ui.small_button("✖").clicked() { act = Some((i, 9)); } });});
                     ui.end_row();
                 }
             });
@@ -1683,78 +1693,6 @@ impl App {
             d => { let k = order.iter().position(|&x| x == i).unwrap() as i32; let n = k + d;
                 if n >= 0 && (n as usize) < order.len() { self.snapshot(); let mut o = order.clone(); o.swap(k as usize, n as usize); self.mix.relayout(&o, 16.0); } }
         } }
-    }
-
-    fn transition_tab(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().id_salt("transition_tools").show(ui,|ui| {
-        let trans = self.mix.logical_transitions();
-        let k = self.sel_in.and_then(|i| trans.iter().position(|x| x.1 == i)).unwrap_or(0);
-        let Some(&(o, i, s, e)) = trans.get(k) else { ui.label(egui::RichText::new("No transition yet. Add at least two tracks.").color(DIM)); return; };
-        self.sel_in = Some(i);
-        ui.horizontal(|ui| {
-            let (a, b) = (&self.mix.tracks[o], &self.mix.tracks[i]);
-            ui.label(format!("{}:", k + 1));
-            for (n, t) in [(0, a), (1, b)] {
-                if n == 1 { ui.label("→"); }
-                ui.label(egui::RichText::new(format!(" {} ", t.key)).background_color(C::from_rgb(80, 170, 140)).color(C::BLACK));
-                ui.label(egui::RichText::new(&t.title).strong()); ui.label(egui::RichText::new(format!("- {}", t.artist)).color(DIM));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let cur = ((e - s) / 4.0).round() as i64;
-                for bars in [32i64, 16, 8, 4] { if ui.selectable_label(cur == bars, format!("{bars}")).on_hover_text("Overlap length in bars").clicked() {
-                    self.snapshot(); let delta = (bars - cur) as f64 * 4.0; self.mix.shift_logical_transition(i,-delta,true); } }
-                ui.label(egui::RichText::new("Bars:").color(DIM));
-                ui.separator();
-                let cur = (self.mix.tracks[i].trans.ratio as usize).min(crate::model::RATIOS.len() - 1); let (m, eb) = (self.mix.tracks[i].beat_mult, self.mix.tracks[i].eff_bpm());
-                let label = if cur == 0 { format!("Auto ({})", match m { x if x == 2.0 => "1:2", x if x == 0.5 => "2:1", _ => "1:1" }) } else { crate::model::RATIOS[cur].0.to_string() };
-                egui::ComboBox::from_id_salt("beat_ratio").selected_text(label).width(84.0).show_ui(ui, |ui| { for (k, (n, _)) in crate::model::RATIOS.iter().enumerate() {
-                    if ui.selectable_label(k == cur, *n).clicked() && k != cur { self.snapshot(); self.mix.tracks[i].trans.ratio = k as u8; self.mix.sync_transition(i); self.mix.resolve_ratios(); } } })
-                    .response.on_hover_text(format!("Beat ratio of the incoming track: 1:2 plays one track beat over two mix beats (a 70 BPM track on a 140 BPM grid), 2:1 the opposite, 2:3 maps two track beats to three mix beats. Auto picks half / double time when it is clearly closer. Now ×{m:.2}: the track runs at {eb:.1} BPM on the grid."));
-                ui.label(egui::RichText::new("Beat ratio:").color(DIM));
-            });
-        });
-        ui.add_space(4.0);
-        let h = 190.0;
-        ui.horizontal_top(|ui| {
-            let mut preset = self.mix.tracks[i].trans.preset; let mut changed = false;
-            egui::Frame::none().fill(C::from_rgb(40, 42, 47)).rounding(6.0).inner_margin(8.0).show(ui, |ui| { ui.set_width(130.0); ui.set_height(h - 16.0); ui.vertical(|ui| {
-                ui.horizontal(|ui| { ui.label(egui::RichText::new("Presets").strong()); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { let _ = ui.small_button("Save"); }); });
-                ui.add_space(4.0);
-                for p in Preset::ALL { let on = preset == p;
-                    if ui.add(egui::Button::new(egui::RichText::new(p.name()).color(if on { ACCENT } else { TXT })).frame(on).fill(if on { C::from_rgb(60, 58, 20) } else { C::TRANSPARENT }).stroke(if on { Stroke::new(1.0_f32, ACCENT) } else { Stroke::NONE }).min_size(vec2(118.0, 20.0))).clicked() { preset = p; changed = true; } }
-            }); });
-            egui::Frame::none().fill(C::from_rgb(52, 54, 60)).rounding(6.0).inner_margin(8.0).show(ui, |ui| { ui.set_width(130.0); ui.set_height(h - 16.0); ui.vertical(|ui| {
-                ui.label(egui::RichText::new("Categories").strong()); ui.add_space(4.0);
-                for (n, c) in [("☰ Equalizer", ""), ("〰 Effects", ""), ("🎸 Stems", "4"), ("✨ My presets", "0")] {
-                    ui.horizontal(|ui| { let on = n.contains("Stems"); ui.add(egui::Button::new(n).frame(on).min_size(vec2(96.0, 20.0)));
-                        if !c.is_empty() { ui.label(egui::RichText::new(format!(" {c} ")).color(if on { C::BLACK } else { DIM }).background_color(if on { ACCENT } else { C::TRANSPARENT })); } });
-                }
-            }); });
-            if changed { self.snapshot(); self.mix.tracks[i].trans.preset = preset;
-                self.mix.tracks[i].trans.stems = match preset { Preset::BassSwap => [StemMode::Crossfade, StemMode::Swap, StemMode::Crossfade, StemMode::Crossfade],
-                    Preset::EchoOut => [StemMode::Swap; 4], _ => [StemMode::Crossfade; 4] }; }
-            let mut stems = self.mix.tracks[i].trans.stems; let mut sch = false;
-            for k in 0..4 {
-                egui::Frame::none().fill(C::from_rgb(40, 42, 47)).rounding(6.0).show(ui, |ui| { ui.set_width(118.0); ui.set_height(h); ui.vertical(|ui| {
-                    let (hr, _) = ui.allocate_exact_size(vec2(118.0, 24.0), Sense::hover());
-                    ui.painter().rect_filled(hr, Rounding { nw: 6.0, ne: 6.0, sw: 0.0, se: 0.0 }, STEM[k]);
-                    ui.painter().text(pos2(hr.left() + 8.0, hr.center().y), Align2::LEFT_CENTER, STEM_N[k], FontId::proportional(12.0), C::WHITE);
-                    ui.add_space(4.0);
-                    ui.spacing_mut().item_spacing.y = 3.0;
-                    for m in StemMode::ALL { let on = stems[k] == m;
-                        ui.horizontal(|ui| { ui.add_space(6.0); if ui.add(egui::Button::new(egui::RichText::new(m.name()).color(TXT)).frame(on).fill(C::TRANSPARENT).stroke(if on { Stroke::new(1.0_f32, ACCENT) } else { Stroke::NONE }).min_size(vec2(104.0, 20.0))).clicked() { stems[k] = m; sch = true; } }); }
-                }); });
-            }
-            if sch { self.snapshot(); self.mix.tracks[i].trans.stems = stems; }
-            ui.vertical(|ui| { ui.add_space(6.0); let both = self.stems.contains_key(&self.mix.tracks[o].path) && self.stems.contains_key(&self.mix.tracks[i].path);
-                ui.label(egui::RichText::new(if both { "Stems ready: the Drums/Bass/Melody/Vocals\nchoices drive the audio in this overlap.\nThe preset adds its EQ/filter/echo moves." } else { "Separate stems for both tracks to make\nthe stem choices drive the audio.\nUntil then the preset's volume curve is used." }).color(DIM).size(11.0));
-                if !both && ui.button("Separate stems for both").clicked() { self.request_stems(o); self.request_stems(i); }
-                if ui.button("▶ Listen to transition").clicked() { self.seek(s - 8.0); let _ = self.out.tx.send(Cmd::Play(true)); } });
-        });
-        if ui.button("Open Beatgrid → measure beatmatch").clicked() { self.sel=Some(i); self.tab=Tab::Grid; }
-        self.trans_curves_ui(ui, i);
-        self.mix.sync_transition(i);
-        });
     }
 
     fn track_tab(&mut self, ui: &mut egui::Ui) {
@@ -1773,21 +1711,21 @@ impl App {
                 if ui.add(egui::DragValue::new(&mut bar).speed(1.0).fixed_decimals(0)).changed() { t.start_beat=(bar.round()-1.0)*4.0; changed=true; }
                 changed|=ui.checkbox(&mut t.stabilize,"Stabilize in Auto tempo").on_hover_text("Play this clip flat at its average tempo instead of following its local groove.").changed();
             });
-            if changed && !self.lock { self.snapshot(); self.mix.tracks[i]=t; }
+            if changed && !self.arrangement_locked() { self.snapshot(); self.mix.tracks[i]=t; }
             ui.label(egui::RichText::new(&self.mix.tracks[i].path).color(DIM).size(11.0));
             let path=self.mix.tracks[i].path.clone();
             ui.horizontal(|ui| {
                 if self.stems.contains_key(&path) { ui.label("Stems ready: drums, bass, melody, vocals"); }
                 else if let Some(p)=self.stem_prog.get(&path) { ui.spinner(); ui.label(format!("Separating stems… {:.0}%",p.load(std::sync::atomic::Ordering::Relaxed) as f32/10.0)); }
                 else if ui.button("Separate stems").clicked() { self.request_stems(i); }
-                if ui.add_enabled(!self.lock,egui::Button::new("Remove track")).clicked() { self.remove_sel(); }
+                if ui.add_enabled(!self.arrangement_locked(),egui::Button::new("Remove track")).clicked() { self.remove_sel(); }
             });
             if let Some(e)=self.stem_err.get(&path) { ui.colored_label(C::LIGHT_RED,e); }
         });
     }
 
     fn grid_correction(&mut self, i:usize, scope:crate::model::GridScope, beat:f64, seconds:f64) {
-        if self.lock { self.status="Unlock editing to correct the grid.".into(); return; }
+        if self.arrangement_locked() { self.status="Unlock editing and protected transitions to correct the grid.".into(); return; }
         let Some(mut t)=self.mix.tracks.get(i).cloned() else { return; };
         match t.adjust_grid(scope,beat,seconds) {
             Ok(d) if d.abs()>1e-10=>{ self.snapshot(); self.mix.tracks[i]=t; self.status=format!("Grid markers moved {:+.1} ms in source audio. Undo: Ctrl+Z.",d*1000.0); self.beat_check=None; },
@@ -1830,7 +1768,7 @@ impl App {
                 let t=self.mix.tracks[i].clone();
                 let first=t.start_beat+(t.vis_start(0.0)-t.start_beat).ceil(); let last=t.start_beat+(t.end(0.0)-t.start_beat).floor();
                 let beat=(t.start_beat+(self.beat()-t.start_beat).round()).clamp(first,last.max(first));
-                let editable=!self.lock && t.sections.is_empty();
+                let editable=!self.arrangement_locked() && t.sections.is_empty();
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(format!("Beatgrid · {}",t.title)).strong());
                     if let Some((_,a))=self.store.get(&t.path) { ui.label(format!("Analysis {:.3} BPM",a.bpm)); }
@@ -1914,7 +1852,7 @@ impl App {
                 Ok(r)=>{ ui.horizontal_wrapped(|ui| {
                     let label=match r.verdict { crate::beatcheck::Verdict::Stable=>"Consistent offset",crate::beatcheck::Verdict::Drifting=>"Drift — inspect BPM / following beats",crate::beatcheck::Verdict::Uncertain=>"Uncertain — adjust by ear" };
                     ui.label(format!("{label} · offset {:+.1} ms · drift {:+.1} ms · scatter {:.1} ms · {}/{} beats",r.offset_ms,r.drift_ms,r.jitter_ms,r.pairs,r.sampled));
-                    let can_apply=!self.lock && self.transition_members(incoming).is_some_and(|groups|groups.iter().all(|g|g.len()==1)) && self.mix.tracks[incoming].sections.is_empty() && r.verdict==crate::beatcheck::Verdict::Stable && r.correction_seconds.abs()>=0.0005 && r.correction_seconds.abs()<=0.25;
+                    let can_apply=!self.arrangement_locked() && self.transition_members(incoming).is_some_and(|groups|groups.iter().all(|g|g.len()==1)) && self.mix.tracks[incoming].sections.is_empty() && r.verdict==crate::beatcheck::Verdict::Stable && r.correction_seconds.abs()>=0.0005 && r.correction_seconds.abs()<=0.25;
                     if ui.add_enabled(can_apply,egui::Button::new(format!("Correct incoming grid {:+.1} ms",r.correction_seconds*1000.0))).on_hover_text("Apply this measured source-grid shift to the incoming track. One Undo restores it. Listen to confirm.").clicked() { self.apply_beat_check(); }
                 }); }
             }
@@ -2451,4 +2389,88 @@ mod section_ui_tests {
         frame(&mut a,&ctx,vec![],1440.0);
         drop(a); std::fs::remove_dir_all(dir).ok();
     }
+    #[test]
+    fn transition_audition_is_processed_temporary_and_restores_transport() {
+        let (mut a,_ctx,rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);a.tab=Tab::Transition;a.sel_in=Some(1);
+        let wave=Arc::new(Audio{sr:8000,l:vec![0.1;8000*32],r:vec![0.1;8000*32]});a.store.get_mut("test.wav").unwrap().0=wave;
+        a.mix.tracks[1].trans.curve_out=vec![(0.0,1.0),(1.0,0.0)];
+        let before=serde_json::to_string(&a.mix).unwrap();
+        a.loop_on=true;a.set_loop(Some((2.0,6.0)));rx.try_iter().for_each(drop);
+        a.start_transition_audition(1,3,true);assert_eq!(a.active_loop,Some((8.0,68.0)));
+        let normal=engine::render_offline(Arc::new(a.build_snap()),8000,16.0,24.0).0;
+        let preview=engine::render_offline(Arc::new(a.build_playback_snap()),8000,16.0,24.0).0;assert!(normal.iter().any(|v|v.abs()>0.01),"audition comparison needs audible source audio");assert_eq!(normal,preview,"Both must retain transition processing");
+        a.seek(24.0);rx.try_iter().for_each(drop);a.switch_transition_side(1);
+        let snap=a.build_playback_snap();assert_eq!(snap.trans.len(),1);assert!(snap.decks[1].mute);assert!(!snap.decks[0].mute);
+        let processed=engine::render_offline(Arc::new(a.build_playback_snap()),8000,56.0,60.0).0;
+        let mut dry=a.build_playback_snap();dry.trans.clear();dry.tcurves.clear();let dry=engine::render_offline(Arc::new(dry),8000,56.0,60.0).0;
+        assert!(processed.iter().map(|v|v.abs()).sum::<f32>()<dry.iter().map(|v|v.abs()).sum::<f32>()*0.5,"A solo bypassed the outgoing transition curve");
+        assert!(!rx.try_iter().any(|c|matches!(c,Cmd::Seek(_) | Cmd::Play(_))),"A/B switching restarted playback");
+        assert_eq!(a.beat(),24.0);assert_eq!(serde_json::to_string(&a.mix).unwrap(),before);assert!(a.undo.is_empty());
+        a.stop_transition_audition();assert_eq!(a.active_loop,Some((2.0,6.0)));assert!(a.loop_on);assert!(a.transition_audition.is_none());assert!(!a.build_playback_snap().decks[1].mute);
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn transition_source_ranges_use_each_arranged_region_at_cuts() {
+        let (mut a,_ctx,_rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);
+        a.mix.tracks[0].sections=vec![(0.0,10.0),(20.0,32.0)];
+        assert_eq!(a.transition_source_ranges(1,0),vec![(16.0,20.0,8.0,10.0),(20.0,44.0,20.0,32.0)]);
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn protected_transition_blocks_app_editing_and_is_undoable() {
+        let (mut a,_ctx,_rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);
+        a.set_transition_protection(1,true);let before=serde_json::to_string(&a.mix).unwrap();a.grid_correction(1,crate::model::GridScope::All,24.0,0.01);a.remove_sel();a.auto_order();
+        assert_eq!(serde_json::to_string(&a.mix).unwrap(),before);
+        let restored:Mix=serde_json::from_str(&before).unwrap();assert!(restored.tracks[1].trans.locked);
+        a.do_undo();assert!(!a.mix.has_transition_locks());a.do_redo();assert!(a.mix.has_transition_locks());
+        a.set_transition_protection(1,false);assert!(!a.arrangement_locked());drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transition_audition_does_not_leak_suspended_loop_into_new_project() {
+        let (mut a,_ctx,_rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);a.tab=Tab::Transition;a.sel_in=Some(1);
+        a.loop_on=true;a.set_loop(Some((2.0,6.0)));a.start_transition_audition(1,3,true);
+        a.persistence.enabled=false;a.new_project();assert!(a.transition_audition.is_none());assert_eq!(a.active_loop,None,"old loop leaked into a new document");assert!(!a.loop_on);
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn transition_audition_stops_on_end_stale_grid_or_leaving_tab() {
+        let (mut a,_ctx,_rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);a.tab=Tab::Transition;a.sel_in=Some(1);
+        a.start_transition_audition(1,3,false);a.seek(68.0);a.validate_transition_audition();assert!(a.transition_audition.is_none());
+        a.start_transition_audition(1,3,true);a.mix.tracks[1].offset=0.01;a.validate_transition_audition();assert!(a.transition_audition.is_none());
+        a.start_transition_audition(1,3,true);a.tab=Tab::Playlist;a.validate_transition_audition();assert!(a.transition_audition.is_none());
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transition_audition_overrides_monitor_mutes_without_editing_them() {
+        let (mut a,_ctx,_rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);a.tab=Tab::Transition;a.sel_in=Some(1);
+        a.mix.decks[0].mute=true;a.mix.decks[1].solo=true;a.start_transition_audition(1,1,true);
+        let snap=a.build_playback_snap();assert!(!snap.decks[0].mute && !snap.decks.iter().any(|d|d.solo),"project monitor state prevented hearing A");
+        let export=a.build_snap();assert!(export.decks[0].mute && export.decks[1].solo,"audition monitor override leaked into export");
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn transition_controls_expose_source_ranges_and_listen_at_minimum_width() {
+        let (mut a,ctx,_rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);a.tab=Tab::Transition;a.sel_in=Some(1);
+        let draw=|a:&mut App|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,640.0))),..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|a.transition_tab(ui));});
+        draw(&mut a);let out=draw(&mut a);
+        let text:Vec<_>=out.shapes.iter().filter_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape {Some(t)}else{None}).collect();
+        for label in ["A outgoing · source","B incoming · source","Play transition","Protect this transition"] {
+            let t=text.iter().find(|t|t.galley.text().contains(label)).expect(label);
+            assert!(t.pos.x>=0.0 && t.pos.x+t.galley.size().x<=1000.0 && t.pos.y+t.galley.size().y<=640.0,"essential transition control outside viewport");
+        }
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn transition_audition_keeps_split_fragments_in_pre_and_post_roll() {
+        let (mut a,_ctx,_rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);a.tab=Tab::Transition;
+        let before=a.mix.split(0,12.0).unwrap();let after=a.mix.split(1,66.0).unwrap();
+        let incoming=a.mix.logical_transitions()[0].1;a.sel_in=Some(incoming);a.start_transition_audition(incoming,3,true);
+        let snap=a.build_playback_snap();assert!(snap.tracks[before].end>snap.tracks[before].vis);assert!(snap.tracks[after].end>snap.tracks[after].vis);
+        let members=a.transition_members(incoming).unwrap();assert_eq!(members[0].len(),2);assert_eq!(members[1].len(),2);
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+
 }
