@@ -1788,6 +1788,7 @@ impl App {
                     if mode!=cur { self.snapshot(); if mode==1 { if let Some((_,a))=self.store.get(&t.path) { self.mix.tracks[i].map=a.beat_map(); } } self.mix.tracks[i].set_grid_mode(mode as u8); }
                 });
                 if let Some((_,a))=self.store.get(&t.path) {
+                    if a.rhythm.as_ref().is_some_and(|e|e.phase_bridged) {ui.colored_label(C::LIGHT_YELLOW,"Source analysis: a supported steady clock bridges an inconsistent passage. Reset to analysis adopts it; listen and check bar 1.");}
                     if let Some(note)=a.rhythm.as_ref().and_then(|e|e.warning()) {ui.colored_label(C::LIGHT_YELLOW,note);}
                 }
                 if !t.sections.is_empty() { ui.colored_label(C::LIGHT_YELLOW,"Grid editing is protected after section edits. Undo the section edits to correct the source grid first."); }
@@ -2174,6 +2175,20 @@ mod section_ui_tests {
         draw(&mut a);let out=draw(&mut a);
         assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::epaint::Shape::Text(t) if t.galley.text().contains("Check the downbeat"))),"ambiguous source bar phase was hidden");
         a.persistence.worker.flush();drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn source_phase_advisory_does_not_replace_saved_grid() {
+        let (mut a,ctx,_rx,dir)=setup();
+        a.mix.tracks[0].map=Some(Arc::new(crate::beatmap::BeatMap{bpm:120.0,beats:(0..64).map(|k|0.2+k as f64*0.5).collect()}));
+        let saved=serde_json::to_string(&a.mix).unwrap();
+        let an=Arc::make_mut(&mut a.store.get_mut("test.wav").unwrap().1);
+        an.beats=(0..64).map(|k|0.3+k as f64*0.5).collect();
+        an.rhythm=Some(crate::analysis::RhythmEvidence{phase_bridged:true,..Default::default()});
+        let draw=|a:&mut App|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,800.0))),..Default::default()},|ctx| {egui::CentralPanel::default().show(ctx,|ui|a.beatgrid_tab(ui));});
+        draw(&mut a);let out=draw(&mut a);
+        assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::epaint::Shape::Text(t) if t.galley.text().contains("Reset to analysis adopts it"))));
+        assert_eq!(serde_json::to_string(&a.mix).unwrap(),saved);
+        drop(a);std::fs::remove_dir_all(dir).ok();
     }
     #[test]
     fn header_status_does_not_overlap_navigation() {

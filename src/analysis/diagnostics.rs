@@ -175,3 +175,23 @@ fn inspect_manual_waveform_references() {
     std::fs::write(output,serde_json::to_vec_pretty(&json!({"analysis_version":ANALYSIS_VERSION,"cases":report,
         "interpretation":"Small waveform-landmark pilot marked visually before inspecting detected grids, using the app decoder timebase. Not listening-verified musical beat/downbeat labels or a broad accuracy benchmark."})).unwrap()).unwrap();
 }
+
+#[test]
+#[ignore = "read-only phase continuity investigation of local saved sources"]
+fn inspect_saved_source_phase_continuity() {
+    let path=std::env::var("MIXSTUDIO_DIAGNOSTIC_PROJECT").unwrap();
+    let mix:crate::model::Mix=serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    for (index,t) in mix.tracks.iter().enumerate() {
+        let (audio,_,_)=decode(std::path::Path::new(&t.path)).unwrap();let m=rhythm_mono(&audio);
+        let (bpm,offset)=detect_bpm(&m,audio.sr);let (o,fps)=onset_env(&m,audio.sr);
+        let coarse=track_beats(&o,fps,fps*60.0/bpm,offset*fps);
+        let (_,observed)=refine_attacks(&m,audio.sr,&coarse);
+        if let Ok(dir)=std::env::var("MIXSTUDIO_DIAGNOSTIC_OUTPUT") {std::fs::create_dir_all(&dir).unwrap();std::fs::write(std::path::Path::new(&dir).join(format!("source-observations-{index}.json")),serde_json::to_vec(&observed).unwrap()).unwrap();}
+        eprintln!("{} coarse bpm {bpm} offset {offset} refined steady {:?} observations {}",t.title,steady_tempo(&observed,bpm),observed.len());
+        for third in 0..3 {
+            let points:Vec<_>=observed.iter().copied().filter(|p|p.1>=audio.secs()*third as f64/3.0 && p.1<audio.secs()*(third+1) as f64/3.0).collect();
+            let residuals:Vec<_>=points.iter().map(|p|p.1-p.0*60.0/bpm).collect();
+            eprintln!("third {third} {:?}",distribution(residuals));
+        }
+    }
+}

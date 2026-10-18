@@ -2,13 +2,19 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.25](https://img.shields.io/badge/status-beta%200.25-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.26](https://img.shields.io/badge/status-beta%200.26-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.25:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.26:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.24: source ranges, protected transitions and processed A/B monitoring](docs/screenshots/transition-workbench.png)
+
+## New in 0.26
+
+Fix a reproduced beatmatch failure where two correctly detected 126-BPM songs fell out of sync because a Dynamic grid followed offbeat percussion during a breakdown, drifting almost half a beat before returning. Analysis can now bridge a large phase excursion using a steady clock supported by attacks throughout the source. Supported tempo motion vetoes this correction, including temporary changes and halftime kick patterns; this remains a heuristic requiring listening.
+
+Beatgrid explains when source analysis used this correction. Cache version 13 refreshes derived analysis. **Saved project grids stay unchanged:** on an uncut source clip, use **Beatgrid → Reset to analysis** to adopt the new result, then listen and check bar 1. See the [phase-continuity investigation and verification](docs/BEATGRID-PHASE-2026-10-18.md).
 
 ## New in 0.25
 

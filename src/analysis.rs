@@ -1,7 +1,14 @@
 //! Decoding (symphonia), BPM/first-beat detection, key detection and 3-band waveform peaks.
+#[path="analysis/phase.rs"]
+mod phase;
+
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use symphonia::core::{audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint};
+
+#[cfg(test)]
+#[path="analysis/phase_tests.rs"]
+mod phase_tests;
 
 #[cfg(test)]
 #[path="analysis/meter_tests.rs"]
@@ -211,7 +218,7 @@ impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } 
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 12;
+pub const ANALYSIS_VERSION: u32 = 13;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -244,6 +251,8 @@ pub struct RhythmEvidence {
     pub supported_fraction:[f64;3],
     /// Minimum evidence gates passed; not a guarantee of beat/downbeat accuracy.
     pub grid_supported:bool,
+    /// A widely supported steady clock replaced a large DP phase excursion.
+    #[serde(default)] pub phase_bridged:bool,
     /// Relative bass-accent separation for the chosen bar phase, not confidence.
     #[serde(default)] pub downbeat_bass_margin:Option<f64>,
 }
@@ -823,8 +832,11 @@ fn detect_rhythm(m:&[f32],sr:u32)->(f64,f64,Vec<f64>,RhythmEvidence) {
     if support<0.12 {return (bpm,off_lin,vec![],evidence);}
     let mut beats = track_beats(&o, fps, fps * 60.0 / bpm, off_lin * fps);
     while beats.first().is_some_and(|&b| b < -0.05) { beats.remove(0); }
-    let (refined,observed)=refine_attacks(m, sr, &beats);
+    let (refined,mut observed)=refine_attacks(m, sr, &beats);
     beats=refined;
+    if let Some((clock,inliers))=phase::bridge(&beats,&observed,bpm) {
+        beats=clock;observed=inliers;evidence.phase_bridged=true;
+    }
     evidence.observed_beats=observed.len();evidence.predicted_beats=beats.len();
     let duration=m.len() as f64/sr as f64;
     for third in 0..3 {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.26.0-beta
+
+- Prevent reproduced half-beat Dynamic-grid excursions through offbeat breakdowns when broadly distributed source attacks support a steady clock. Preserve small timing variation and veto source-supported tempo motion, including sparse halftime attacks.
+- Explain the source-analysis correction in Beatgrid. Upgrade derived cache to v13; retain saved grids and edits until explicitly reset.
+- Add authored breakdown/tempo-motion regressions and opt-in saved-project phase diagnostics.
+
 ## 0.25.0-beta
 
 - Add persisted, undoable per-song gain in Track and Transition; keep logical split fragments in sync.

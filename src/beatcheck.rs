@@ -142,6 +142,40 @@ mod tests {
         let (aa,_)=crate::analysis::load(std::path::Path::new(&a.path)).unwrap();
         let (ab,_)=crate::analysis::load(std::path::Path::new(&b.path)).unwrap();
         let result=measure(a,&aa,b,&ab,s,e,|beat|mix.bpm_at(beat)); eprintln!("Saved transition: {result:?}");
+        for (t,audio) in [(a,&aa),(b,&ab)] {
+            for mode in [0,1,2] {
+                let mut t=t.clone();t.grid_mode=mode;let g=t.grid();let mut bass=vec![];let mut high=vec![];
+                for k in s.ceil() as i64+1..e.floor() as i64-1 {
+                    let beat=k as f64;let period=g.sec(beat+0.5)-g.sec(beat-0.5);
+                    bass.push(attack(audio,g.sec(beat),period).map(|v|(v*10000.0).round()/10.0));
+                    high.push(percussion_attack(audio,g.sec(beat),period).map(|v|(v*10000.0).round()/10.0));
+                }
+                eprintln!("{} mode {mode} bass ms {bass:?} percussion ms {high:?}",t.title);
+            }
+        }
+        if let Ok(dir)=std::env::var("MIXSTUDIO_DIAGNOSTIC_OUTPUT") {
+            let dir=std::path::Path::new(&dir);std::fs::create_dir_all(dir).unwrap();
+            let audio=vec![Some(std::sync::Arc::new(aa)),Some(std::sync::Arc::new(ab))];
+            let snap=std::sync::Arc::new(crate::engine::Snap::build(&mix,&audio));
+            let (l,r)=crate::engine::render_offline(snap,16000,s,e);
+            crate::engine::write_wav(&dir.join("overlap-original.wav"),&l,&r,16000).unwrap();
+            if std::env::var_os("MIXSTUDIO_DIAGNOSTIC_REANALYSE").is_some() {
+                let mut corrected=mix.clone();
+                for (t,audio) in corrected.tracks.iter_mut().zip(&audio) {
+                    let audio=audio.as_ref().unwrap();let an=crate::analysis::analyse(audio,t.title.clone(),t.artist.clone(),std::path::Path::new(&t.path));
+                    eprintln!("Fresh source {} bpm {} offset {} bridged {}",t.title,an.bpm,an.offset,an.rhythm.as_ref().is_some_and(|e|e.phase_bridged));
+                    t.bpm=an.bpm;t.offset=an.offset;t.map=an.beat_map();t.flex=an.flex_map();t.grid_mode=1;
+                }
+                let (a,b,s,e)=corrected.transitions()[0];
+                eprintln!("Fresh transition: {:?}",measure(&corrected.tracks[a],audio[a].as_ref().unwrap(),&corrected.tracks[b],audio[b].as_ref().unwrap(),s,e,|beat|corrected.bpm_at(beat)));
+                let snap=std::sync::Arc::new(crate::engine::Snap::build(&corrected,&audio));
+                let (l,r)=crate::engine::render_offline(snap,16000,s,e);
+                crate::engine::write_wav(&dir.join("overlap-updated.wav"),&l,&r,16000).unwrap();
+                std::fs::write(dir.join("updated-grid-mix.json"),serde_json::to_vec_pretty(&corrected).unwrap()).unwrap();
+            }
+
+        }
+
     }
     #[test]
     fn percussion_without_bass_is_measured_and_weak_beats_are_exposed() {
