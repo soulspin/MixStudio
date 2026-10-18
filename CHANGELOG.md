@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.27.0-beta
+
+- Add a Transition harmony panel explaining whole-track Camelot relationships, musical key names, common matches and mixing tips. Treat unknown keys explicitly and distinguish source labels from measured overlap harmony.
+- Add direct processed Both audition and pitch-following-tempo warnings across logical split fragments without changing saved mixer or arrangement settings.
+- Evaluate the official Beat This! model on six local files and two authored references. Publish reproducible optional benchmark tooling and a source-hash-checked comparison; retain v13 analysis after the model reproduced an offbeat-breakdown phase failure.
+
 ## 0.26.0-beta
 
 - Prevent reproduced half-beat Dynamic-grid excursions through offbeat breakdowns when broadly distributed source attacks support a steady clock. Preserve small timing variation and veto source-supported tempo motion, including sparse halftime attacks.

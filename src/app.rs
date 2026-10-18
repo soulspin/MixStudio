@@ -2,6 +2,7 @@ mod persistence;
 mod comparison;
 mod transition_workbench;
 mod levels_ui;
+mod harmony_ui;
 use crate::analysis::{self, Analysis, Audio, PEAK_HOP};
 use crate::engine::{self, Cmd, Shared, Snap};
 use crate::model::{Mix, Preset, StemMode, Track};
@@ -2483,6 +2484,44 @@ mod section_ui_tests {
         drop(a);std::fs::remove_dir_all(dir).ok();
     }
 
+    #[test]
+    fn transition_harmony_explains_source_keys_and_preserves_the_project() {
+        let (mut a,ctx,_rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.key="9A".into();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);a.mix.tracks[0].key="8A".into();a.tab=Tab::Transition;a.sel_in=Some(1);
+        let before=serde_json::to_string(&a.mix).unwrap();
+        let draw=|a:&mut App|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,640.0))),..Default::default()},|ctx| {egui::CentralPanel::default().show(ctx,|ui|a.transition_tab(ui));});
+        draw(&mut a);let out=draw(&mut a);
+        for label in ["Harmonic match", "8A", "9A", "Neighboring keys", "Whole-track key labels"] {
+            assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::epaint::Shape::Text(t) if t.galley.text().contains(label))),"missing harmonic guidance: {label}");
+        }
+        assert_eq!(serde_json::to_string(&a.mix).unwrap(),before);
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn harmonic_audition_button_uses_processed_both_without_project_edits() {
+        let (mut a,ctx,rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.key="?".into();b.stretch=2;b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);a.tab=Tab::Transition;a.sel_in=Some(1);
+        let before=serde_json::to_string(&a.mix).unwrap();
+        let draw=|a:&mut App,events|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,400.0))),events,..Default::default()},|ctx| {egui::CentralPanel::default().show(ctx,|ui|a.harmony_ui(ui,0,1));});
+        draw(&mut a,vec![]);let out=draw(&mut a,vec![]);
+        for label in ["Unknown key","Pitch follows tempo"] {assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::epaint::Shape::Text(t) if t.galley.text().contains(label))));}
+        let button=out.shapes.iter().find_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape {if t.galley.text()=="Listen together" {Some(t.pos+t.galley.size()*0.5)}else{None}}else{None}).unwrap();
+        draw(&mut a,vec![egui::Event::PointerMoved(button),egui::Event::PointerButton{pos:button,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
+        draw(&mut a,vec![egui::Event::PointerButton{pos:button,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);
+        assert!(a.transition_audition.is_some());
+        let snap=a.build_playback_snap();assert!(!snap.decks[0].mute && !snap.decks[1].mute);
+        assert!(rx.try_iter().any(|c|matches!(c,Cmd::Play(true))));
+        assert_eq!(serde_json::to_string(&a.mix).unwrap(),before);
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn harmonic_pitch_warning_includes_later_split_fragments() {
+        let (mut a,ctx,_rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);
+        let right=a.mix.split(1,32.0).unwrap();a.mix.tracks[right].stretch=2;
+        let incoming=a.mix.logical_transitions()[0].1;
+        let draw=|a:&mut App|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,400.0))),..Default::default()},|ctx| {egui::CentralPanel::default().show(ctx,|ui|a.harmony_ui(ui,0,incoming));});
+        draw(&mut a);let out=draw(&mut a);
+        assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::epaint::Shape::Text(t) if t.galley.text().contains("Pitch follows tempo"))),"varispeed fragment was hidden by its key-locked representative");
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
     #[test]
     fn transition_audition_keeps_split_fragments_in_pre_and_post_roll() {
         let (mut a,_ctx,_rx,dir)=setup();let mut b=a.mix.tracks[0].clone();b.lane=1;b.start_beat=16.0;a.mix.tracks.push(b);a.tab=Tab::Transition;

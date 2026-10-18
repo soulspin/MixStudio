@@ -2,13 +2,21 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.26](https://img.shields.io/badge/status-beta%200.26-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.27](https://img.shields.io/badge/status-beta%200.27-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.26:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.27:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.24: source ranges, protected transitions and processed A/B monitoring](docs/screenshots/transition-workbench.png)
+
+## New in 0.27
+
+**Transition → Harmonic match** explains same, neighboring and relative major/minor Camelot keys. Open **Key details and mixing tips** for musical key names, common source-key matches and practical blend advice; **Listen together** starts the existing processed A/B audition. Unknown keys remain unknown. These are whole-track source labels, not a local harmonic measurement or confidence score. Pitch-following-tempo warnings include split fragments.
+
+![MixStudio 0.27: explained harmonic matches and processed audition](docs/screenshots/harmony-panel.png)
+
+The [Beat This! pilot](docs/BEAT-THIS-EVALUATION-2026-10-18.md) tested the official neural model locally on six music files and two authored references. It remains an optional research tool: this release keeps v13 beat analysis and does not bundle an AI runtime/model or replace saved grids. See the [harmony workflow and verification](docs/HARMONY-2026-10-18.md).
 
 ## New in 0.26
 

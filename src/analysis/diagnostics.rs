@@ -195,3 +195,26 @@ fn inspect_saved_source_phase_continuity() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires an external Beat This! benchmark JSON and its local audio files"]
+fn compare_external_beat_predictions_without_mutating_sources() {
+    let input=std::env::var("MIXSTUDIO_EXTERNAL_BEATS").unwrap();
+    let output=std::env::var("MIXSTUDIO_EXTERNAL_REPORT").unwrap();
+    let predictions:Value=serde_json::from_slice(&std::fs::read(input).unwrap()).unwrap();
+    let mut rows=vec![];
+    for file in predictions["files"].as_array().unwrap() {
+        let path=PathBuf::from(file["path"].as_str().unwrap());let before=std::fs::metadata(&path).unwrap();
+        let hash=format!("{:x}",sha2::Sha256::digest(std::fs::read(&path).unwrap()));
+        assert_eq!(hash,file["source_sha256"].as_str().unwrap(),"source differs from external prediction recording");
+        let (audio,title,artist)=decode(&path).unwrap();let an=analyse(&audio,title,artist,&path);
+        let external:Vec<f64>=file["beats"].as_array().unwrap().iter().map(|v|v.as_f64().unwrap()).collect();
+        let reference=file.get("authored_reference").map(|r|r["beats"].as_array().unwrap().iter().map(|v|v.as_f64().unwrap()).collect::<Vec<_>>());
+        let errors=|predicted:&[f64]|reference.as_ref().map(|truth|distribution(truth.iter().map(|t|predicted.iter().map(|p|(p-t).abs()).fold(f64::INFINITY,f64::min)).collect()));
+        rows.push(json!({"file_name":path.file_name().unwrap().to_string_lossy(),"source_sha256":file["source_sha256"],"baseline_bpm":an.bpm,"baseline_phase_bridged":an.rhythm.as_ref().is_some_and(|e|e.phase_bridged),
+            "dynamic_count":an.beats.len(),"external_count":external.len(),"dynamic_authored_errors":errors(&an.beats),"flex_authored_errors":errors(&an.flex),"external_authored_errors":errors(&external),
+            "dynamic_evidence":evidence(&audio,&an.beats,60.0/an.bpm),"external_evidence":evidence(&audio,&external,60.0/an.bpm)}));
+        let after=std::fs::metadata(&path).unwrap();assert_eq!(before.len(),after.len());assert_eq!(before.modified().unwrap(),after.modified().unwrap());
+        std::fs::write(&output,serde_json::to_vec_pretty(&json!({"analysis_version":ANALYSIS_VERSION,"note":"Real-file attack agreement is selective and is not annotated beat/downbeat accuracy. Authored reference times precede inference.","files":rows})).unwrap()).unwrap();
+    }
+}

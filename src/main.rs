@@ -15,6 +15,7 @@ mod app;
 mod audio;
 mod engine;
 mod levels;
+mod harmony;
 mod stems;
 mod model;
 mod sections;
