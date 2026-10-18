@@ -60,6 +60,8 @@ pub struct Track {
     #[serde(default)] pub trim_in: f64, #[serde(default)] pub trim_out: f64,
     /// fade-in / fade-out length in beats
     #[serde(default)] pub fade_in: f64, #[serde(default)] pub fade_out: f64,
+    /// Shape per edge: 0 linear, positive slow rise, negative fast rise.
+    #[serde(default)] pub fade_curve: [f32;2],
     /// stem view on the timeline: 0 = full track, 1 = instrumental / vocals, 2 = four stems
     #[serde(default)] pub stem_view: u8,
     /// muted stem ranges
@@ -543,7 +545,7 @@ impl Track {
     pub fn auto_at(&self, k: usize, b: f64) -> Option<f32> { self.auto.get(k).and_then(|p| interp(p, b - self.start_beat)) }
     /// Insert or replace a point (track-relative beat x) keeping the lane sorted; returns its index.
     pub fn auto_set(&mut self, k: usize, x: f64, v: f32) -> usize {
-        while self.auto.len() < AUTO_PARAMS.len() { self.auto.push(vec![]); }
+        while self.auto.len() < AUTO_PARAMS.len().max(k+1) { self.auto.push(vec![]); }
         let p = &mut self.auto[k];
         p.retain(|q| (q.0-x).abs() >= 1e-6);
         let i = p.partition_point(|q| q.0 < x); p.insert(i, (x, v)); i

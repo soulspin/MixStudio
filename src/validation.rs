@@ -36,9 +36,10 @@ pub fn validate_mix(m: &Mix) -> Result<(), String> {
         for grid in [&t.map,&t.flex,&t.imported].into_iter().flatten() { map(grid,&field("beat map must be strictly increasing"))?; }
         require(t.sections.iter().all(|&(a,b)| number(a) && number(b) && a>=0.0 && b>a && b<=t.duration+0.025), &field("source sections"))?;
         require(t.stem_mutes.iter().all(|p| p.stem<4 && number(p.a) && number(p.b) && p.b>=p.a), &field("stem ranges"))?;
-        require(t.auto.len()<=crate::model::AUTO_PARAMS.len(), &field("automation parameter"))?;
-        for p in &t.auto {
-            require(p.iter().all(|&(b,v)| number(b) && level(v,-16.0,16.0)) && p.windows(2).all(|w| w[1].0>=w[0].0), &field("automation points"))?;
+        require(t.auto.len()<=9, &field("automation parameter"))?;
+        require(t.fade_curve.iter().all(|&v|level(v,-1.0,1.0)), &field("fade shape"))?;
+        for (k,p) in t.auto.iter().enumerate() {
+            require(p.iter().all(|&(b,v)| number(b) && if k>=5 {level(v,0.0,1.0)}else{level(v,-16.0,16.0)}) && p.windows(2).all(|w| w[1].0>=w[0].0), &field("automation points"))?;
         }
         for p in [&t.trans.curve_out,&t.trans.curve_in] {
             require(p.iter().all(|&(b,v)| level(b,0.0,1.0) && level(v,0.0,4.0)) && p.windows(2).all(|w| w[1].0>=w[0].0), &field("transition curve"))?;

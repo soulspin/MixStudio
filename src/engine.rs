@@ -15,11 +15,11 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub struct SnapTrack { pub gain:f32, pub fragment_group:u64, pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub mutes: Vec<(u8, f64, f64)>, pub auto: Vec<Vec<(f64, f32)>>, pub stretch: u8 }
+pub struct SnapTrack { pub gain:f32, pub fragment_group:u64, pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub fade_curve:[f32;2], pub mutes: Vec<(u8, f64, f64)>, pub auto: Vec<Vec<(f64, f32)>>, pub stretch: u8 }
 impl SnapTrack {
     /// clip gate and fades: 0 outside [vis, end), linear fades in beats
-    #[inline] fn edge(&self, b: f64) -> f32 { if b < self.vis || b >= self.end { return 0.0; } let mut g = 1.0;
-        if self.fade_in > 0.0 { g *= ((b - self.vis) / self.fade_in).min(1.0); } if self.fade_out > 0.0 { g *= ((self.end - b) / self.fade_out).min(1.0); } (g * self.grid.splice_gain(b)) as f32*self.gain }
+    #[inline] fn edge(&self, b: f64) -> f32 { if b < self.vis || b >= self.end || (self.lane>=2 && !self.mutes.is_empty() && self.stems.is_none()) { return 0.0; } let mut g = 1.0;
+        if self.fade_in > 0.0 { g *= crate::fades::value((b - self.vis) / self.fade_in,self.fade_curve[0]); } if self.fade_out > 0.0 { g *= crate::fades::value((self.end - b) / self.fade_out,self.fade_curve[1]); } (g * self.grid.splice_gain(b)) as f32*self.gain }
 }
 #[allow(dead_code)]
 pub struct Snap { pub output:crate::levels::OutputSettings, pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset, [StemMode; 4])>, pub decks: [Deck; 4], pub master: f32,
@@ -34,7 +34,7 @@ impl Snap {
         for (i, t) in mix.tracks.iter().enumerate() {
             if let Some(Some(a)) = audio.get(i) {
                 map[i] = tracks.len();
-                tracks.push(SnapTrack { gain:crate::levels::amplitude(t.gain_db), fragment_group:t.trans.fragment_group, stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.eff_bpm(), vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect(), auto: t.auto.clone(), stretch: match t.stretch { 0 => if mix.key_lock { 1 } else { 2 }, x => x } });
+                tracks.push(SnapTrack { gain:crate::levels::amplitude(t.gain_db), fragment_group:t.trans.fragment_group, stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.eff_bpm(), vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, fade_curve:t.fade_curve, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect(), auto: t.auto.clone(), stretch: match t.stretch { 0 => if mix.key_lock { 1 } else { 2 }, x => x } });
             }
         }
         let tcurves = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX).map(|x| (mix.tracks[x.1].trans.curve_out.clone(), mix.tracks[x.1].trans.curve_in.clone())).collect();
@@ -180,7 +180,7 @@ impl Wsola {
     fn reset(&mut self) { self.poly.ready=false; self.acc.iter_mut().for_each(|x| *x = [0.0; 2]); self.rd = WH; self.prev = None; self.active = false; self.tiny_loop=None; }
     /// Produce one grain at mix beat `gb`; `pos_of` maps beat -> source sample position.
     fn grain(&mut self, a: &Audio, gb: f64, at: f64, t: &SnapTrack, rs: f64, sg: Option<&[f32; 4]>) {
-        let comb = combine(sg.copied(), t.mute_gain(t.grid.region_sec(gb, at))); let sg = comb.as_ref();
+        let comb = combine(sg.copied(), combine(t.mute_gain(t.grid.region_sec(gb, at)),t.stem_auto_gain(gb))); let sg = comb.as_ref();
         let ideal = t.grid.region_sec(gb, at) * a.sr as f64; // beat map: stretch ratio follows tempo drift
         // Compare channel energies separately: summing L+R erases wide/anti-phase audio.
         let get = |p: i64| -> [f32;2] { if p >= 0 && (p as usize) < a.l.len() { [a.l[p as usize],a.r[p as usize]] } else { [0.0;2] } };
@@ -241,7 +241,7 @@ impl Polyphonic {
         for i in 0..n {
             let p=(from+i as i64) as f64*ratio;let k=p.floor() as i64;let frac=(p-k as f64) as f32;
             let sec=p/a.sr as f64;let b=t.grid.region_beat(sec,at);
-            let gains=combine(track_mods(snap,ti,b).stem,t.mute_gain(sec));
+            let gains=combine(track_mods(snap,ti,b).stem,combine(t.mute_gain(sec),t.stem_auto_gain(b)));
             for c in 0..2 {
                 let read=|k:i64|if k<0 || k as usize>=a.l.len(){0.0}else{let k=k as usize;match (&gains,t.stems.as_deref()) {
                     (Some(g),Some(st))=>st.mixed(a,c,k,g),_=>if c==0{a.l[k]}else{a.r[k]}
@@ -319,7 +319,7 @@ impl Engine {
             }
             for (i,w) in p.ws.iter_mut().enumerate() {
                 if let Some(w)=w.as_mut().filter(|w|w.tiny_loop.is_some()) {
-                    let source_changed=old.tracks.get(i).zip(p.snap.tracks.get(i)).is_none_or(|(a,b)|a.mutes!=b.mutes || match (&a.stems,&b.stems) {(Some(a),Some(b))=>!Arc::ptr_eq(a,b),(None,None)=>false,_=>true});
+                    let source_changed=old.tracks.get(i).zip(p.snap.tracks.get(i)).is_none_or(|(a,b)|a.mutes!=b.mutes || a.auto.get(5..)!=b.auto.get(5..) || match (&a.stems,&b.stems) {(Some(a),Some(b))=>!Arc::ptr_eq(a,b),(None,None)=>false,_=>true});
                     if envelope_changed || source_changed {w.tiny_loop=None;w.active=false;}
                 }
             }
@@ -468,7 +468,7 @@ impl Engine {
                 let g = (track_mods(&snap,ti,beats[i]).gain * t.auto_at(0,beats[i]).unwrap_or(1.0)) * t.edge(b) * slg * scg;
                 if g <= 0.0 { continue; }
                 let k = pos as usize; let f = (pos - k as f64) as f32;
-                let sg = combine(track_mods(&snap,ti,b).stem, t.mute_gain(sec)); let st = t.stems.as_deref();
+                let sg = combine(track_mods(&snap,ti,b).stem, combine(t.mute_gain(sec),t.stem_auto_gain(b))); let st = t.stems.as_deref();
                 let herm = |ch: usize| { let v = |i: usize| match (sg.as_ref(), st) { (Some(g), Some(st)) => st.mixed(a, ch, i, g), _ => if ch == 0 { a.l[i] } else { a.r[i] } };
                     let (y0, y1, y2, y3) = (v(k - 1), v(k), v(k + 1), v(k + 2));
                     let c1 = 0.5 * (y2 - y0); let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3; let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
@@ -598,6 +598,11 @@ impl SnapTrack {
     match (a, b) { (Some(x), Some(y)) => Some([x[0] * y[0], x[1] * y[1], x[2] * y[2], x[3] * y[3]]), (x, None) => x, (None, y) => y }
 }
 impl SnapTrack {
+    /// Stem curves use arranged mix beats, so repeats may have different envelopes.
+    #[inline] pub fn stem_auto_gain(&self,b:f64)->Option<[f32;4]> {
+        if self.stems.is_none() || !self.auto.iter().skip(5).any(|p|!p.is_empty()){return None;}
+        Some(std::array::from_fn(|k|self.auto_at(5+k,b).unwrap_or(1.0).clamp(0.0,1.0)))
+    }
     #[inline] pub fn auto_at(&self, k: usize, b: f64) -> Option<f32> { self.auto.get(k).and_then(|p| crate::model::interp(p, b - self.start_beat)) }
 }
 impl Snap {

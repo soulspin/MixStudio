@@ -57,7 +57,7 @@ impl App {
     }
     fn activate_project(&mut self,target:Target) {
         self.stop_transition_audition();self.stop_comparison();self.clear_section();self.loop_on=false;self.set_loop(None);let _=self.out.tx.send(Cmd::Play(false));self.seek(0.0);let _=self.out.tx.send(Cmd::ResetLevels);self.source_levels.clear();
-        self.drag=None;self.grid_drag=None;self.tl_drag=None;self.scratch_win=false;self.scratch_play=None;self.tempo_drag=None;
+        self.stem_volume_drag=None; self.samples=Default::default(); self.drag=None;self.grid_drag=None;self.tl_drag=None;self.scratch_win=false;self.scratch_play=None;self.tempo_drag=None;
         self.auto_track=None;self.auto_drag=None;self.auto_solo=false;self.auto_rect=Rect::NOTHING;self.tc_drag=None;self.tc_side=0;
         self.fx_sel=None;self.fx_drag=None;self.live_fx=None;self.live_last=None;self.stem_sel=None;self.stem_drag=false;
         self.dl_offer=None;self.tl_hover=None;self.bm_drag=None;self.bm_pop=None;self.section_copy=None;self.taps.clear();self.comparison=Default::default();
@@ -82,6 +82,7 @@ impl App {
     }
     pub(super) fn new_project(&mut self){self.request_project(Target{mix:Mix::default(),file:None,clean:true,restored:None,original:None});}
     fn load_project_sources(&mut self) {
+        self.prepare_required_stems();
         let paths:std::collections::BTreeSet<_>=self.mix.tracks.iter().map(|t|t.path.clone()).filter(|p|!self.store.contains_key(p)).collect();
         self.loading+=paths.len();let tx=self.tx.clone();let docid=self.persistence.id.clone();std::thread::spawn(move ||for p in paths {let pb=PathBuf::from(p);let result=analysis::load(&pb).map_err(|e|e.to_string());let _=tx.send(Msg::Loaded(pb,result,Some((usize::MAX,0.0)),docid.clone()));});
     }
@@ -121,7 +122,8 @@ impl App {
         let path=candidate.path.display().to_string();let mut mix=self.mix.clone();
         match recovery::relink(&mut mix,&candidate.old,&path) {
             Ok(n)=>{let c=self.persistence.candidate.take().unwrap();self.snapshot();self.clear_section();self.mix=mix;
-                self.store.insert(path.clone(),(c.audio,c.analysis));if let Some(stems)=self.stems.get(&c.old).cloned(){self.stems.insert(path,stems);}
+                self.store.insert(path.clone(),(c.audio,c.analysis));if let Some(stems)=self.stems.get(&c.old).cloned(){self.stems.insert(path.clone(),stems);}
+                self.prepare_required_stems();
                 self.persistence.load_errors.remove(&c.old);self.status=format!("Relinked {n} clip(s); grid and edits retained. Save the project to keep the new path.");},
             Err(e)=>self.status=e,
         }

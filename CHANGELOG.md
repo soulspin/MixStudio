@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.28.0-beta
+
+- Add independent curved clip fade-in/out envelopes, direct length/shape handles and double-click linear reset; legacy shapes default to linear.
+- Add non-destructive Alt-drag extraction of arranged song/stem sections, preserving source mapping, resolved beat ratios and automation. Support sample rectangle/Shift selection and atomic group movement.
+- Add per-stem volume envelopes on four-stem rows, an explicit Track editor entry/reset, and shared playback/export processing across stretch modes. Preserve curves through section edits, copy, save and undo.
+- Prepare required stems for reused and relinked project sources; block export until stem edits are ready and keep isolated samples silent while stems are unavailable.
+
 ## 0.27.0-beta
 
 - Add a Transition harmony panel explaining whole-track Camelot relationships, musical key names, common matches and mixing tips. Treat unknown keys explicitly and distinguish source labels from measured overlap harmony.

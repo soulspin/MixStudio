@@ -2,13 +2,23 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.27](https://img.shields.io/badge/status-beta%200.27-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.28](https://img.shields.io/badge/status-beta%200.28-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.27:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.28:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.24: source ranges, protected transitions and processed A/B monitoring](docs/screenshots/transition-workbench.png)
+
+## New in 0.28
+
+**Curved clip fades:** select a song or sample, drag its corner handles to set fade length, then drag the round midpoint vertically to bend the envelope. Double-click the midpoint to restore a linear fade. Old projects keep their linear fades.
+
+**Faster samples:** Alt-drag a selected song section or stem onto Sample 1/2. Copies reference the original audio and retain arranged source cuts, beat ratios and automation. Shift-click samples or Shift-drag empty sample space to select multiple clips, then drag one to move the group with its timing intact. Alt-drag an existing sample to duplicate it.
+
+**Stem volume curves:** separate the source, then open **Track → Edit stem volumes**, or select four-stem view and **A**. Click in a stem row to add a volume point, drag it to adjust volume/time, and right-click a point to remove it. **Reset stem volumes** restores all four envelopes to 100%. These multiply existing stem mutes and transition processing, using the same engine for playback and export. Stem-edited projects prepare the required stems when opened or relinked; export waits until they are available.
+
+See the [editing workflow and verification](docs/CLIP-SAMPLE-STEMS-2026-10-18.md). Analysis and saved beatgrids are unchanged.
 
 ## New in 0.27
 

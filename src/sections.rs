@@ -246,3 +246,36 @@ mod local_audio_check {
         std::fs::write(dir.join("edited.mixstudio.json"),serde_json::to_string_pretty(&mix).unwrap()).unwrap();
     }
 }
+
+#[cfg(test)]
+mod sample_tests {
+    use crate::model::{Mix,Track};
+    fn track()->Track {serde_json::from_str(r#"{"path":"sample.wav","title":"Song","artist":"Test","bpm":120.0,"offset":0.0,"key":"8A","duration":32.0,"start_beat":0.0,"lane":0,"trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]}}"#).unwrap()}
+    #[test]
+    fn sample_extraction_keeps_repeated_source_ranges_and_automation() {
+        let mut t=track(); t.sections=vec![(0.0,4.0),(8.0,12.0),(0.0,4.0)];t.auto_set(0,0.0,1.0);t.auto_set(0,24.0,0.4);
+        let mut m=Mix::default();m.tracks.push(t);let before=serde_json::to_string(&m.tracks[0]).unwrap();
+        let i=m.sample_range(0,6.0,18.0,2,32.0,None).unwrap();let t=&m.tracks[i];
+        assert!((t.vis_start(0.0)-32.0).abs()<1e-8);assert!((t.end(0.0)-44.0).abs()<1e-8);
+        for b in [0.1,3.0,7.0,11.9] {assert!((t.sec_at(32.0+b)-m.tracks[0].sec_at(6.0+b)).abs()<1e-8);}
+        assert!((t.auto_at(0,38.0).unwrap()-m.tracks[0].auto_at(0,12.0).unwrap()).abs()<1e-6);
+        assert_eq!(serde_json::to_string(&m.tracks[0]).unwrap(),before);
+    }
+    #[test]
+    fn moving_sample_group_preserves_spacing_and_rejects_songs_atomically() {
+        let mut m=Mix::default();let mut a=track();a.lane=2;a.start_beat=4.0;let mut b=a.clone();b.start_beat=12.0;b.lane=3;m.tracks=vec![a,b,track()];
+        m.shift_samples(&[0,1,0],-20.0).unwrap();assert_eq!(m.tracks[0].start_beat,0.0);assert_eq!(m.tracks[1].start_beat,8.0);
+        let before=serde_json::to_string(&m).unwrap();assert!(m.shift_samples(&[0,2],4.0).is_err());assert_eq!(serde_json::to_string(&m).unwrap(),before);
+    }
+    #[test]
+    fn extracted_samples_keep_resolved_ratios_after_the_next_frame() {
+        for (ratio,mult) in [(1,1.0),(2,2.0),(3,0.5),(4,1.5),(5,2.0/3.0)] {
+            let mut t=track();t.trans.ratio=ratio;t.beat_mult=mult;
+            let mut m=Mix::default();m.bpm=120.0;m.tracks.push(t);
+            let i=m.sample_range(0,8.0,16.0,2,32.0,None).unwrap();let positions:Vec<_>=[32.1,35.0,39.9].map(|b|m.tracks[i].sec_at(b)).into();
+            m.resolve_ratios();let t=&m.tracks[i];assert_eq!(t.beat_mult,mult,"ratio changed after extraction");assert!((t.vis_start(0.0)-32.0).abs()<1e-8);assert!((t.end(0.0)-40.0).abs()<1e-8);
+            for (b,sec) in [32.1,35.0,39.9].into_iter().zip(positions) {assert!((t.sec_at(b)-sec).abs()<1e-8);}
+        }
+    }
+
+}
