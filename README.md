@@ -2,13 +2,21 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.24](https://img.shields.io/badge/status-beta%200.24-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.25](https://img.shields.io/badge/status-beta%200.25-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.24:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.25:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.24: source ranges, protected transitions and processed A/B monitoring](docs/screenshots/transition-workbench.png)
+
+## New in 0.25
+
+Adjust **Song gain** in Track or for A/B in Transition; logical split fragments share the setting. Track can measure whole-source sample peak and stereo RMS in the background. RMS includes silence and is not perceived loudness or LUFS.
+
+Open **Master**, or the **M** shortcut beside the output meter, for music gain in dB, soft-clipper bypass/ceiling, and held peaks before/after clipping with peak attenuation. Measurements follow audio consumed by the device. The click keeps independent volume and shares the output ceiling. This is a sample soft clipper, not a true-peak limiter or automatic normalizer. See the [level controls and verification record](docs/LEVELS-2026-10-18.md).
+
+![MixStudio 0.25: master gain, output soft clipping and peak holds](docs/screenshots/master-levels.png)
 
 ## New in 0.24
 

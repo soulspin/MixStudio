@@ -1,6 +1,7 @@
 mod persistence;
 mod comparison;
 mod transition_workbench;
+mod levels_ui;
 use crate::analysis::{self, Analysis, Audio, PEAK_HOP};
 use crate::engine::{self, Cmd, Shared, Snap};
 use crate::model::{Mix, Preset, StemMode, Track};
@@ -49,7 +50,7 @@ enum TlDrag { Edge { ti: usize, left: bool, original: Box<Track> }, Fade { ti: u
 
 struct BeatCheckState { evidence:Vec<crate::beatcheck::BeatEvidence>, stamp:Vec<u64>, incoming:usize, result:Option<Result<crate::beatcheck::Report,String>> }
 
-enum Msg { RelinkReady(String,String,Result<Option<(PathBuf,Audio,Analysis)>,String>), BeatCheck(Vec<u64>,Result<crate::beatcheck::Report,String>,Vec<crate::beatcheck::BeatEvidence>), Found(Vec<PathBuf>), ImportPick(PathBuf), Picked(Vec<PathBuf>, Option<usize>,String), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>,String), Status(String), Opened(PathBuf), SaveTo(PathBuf,String), ExportTo(PathBuf,String), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>), Clip(Track, Audio, Analysis,String) }
+enum Msg { SourceLevels(String,Arc<Audio>,Result<crate::levels::SourceLevels,String>), RelinkReady(String,String,Result<Option<(PathBuf,Audio,Analysis)>,String>), BeatCheck(Vec<u64>,Result<crate::beatcheck::Report,String>,Vec<crate::beatcheck::BeatEvidence>), Found(Vec<PathBuf>), ImportPick(PathBuf), Picked(Vec<PathBuf>, Option<usize>,String), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>,String), Status(String), Opened(PathBuf), SaveTo(PathBuf,String), ExportTo(PathBuf,String), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>), Clip(Track, Audio, Analysis,String) }
 
 struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::AtomicU32> }
 
@@ -59,12 +60,13 @@ pub struct App {
     comparison:comparison::Comparison, active_loop:Option<(f64,f64)>,
     beat_check: Option<BeatCheckState>,
     section_state: Vec<u64>, select_sections: bool, section_range: Option<(usize, f64, f64)>, section_drag: Option<(usize, f64)>, section_copy: Option<crate::sections::SectionCopy>,
+    source_levels:HashMap<String,(Arc<Audio>,Option<Result<crate::levels::SourceLevels,String>>)>,
     mix: Mix, store: HashMap<String, (Arc<Audio>, Arc<Analysis>)>,
     out: crate::audio::Audio, ppb: f32, scroll: f64, tab: Tab, top: usize,
     sel: Option<usize>, sel_in: Option<usize>, undo: Vec<String>, redo: Vec<String>,
     tx: crossbeam_channel::Sender<Msg>, rx: crossbeam_channel::Receiver<Msg>, loading: usize,
     drag: Option<(usize, f64, f64)>, loop_on: bool, bars: u32, snapping: Snapping, lock: bool,
-    file: Option<PathBuf>, status: String, auto_a: bool, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, scratch_win: bool, scratch_play: Option<(usize, f64, f64)>, tempo_drag: Option<(usize, f64, f64)>, export_fmt: u8, ffmpeg: bool, auto_track: Option<usize>, auto_param: usize, auto_solo: bool, auto_drag: Option<(usize, usize)>, auto_rect: Rect, vzoom: bool, tc_side: usize, tc_drag: Option<usize>, fx_sel: Option<usize>, fx_drag: Option<(usize, u8, f64, f64, f64)>, fx_kind: crate::fx::FxKind, fx_target: usize, fx_name: String, fx_presets: Vec<crate::fx::FxPreset>, live_fx: Option<crate::fx::FxBlock>, live_start: f64, live_last: Option<(f64, f64, crate::fx::FxBlock)>, stem_sel: Option<(usize, usize, f64, f64)>, stem_drag: bool, dl_offer: Option<usize>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
+    file: Option<PathBuf>, status: String, follow: bool, grid_drag: Option<(usize, f32)>, tl_drag: Option<TlDrag>, scratch_win: bool, scratch_play: Option<(usize, f64, f64)>, tempo_drag: Option<(usize, f64, f64)>, export_fmt: u8, ffmpeg: bool, auto_track: Option<usize>, auto_param: usize, auto_solo: bool, auto_drag: Option<(usize, usize)>, auto_rect: Rect, vzoom: bool, tc_side: usize, tc_drag: Option<usize>, fx_sel: Option<usize>, fx_drag: Option<(usize, u8, f64, f64, f64)>, fx_kind: crate::fx::FxKind, fx_target: usize, fx_name: String, fx_presets: Vec<crate::fx::FxPreset>, live_fx: Option<crate::fx::FxBlock>, live_start: f64, live_last: Option<(f64, f64, crate::fx::FxBlock)>, stem_sel: Option<(usize, usize, f64, f64)>, stem_drag: bool, dl_offer: Option<usize>, tl_hover: Option<(usize, f64)>, bm_mode: BmMode, bm_drag: Option<BmDrag>, bm_pop: Option<(egui::Pos2, std::time::Instant)>, taps: Vec<std::time::Instant>,
     stems: HashMap<String, Arc<crate::stems::Stems>>, stem_prog: HashMap<String, Arc<std::sync::atomic::AtomicU32>>, stem_err: HashMap<String, String>,
     stem_tx: crossbeam_channel::Sender<StemJob>, dl_prog: Arc<std::sync::atomic::AtomicU32>, ep: Arc<Mutex<String>>,
     ao_mode: crate::automix::Mode, ao_curve: crate::automix::Curve, ao_keep_first: bool,
@@ -150,9 +152,9 @@ impl App {
             if let Ok(e) = crate::stems::session_info() { *ep.lock().unwrap() = e; }
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let persistence=persistence::Persistence::new(lib.recovery_dir(),&Mix::default(),demo.is_none());
-        let mut a = App { persistence, transition_audition:None, transition_pre:2, transition_post:1, transition_repeat:true, comparison:Default::default(), active_loop:None, beat_check:None, section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
+        let mut a = App { persistence, transition_audition:None, transition_pre:2, transition_post:1, transition_repeat:true, comparison:Default::default(), active_loop:None, beat_check:None, section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, source_levels:HashMap::new(), mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
-            file: None, status: String::new(), auto_a: true, follow: true, grid_drag: None, tl_drag: None, scratch_win: false, scratch_play: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
+            file: None, status: String::new(), follow: true, grid_drag: None, tl_drag: None, scratch_win: false, scratch_play: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib,
             lib_q: String::new(), lib_path: String::new(), lib_sort: crate::library::SortCol::Artist, lib_asc: true, lib_key: false, lib_bpm: false, lib_pct: 6.0,
             lib_sel: Default::default(), lib_anchor: None, lib_view: vec![], lib_node: None, lib_cur: vec![], lib_cur_key: None, lib_found: vec![], lib_imp: String::new(), lib_remaps: vec![], lib_remaps_init: false, lib_view_key: None, timeline_rect: Rect::NOTHING };
@@ -170,6 +172,7 @@ impl App {
             if let Some(&(_, i, s, e)) = a.mix.logical_transitions().first() { a.sel_in = Some(i); a.scroll = s - 40.0; a.seek((s + e) / 2.0 - 4.0); }
             a.ppb = 7.5; a.tab = Tab::Track; a.sel = Some(1); a.mix.metronome = true; a.follow = false;
             match std::env::var("MIXSTUDIO_DEMO_TAB").as_deref() { Ok("transition") => { a.tab = Tab::Transition; a.sel = None; }
+                Ok("master") => { a.tab = Tab::Master; a.sel = None; }
                 Ok("playlist") => { a.tab = Tab::Playlist; a.sel = Some(1); }
                 Ok("wide") => { a.tab = Tab::Playlist; a.ppb = 1.0; a.scroll = -4.0; a.sel = None; }
                 Ok("sections") => {
@@ -218,7 +221,7 @@ impl App {
     fn insert(&mut self, p: PathBuf, au: Audio, an: Analysis, sample: Option<(usize, f64)>) {
         let key = p.display().to_string();
         let mut t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, beat_mult: 1.0, grid_mode: 1, stabilize: false, flex: None, imported: None, sections: vec![] };
+            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, gain_db:0.0, beat_mult:1.0, grid_mode: 1, stabilize: false, flex: None, imported: None, sections: vec![] };
         if let Some((src, et)) = self.lib.ext_info(&key) { if !et.cues.is_empty() {
             let v: Vec<(f64, String)> = et.cues.iter().map(|c| (c.pos, if !c.name.is_empty() { c.name.clone() } else if c.hot >= 0 { format!("{} hot cue {}", src.name(), (b'A' + (c.hot as u8).min(25)) as char) } else { format!("{} cue", src.name()) })).collect();
             self.mix.cue_marks.insert(key.clone(), v); } }
@@ -636,6 +639,7 @@ impl eframe::App for App {
                         if cached || self.mix.auto_stems { if let Some(i) = self.mix.tracks.iter().position(|t| t.path == k) { self.request_stems(i); } } }
                     else { self.status = format!("{} — {:.1} BPM, {}", an.title, an.bpm, an.key); self.insert(p, au, an, s); } }
                 Err(e) => { self.status = format!("Could not read {}: {e}", p.display());self.persistence.load_errors.insert(p.display().to_string(),e); } } }
+            Msg::SourceLevels(path,audio,result)=>self.accept_source_levels(path,audio,result),
             Msg::Stems(p, r) => { self.stem_prog.remove(&p); match r { Ok(st) => { self.stems.insert(p.clone(), st); self.stem_err.remove(&p); self.status = "Stems ready".into(); }
                 Err(e) => { self.status = format!("Stem separation failed: {e}"); self.stem_err.insert(p, e); } } }
             Msg::Clip(t, au, an,id) => { if id!=self.persistence.id {continue;} self.snapshot(); let p = t.path.clone(); self.status = format!("{} copied to Sample {}", t.title, t.lane - 1); self.store.insert(p, (Arc::new(au), Arc::new(an))); self.mix.tracks.push(t); self.sel = Some(self.mix.tracks.len() - 1); }
@@ -837,10 +841,10 @@ impl App {
         let r = ui.max_rect();
         let m = [Shared::get(&self.out.shared.meter[0]), Shared::get(&self.out.shared.meter[1])];
         let c = pos2(r.center().x, r.bottom() - 20.0);
-        let resp = ui.interact(Rect::from_center_size(c, vec2(26.0, 26.0)), ui.id().with("auto"), Sense::click()).on_hover_text("Auto-gain / master limiter");
-        if resp.clicked() { self.auto_a = !self.auto_a; }
+        let resp = ui.interact(Rect::from_center_size(c, vec2(26.0, 26.0)), ui.id().with("auto"), Sense::click()).on_hover_text("Open Master: gain, input/output peaks and soft clipper");
+        if resp.clicked() { self.tab=Tab::Master; }
         let p = ui.painter();
-        p.text(pos2(r.center().x, r.top() + 14.0), Align2::CENTER_CENTER, format!("{:.0}%", m[0].max(m[1]) * 100.0), FontId::proportional(13.0), TXT);
+        p.text(pos2(r.center().x, r.top() + 14.0), Align2::CENTER_CENTER, if m[0].max(m[1])>0.00001 {format!("{:.0}",20.0*m[0].max(m[1]).log10())}else{"−inf".into()}, FontId::proportional(13.0), TXT);
         let top = r.top() + 30.0; let bot = r.bottom() - 40.0;
         for ch in 0..2 {
             let x = r.left() + 9.0 + ch as f32 * 14.0;
@@ -851,8 +855,8 @@ impl App {
                 let col = if fr > 0.88 { C::from_rgb(220, 50, 40) } else if fr > 0.72 { C::from_rgb(220, 190, 40) } else { C::from_rgb(60, 200, 70) };
                 p.rect_filled(Rect::from_min_max(pos2(x, y0), pos2(x + 9.0, y1)), 0.0, col); }
         }
-        let col = if self.auto_a { ACCENT } else { DIM };
-        p.circle_stroke(c, 11.0, Stroke::new(2.0_f32, col)); p.text(c, Align2::CENTER_CENTER, "A", FontId::proportional(14.0), col);
+        let col = if self.mix.output.enabled { ACCENT } else { DIM };
+        p.circle_stroke(c, 11.0, Stroke::new(2.0_f32, col)); p.text(c, Align2::CENTER_CENTER, "M", FontId::proportional(14.0), col);
     }
 
     fn knob(ui: &mut egui::Ui, id: egui::Id, c: egui::Pos2, v: &mut f32, label: &str) {
@@ -1637,9 +1641,9 @@ impl App {
                 ui.label(dim("Tip: Ctrl + scroll zooms around the pointer, scroll moves in time.")); }
             Tab::Video => { ui.heading("Video"); ui.label(dim("Video is not supported in v1.")); }
             Tab::Effects => self.effects_tab(ui),
-            Tab::Master => { ui.heading("Master"); let mut b = self.mix.bpm;
+            Tab::Master => { egui::ScrollArea::vertical().id_salt("master_settings").show(ui,|ui| {ui.heading("Master"); let mut b = self.mix.bpm;
                 ui.horizontal(|ui| { ui.label("Mix tempo"); if ui.add(egui::DragValue::new(&mut b).range(60.0..=200.0).speed(0.1).suffix(" BPM")).changed() { self.mix.bpm = b; } });
-                ui.add(egui::Slider::new(&mut self.mix.master, 0.0..=1.5).text("Master volume"));
+                self.master_levels_ui(ui);
                 ui.checkbox(&mut self.mix.key_lock, "Key lock (keep pitch when tempo changes)").on_hover_text("On: WSOLA time-stretch keeps the pitch. Off: varispeed, pitch follows tempo like a turntable.");
                 ui.horizontal(|ui| { ui.checkbox(&mut self.mix.metronome, "Metronome"); ui.add(egui::Slider::new(&mut self.mix.metro_vol, 0.0..=1.0).text("click volume")); });
                 ui.separator();
@@ -1652,7 +1656,7 @@ impl App {
                 ui.separator();
                 ui.horizontal(|ui| { ui.label("Export format:"); egui::ComboBox::from_id_salt("efmt").selected_text(crate::export::FORMATS[self.export_fmt as usize].0).show_ui(ui, |ui| { for (k, f) in crate::export::FORMATS.iter().enumerate() { ui.selectable_value(&mut self.export_fmt, k as u8, f.0); } }); });
                 if self.export_fmt == 3 && !self.ffmpeg { ui.label(egui::RichText::new("MP3 needs ffmpeg (sudo pacman -S ffmpeg).").color(C::from_rgb(230, 120, 90))); }
-                ui.label(dim("The metronome is never included in exports. Stretch mode per track is in the Track tab.")); }
+                ui.label(dim("The metronome is never included in exports. Stretch mode per track is in the Track tab.")); }); }
             Tab::Samples => { ui.heading("Samples"); ui.horizontal(|ui| {
                 if ui.button("Add sample to Sample 1 at playhead…").clicked() { self.pick_files(Some(2)); }
                 if ui.button("Add sample to Sample 2 at playhead…").clicked() { self.pick_files(Some(3)); } });
@@ -1700,6 +1704,7 @@ impl App {
         egui::ScrollArea::vertical().id_salt("track_properties").show(ui,|ui| {
             let t=&self.mix.tracks[i]; ui.heading(format!("{} — {}",t.title,t.artist));
             ui.label(format!("{:.2} BPM · {} · {}",t.bpm,t.key,fmt_t(t.duration)));
+            self.track_levels_ui(ui,i);
             if ui.button("Open Beatgrid → timing and beatmatch").clicked() { self.tab=Tab::Grid; }
             let mut t=self.mix.tracks[i].clone(); let mut changed=false;
             ui.horizontal_wrapped(|ui| {
@@ -2470,6 +2475,36 @@ mod section_ui_tests {
         let incoming=a.mix.logical_transitions()[0].1;a.sel_in=Some(incoming);a.start_transition_audition(incoming,3,true);
         let snap=a.build_playback_snap();assert!(snap.tracks[before].end>snap.tracks[before].vis);assert!(snap.tracks[after].end>snap.tracks[after].vis);
         let members=a.transition_members(incoming).unwrap();assert_eq!(members[0].len(),2);assert_eq!(members[1].len(),2);
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn song_and_master_levels_are_persisted_undoable_and_shared_by_fragments() {
+        let (mut a,_ctx,_rx,dir)=setup();let right=a.mix.split(0,16.0).unwrap();a.set_song_gain(right,-6.0);
+        assert_eq!(a.mix.tracks[0].gain_db,-6.0);assert_eq!(a.mix.tracks[right].gain_db,-6.0);
+        a.do_undo();assert!(a.mix.tracks.iter().all(|t|t.gain_db==0.0));a.do_redo();assert!(a.mix.tracks.iter().all(|t|t.gain_db== -6.0));
+        a.set_master_levels(0.5,crate::levels::OutputSettings{enabled:false,ceiling_db:-1.0});let saved=serde_json::to_string(&a.mix).unwrap();let m:Mix=serde_json::from_str(&saved).unwrap();assert_eq!(m.master,0.5);assert!(!m.output.enabled);
+        a.do_undo();assert_eq!(a.mix.master,1.0);assert!(a.mix.output.enabled);
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn master_controls_fit_minimum_width() {
+        let (mut a,ctx,_rx,dir)=setup();
+        let draw=|a:&mut App|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,640.0))),..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|a.master_levels_ui(ui));});
+        draw(&mut a);let out=draw(&mut a);
+        let text:Vec<_>=out.shapes.iter().filter_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape {Some(t)}else{None}).collect();
+        for label in ["Master gain (dB)","Soft clipper enabled","Before clipper", "Output · peak hold", "Reset peak holds"] {
+            let t=text.iter().find(|t|t.galley.text().contains(label)).expect(label);
+            assert!(t.pos.x>=0.0 && t.pos.x+t.galley.size().x<=1000.0 && t.pos.y+t.galley.size().y<=640.0,"master control outside viewport: {label}");
+        }
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn stale_source_level_results_cannot_replace_a_new_measurement() {
+        let (mut a,_ctx,_rx,dir)=setup();let old=a.store["test.wav"].0.clone();a.source_levels.insert("test.wav".into(),(old.clone(),None));
+        let new=Arc::new(Audio{sr:8000,l:vec![0.2;8],r:vec![0.2;8]});a.store.get_mut("test.wav").unwrap().0=new.clone();a.source_levels.insert("test.wav".into(),(new.clone(),None));
+        a.accept_source_levels("test.wav".into(),old,Ok(crate::levels::SourceLevels{peak:1.0,rms:1.0}));assert!(a.source_levels["test.wav"].1.is_none());
+        a.accept_source_levels("test.wav".into(),new,Ok(crate::levels::SourceLevels{peak:0.2,rms:0.2}));assert_eq!(a.source_levels["test.wav"].1.as_ref().unwrap().as_ref().unwrap().peak,0.2);
         drop(a);std::fs::remove_dir_all(dir).ok();
     }
 

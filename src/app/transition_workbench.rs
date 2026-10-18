@@ -101,6 +101,7 @@ impl App {
                 if self.mix.has_transition_locks() && ui.button("Unlock all transitions").clicked() {self.snapshot();for t in &mut self.mix.tracks {t.trans.locked=false;}}
             });
             if self.mix.has_transition_locks() {ui.colored_label(C::LIGHT_YELLOW,"Protected transitions freeze arrangement moves, cuts, reorder and automatic beat ratios. Unlock to change placement.");}
+            ui.horizontal_wrapped(|ui| {self.song_gain_control(ui,o,"A gain");self.song_gain_control(ui,i,"B gain");});
             self.transition_listen_ui(ui,i);
             ui.separator();
             ui.horizontal_wrapped(|ui| {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.25.0-beta
+
+- Add persisted, undoable per-song gain in Track and Transition; keep logical split fragments in sync.
+- Replace the inactive auto-gain switch with a Master shortcut. Expose music gain in dB and the existing sample soft clipper’s bypass and ceiling. Legacy defaults preserve its transfer function.
+- Measure whole-source stereo peak/RMS in the background; clearly distinguish RMS from LUFS and source estimates from processed output.
+- Show held peaks before/after clipping and peak attenuation from device-consumed audio. Reset on the callback boundary without seeking; include the metronome in output clipping and metering.
+
 ## 0.24.0-beta
 
 - Rework Transition into explicit source A/B intervals, overlap bars/duration, responsive preset/stem controls and processed audition. Respect arranged source cuts and logical split fragments.

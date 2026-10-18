@@ -8,10 +8,11 @@ const BLOCK_COUNT: usize = 8;
 
 struct AudioBlock {
     samples: [f32; BLOCK_FRAMES * 2], clock: [f64; BLOCK_FRAMES],
+    levels:crate::levels::OutputLevels,
     end_beat: f64, epoch: u64, meter: [u32; 2], deck_meter: [u32; 4],
 }
 impl AudioBlock {
-    fn new() -> Self { Self { samples: [0.0; BLOCK_FRAMES*2], clock: [0.0; BLOCK_FRAMES], end_beat: 0.0, epoch: 0, meter: [0;2], deck_meter: [0;4] } }
+    fn new() -> Self { Self { levels:Default::default(), samples: [0.0; BLOCK_FRAMES*2], clock: [0.0; BLOCK_FRAMES], end_beat: 0.0, epoch: 0, meter: [0;2], deck_meter: [0;4] } }
 }
 
 // Even values are transport generations; the low bit protects public playback
@@ -38,7 +39,7 @@ impl Transport {
 
 struct DeviceReader {
     ready: Receiver<Box<AudioBlock>>, returned: Sender<Box<AudioBlock>>,
-    current: Option<Box<AudioBlock>>, pending_return: Option<Box<AudioBlock>>, position: usize,
+    current: Option<Box<AudioBlock>>, pending_return: Option<Box<AudioBlock>>, position: usize, current_levels_valid: bool,
     shared: Arc<Shared>, transport: Arc<Transport>, lifecycle: Option<(Arc<AtomicBool>,Arc<AtomicBool>)>,
 }
 impl Drop for DeviceReader {
@@ -64,6 +65,11 @@ impl DeviceReader {
         self.transport.epoch.store(epoch,Ordering::Release);
     }
     fn fill_locked<T: Copy>(&mut self, output: &mut [T], channels: usize, convert: &impl Fn(f32)->T, epoch: u64) {
+        // Reset only on the consumer, before publishing any further holds. A partial
+        // block contains old peaks: begin again with the next complete device block.
+        if self.shared.reset_levels_requested.swap(false,Ordering::AcqRel) {
+            self.shared.reset_levels();self.current_levels_valid=false;
+        }
         if let Some(block)=self.pending_return.take() { if !self.recycle(block) { return; } }
         if self.current.as_ref().is_some_and(|b|b.epoch!=epoch) {
             let block=self.current.take().unwrap(); if !self.recycle(block) { return; }
@@ -74,7 +80,7 @@ impl DeviceReader {
             if self.current.is_none() {
                 // There are at most BLOCK_COUNT stale pooled blocks to discard.
                 while let Ok(block)=self.ready.try_recv() {
-                    if block.epoch==epoch { self.current=Some(block);self.position=0;break; }
+                    if block.epoch==epoch { self.current=Some(block);self.position=0;self.current_levels_valid=true;break; }
                     if !self.recycle(block) { return; }
                 }
             }
@@ -85,6 +91,11 @@ impl DeviceReader {
             let beat=if self.position==BLOCK_FRAMES {block.end_beat} else {block.clock[self.position]};
             self.shared.beat.store(beat.to_bits(),Ordering::Relaxed);
             if self.position==BLOCK_FRAMES {
+                if self.current_levels_valid {
+                self.shared.pre_peak.fetch_max(block.levels.pre_peak.to_bits(),Ordering::Relaxed);
+                self.shared.post_peak.fetch_max(block.levels.post_peak.to_bits(),Ordering::Relaxed);
+                self.shared.min_ratio.fetch_min(block.levels.min_ratio.to_bits(),Ordering::Relaxed);
+                }
                 for (dst,value) in self.shared.meter.iter().zip(block.meter) {dst.store(value,Ordering::Relaxed);}
                 for (dst,value) in self.shared.deck_meter.iter().zip(block.deck_meter) {dst.store(value,Ordering::Relaxed);}
                 let block=self.current.take().unwrap();if !self.recycle(block) {return;}
@@ -104,6 +115,7 @@ impl WorkerState {
     }
     fn handle(&mut self, command: Cmd) {
         match &command {
+            Cmd::ResetLevels=>self.shared.reset_levels_requested.store(true,Ordering::Release),
             Cmd::Seek(beat)=>{self.epoch=self.transport.change(&self.shared,Some(*beat),None).0;}
             Cmd::Play(playing)=>{
                 if !*playing {
@@ -124,6 +136,7 @@ impl WorkerState {
         block.epoch=self.epoch;
         self.engine.render_with_clock(&mut block.samples,2,&mut block.clock);
         block.end_beat=self.internal.beat();
+        block.levels=self.engine.levels;
         for (dst,src) in block.meter.iter_mut().zip(self.internal.meter.iter()) {*dst=src.load(Ordering::Relaxed);}
         for (dst,src) in block.deck_meter.iter_mut().zip(self.internal.deck_meter.iter()) {*dst=src.load(Ordering::Relaxed);}
     }
@@ -172,7 +185,7 @@ impl WorkerGuard {
     }
     fn reader(&mut self) -> DeviceReader {
         let armed=Arc::new(AtomicBool::new(false));self.lifecycles.push(armed.clone());
-        DeviceReader {ready:self.ready.clone(),returned:self.returned.clone(),current:None,pending_return:None,position:0,shared:self.shared.clone(),transport:self.transport.clone(),lifecycle:Some((armed,self.stop.clone()))} }
+        DeviceReader {ready:self.ready.clone(),returned:self.returned.clone(),current:None,pending_return:None,position:0,current_levels_valid:true,shared:self.shared.clone(),transport:self.transport.clone(),lifecycle:Some((armed,self.stop.clone()))} }
 }
 impl Drop for WorkerGuard {
     fn drop(&mut self) {
@@ -231,7 +244,7 @@ fn test_reader() -> (DeviceReader, Arc<Transport>, Sender<Box<AudioBlock>>, Rece
     let (ready_tx,ready)=crossbeam_channel::bounded(BLOCK_COUNT);
     let (returned,returned_rx)=crossbeam_channel::bounded(BLOCK_COUNT+1);
     let transport=Arc::new(Transport::default());
-    (DeviceReader {ready,returned,current:None,pending_return:None,position:0,shared:Arc::new(Shared::new()),transport:transport.clone(),lifecycle:None},transport,ready_tx,returned_rx)
+    (DeviceReader {ready,returned,current:None,pending_return:None,position:0,current_levels_valid:true,shared:Arc::new(Shared::new()),transport:transport.clone(),lifecycle:None},transport,ready_tx,returned_rx)
 }
 #[cfg(test)]
 mod device_diagnostics {
@@ -266,6 +279,24 @@ mod buffered_tests {
     use super::*;
     fn empty_snapshot() -> Arc<crate::engine::Snap> {
         Arc::new(crate::engine::Snap::build(&crate::model::Mix::default(),&[]))
+    }
+    #[test]
+    fn reset_holds_discards_partial_peak_without_changing_transport() {
+        let (mut reader,transport,ready,_returned)=test_reader();
+        let mut worker=WorkerState::new(8000.0,reader.shared.clone(),transport.clone());
+        worker.handle(Cmd::Play(true));
+        let block=|peak| {let mut b=Box::new(AudioBlock::new());b.samples.fill(0.2);b.levels=crate::levels::OutputLevels{pre_peak:peak,post_peak:peak*0.5,min_ratio:0.5};b};
+        ready.send(block(2.0)).unwrap();let mut partial=[0.0;2];reader.fill(&mut partial,2,|x|x);
+        assert_eq!(Shared::get(&reader.shared.pre_peak),0.0);
+        reader.shared.pre_peak.store(3.0_f32.to_bits(),Ordering::Relaxed);
+        worker.handle(Cmd::ResetLevels);
+        let mut rest=vec![0.0;(BLOCK_FRAMES-1)*2];reader.fill(&mut rest,2,|x|x);
+        assert_eq!(Shared::get(&reader.shared.pre_peak),0.0);assert_eq!(Shared::get(&reader.shared.post_peak),0.0);assert_eq!(Shared::get(&reader.shared.min_ratio),1.0);
+        assert_eq!(transport.epoch.load(Ordering::Relaxed),0);assert!(worker.playing);
+        ready.send(block(0.4)).unwrap();reader.fill(&mut vec![0.0;BLOCK_FRAMES*2],2,|x|x);
+        assert_eq!(Shared::get(&reader.shared.pre_peak),0.4);assert_eq!(Shared::get(&reader.shared.post_peak),0.2);assert_eq!(Shared::get(&reader.shared.min_ratio),0.5);
+        worker.handle(Cmd::Play(false));worker.handle(Cmd::ResetLevels);reader.fill(&mut partial,2,|x|x);
+        assert_eq!(Shared::get(&reader.shared.pre_peak),0.0);
     }
     #[test]
     fn worker_lookahead_does_not_publish_clock_and_snapshots_do_not_flush() {

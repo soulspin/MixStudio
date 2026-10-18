@@ -18,6 +18,7 @@ pub fn validate_mix(m: &Mix) -> Result<(), String> {
     require(tempo(m.bpm), "mix BPM must be positive and finite")?;
     require(m.tempo_mode <= 3 && m.trans_stem_style <= 2, "mix mode")?;
     require(level(m.master,0.0,4.0) && level(m.metro_vol,0.0,1.0), "master/metronome level")?;
+    require(level(m.output.ceiling_db,-12.0,0.0), "soft clipper ceiling")?;
     for d in &m.decks {
         require(level(d.vol,0.0,4.0) && [d.hi,d.mid,d.low,d.filter].iter().all(|&x| level(x,-1.0,1.0)), "deck level/EQ")?;
     }
@@ -25,6 +26,7 @@ pub fn validate_mix(m: &Mix) -> Result<(), String> {
     require([m.ramp.0,m.ramp.1].iter().all(|&t| t==0.0 || tempo(t)), "tempo ramp")?;
     for (i,t) in m.tracks.iter().enumerate() {
         let field=|name:&str|format!("track {} {name}",i+1);
+        require(level(t.gain_db,-24.0,12.0), &field("gain"))?;
         require(t.lane < 4, &field("lane must be 0–3"))?;
         require(tempo(t.bpm) && number(t.beat_mult) && t.beat_mult>=1e-4 && t.beat_mult<=10000.0, &field("tempo/beat ratio"))?;
         require(number(t.duration) && t.duration>0.0 && number(t.offset) && number(t.start_beat), &field("duration/placement"))?;
@@ -63,13 +65,14 @@ mod tests {
     #[test]
     fn existing_projects_and_legacy_duplicate_automation_are_accepted() {
         let mut m=fixture(); validate_mix(&m).unwrap();
+        assert!(m.tracks.iter().all(|t|t.gain_db==0.0));assert_eq!(m.output,crate::levels::OutputSettings::default());
         m.tracks[0].auto=vec![vec![(8.0,0.1),(8.0,0.5),(8.0,0.9)]];
         validate_mix(&m).unwrap(); validate_mix(&Mix::default()).unwrap();
     }
     #[test]
     fn corrupt_numeric_modes_maps_and_ranges_are_rejected() {
         let original=fixture();
-        for case in 0..12 {
+        for case in 0..16 {
             let mut m=original.clone();
             match case {
                 0=>m.tracks[0].lane=4,
@@ -83,6 +86,10 @@ mod tests {
                 8=>m.tempo_pts=vec![(0.0,-120.0)],
                 9=>m.fx.push(crate::fx::FxBlock::new(crate::fx::FxKind::Echo,5,0.0)),
                 10=>m.tracks[0].map=Some(std::sync::Arc::new(BeatMap {bpm:120.0,beats:(0..16).map(|i|i as f64*0.0001).collect()})),
+                12=>m.tracks[0].gain_db=f32::NAN,
+                13=>m.tracks[0].gain_db=13.0,
+                14=>m.output.ceiling_db=f32::INFINITY,
+                15=>m.output.ceiling_db=1.0,
                 _=>m.tracks[0].auto=vec![vec![(1.0,f32::INFINITY)]],
             }
             assert!(validate_mix(&m).is_err(),"accepted corrupt case {case}");

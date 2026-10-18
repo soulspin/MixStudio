@@ -4,6 +4,10 @@
 //! Grains are anchored to the timeline (ideal input position = the track's beat map evaluated at the mix beat,
 //! so the stretch ratio changes continuously and every source beat lands on a mix beat),
 //! so there is no drift. Without Key lock: varispeed (cubic Hermite resampling, pitch follows tempo).
+#[cfg(test)]
+#[path="engine/level_tests.rs"]
+mod level_tests;
+
 use crate::analysis::Audio;
 use crate::model::{Deck, Mix, Preset, StemMode};
 use crate::stems::Stems;
@@ -11,14 +15,14 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub struct SnapTrack { pub fragment_group:u64, pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub mutes: Vec<(u8, f64, f64)>, pub auto: Vec<Vec<(f64, f32)>>, pub stretch: u8 }
+pub struct SnapTrack { pub gain:f32, pub fragment_group:u64, pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub mutes: Vec<(u8, f64, f64)>, pub auto: Vec<Vec<(f64, f32)>>, pub stretch: u8 }
 impl SnapTrack {
     /// clip gate and fades: 0 outside [vis, end), linear fades in beats
     #[inline] fn edge(&self, b: f64) -> f32 { if b < self.vis || b >= self.end { return 0.0; } let mut g = 1.0;
-        if self.fade_in > 0.0 { g *= ((b - self.vis) / self.fade_in).min(1.0); } if self.fade_out > 0.0 { g *= ((self.end - b) / self.fade_out).min(1.0); } (g * self.grid.splice_gain(b)) as f32 }
+        if self.fade_in > 0.0 { g *= ((b - self.vis) / self.fade_in).min(1.0); } if self.fade_out > 0.0 { g *= ((self.end - b) / self.fade_out).min(1.0); } (g * self.grid.splice_gain(b)) as f32*self.gain }
 }
 #[allow(dead_code)]
-pub struct Snap { pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset, [StemMode; 4])>, pub decks: [Deck; 4], pub master: f32,
+pub struct Snap { pub output:crate::levels::OutputSettings, pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset, [StemMode; 4])>, pub decks: [Deck; 4], pub master: f32,
     pub tcurves: Vec<(Vec<(f32, f32)>, Vec<(f32, f32)>)>, pub fx: Vec<crate::fx::FxBlock>, pub live: Option<crate::fx::FxBlock>, pub tempo: Vec<(f64, f64)>,
     /// scratch blocks: (lane, start, end, parsed pattern, easing)
     pub scratch: Vec<(usize, f64, f64, Vec<Vec<crate::scratch::Key>>, f64)> }
@@ -30,13 +34,13 @@ impl Snap {
         for (i, t) in mix.tracks.iter().enumerate() {
             if let Some(Some(a)) = audio.get(i) {
                 map[i] = tracks.len();
-                tracks.push(SnapTrack { fragment_group:t.trans.fragment_group, stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.eff_bpm(), vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect(), auto: t.auto.clone(), stretch: match t.stretch { 0 => if mix.key_lock { 1 } else { 2 }, x => x } });
+                tracks.push(SnapTrack { gain:crate::levels::amplitude(t.gain_db), fragment_group:t.trans.fragment_group, stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.eff_bpm(), vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect(), auto: t.auto.clone(), stretch: match t.stretch { 0 => if mix.key_lock { 1 } else { 2 }, x => x } });
             }
         }
         let tcurves = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX).map(|x| (mix.tracks[x.1].trans.curve_out.clone(), mix.tracks[x.1].trans.curve_in.clone())).collect();
         let trans = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX)
             .map(|(a, b, s, e)| (map[a], map[b], s, e, mix.tracks[b].trans.preset, mix.tracks[b].trans.stems)).collect();
-        Snap { key_lock: mix.key_lock, metro: if mix.metronome { Some(mix.metro_vol) } else { None }, bpm: mix.bpm, tracks, trans, decks: mix.decks, master: mix.master, tcurves, fx: mix.fx.clone(), live: None, tempo: mix.tempo_curve(), scratch: mix.fx.iter().filter(|f| f.kind == crate::fx::FxKind::Scratch).filter_map(|f| crate::scratch::parse(&f.pattern).ok().map(|p| (f.target, f.start, f.start + f.len, p, f.ease as f64))).collect() }
+        Snap { output:mix.output, key_lock: mix.key_lock, metro: if mix.metronome { Some(mix.metro_vol) } else { None }, bpm: mix.bpm, tracks, trans, decks: mix.decks, master: mix.master, tcurves, fx: mix.fx.clone(), live: None, tempo: mix.tempo_curve(), scratch: mix.fx.iter().filter(|f| f.kind == crate::fx::FxKind::Scratch).filter_map(|f| crate::scratch::parse(&f.pattern).ok().map(|p| (f.target, f.start, f.start + f.len, p, f.ease as f64))).collect() }
     }
 }
 
@@ -73,11 +77,12 @@ impl SnapshotBuilder {
         PreparedSnap { order, permit:RetirementPermit(self.pending.clone()), retired:self.retired_tx.clone(), snap, ws, fx }
     }
 }
-pub enum Cmd { Snap(Arc<Snap>), Prepared(PreparedSnap), Play(bool), Seek(f64), Loop(Option<(f64, f64)>) }
+pub enum Cmd { ResetLevels, Snap(Arc<Snap>), Prepared(PreparedSnap), Play(bool), Seek(f64), Loop(Option<(f64, f64)>) }
 
-pub struct Shared { pub underruns:AtomicU64, pub beat: AtomicU64, pub playing: AtomicBool, pub meter: [AtomicU32; 2], pub deck_meter: [AtomicU32; 4] }
+pub struct Shared { pub reset_levels_requested:AtomicBool, pub pre_peak:AtomicU32, pub post_peak:AtomicU32, pub min_ratio:AtomicU32, pub underruns:AtomicU64, pub beat: AtomicU64, pub playing: AtomicBool, pub meter: [AtomicU32; 2], pub deck_meter: [AtomicU32; 4] }
 impl Shared {
-    pub fn new() -> Self { Shared { underruns:AtomicU64::new(0), beat: AtomicU64::new(0f64.to_bits()), playing: AtomicBool::new(false), meter: Default::default(), deck_meter: Default::default() } }
+    pub fn new() -> Self { Shared { reset_levels_requested:AtomicBool::new(false), pre_peak:AtomicU32::new(0),post_peak:AtomicU32::new(0),min_ratio:AtomicU32::new(1.0_f32.to_bits()),underruns:AtomicU64::new(0), beat: AtomicU64::new(0f64.to_bits()), playing: AtomicBool::new(false), meter: Default::default(), deck_meter: Default::default() } }
+    pub fn reset_levels(&self) {self.pre_peak.store(0,Ordering::Relaxed);self.post_peak.store(0,Ordering::Relaxed);self.min_ratio.store(1.0_f32.to_bits(),Ordering::Relaxed);}
     pub fn beat(&self) -> f64 { f64::from_bits(self.beat.load(Ordering::Relaxed)) }
     pub fn get(a: &AtomicU32) -> f32 { f32::from_bits(a.load(Ordering::Relaxed)) }
 }
@@ -274,6 +279,7 @@ impl Polyphonic {
 struct DeckState { settings: [f32;4], lowsh: Biquad, mid: Biquad, hish: Biquad, lpf: Biquad, hpf: Biquad, kill: Biquad, delay: Vec<[f32; 2]>, dpos: usize }
 
 pub struct Engine {
+    pub levels:crate::levels::OutputLevels,
     pub sr: f32, pub shared: Arc<Shared>, snap: Option<Arc<Snap>>, beat: f64, playing: bool, loop_r: Option<(f64, f64)>,
     order:Vec<usize>, sample_beats:[f64;256], decks: Vec<DeckState>, buf: Vec<[f32; 2]>, dbuf: [Vec<[f32; 2]>; 4], ws: Vec<Option<Wsola>>, click: (f32, f32), click_ph: f32, click_beat: Option<i64>, pub metro_enabled: bool, fx: Vec<(FxKey, Option<crate::fx::FxState>)>,
 }
@@ -281,7 +287,7 @@ pub struct Engine {
 impl Engine {
     pub fn new(sr: f32, shared: Arc<Shared>) -> Self {
         let decks = (0..4).map(|_| DeckState { settings:[f32::NAN;4], lowsh: Biquad::default(), mid: Biquad::default(), hish: Biquad::default(), lpf: Biquad::default(), hpf: Biquad::default(), kill: Biquad::default(), delay: vec![[0.0; 2]; ((sr * 3.0) as usize).max(2)], dpos: 0 }).collect();
-        Engine { order:vec![], sample_beats:[0.0;256], sr, shared, snap: None, beat: 0.0, playing: false, loop_r: None, decks, buf: Vec::with_capacity(512), dbuf: std::array::from_fn(|_| Vec::with_capacity(256)), ws: vec![], click: (0.0, 0.0), click_ph: 0.0, click_beat: None, metro_enabled: true, fx: vec![] }
+        Engine { levels:Default::default(), order:vec![], sample_beats:[0.0;256], sr, shared, snap: None, beat: 0.0, playing: false, loop_r: None, decks, buf: Vec::with_capacity(512), dbuf: std::array::from_fn(|_| Vec::with_capacity(256)), ws: vec![], click: (0.0, 0.0), click_ph: 0.0, click_beat: None, metro_enabled: true, fx: vec![] }
     }
     pub fn handle(&mut self, c: Cmd) {
         match c {
@@ -294,6 +300,7 @@ impl Engine {
             Cmd::Play(p) => { self.playing = p; self.shared.playing.store(p, Ordering::Relaxed); }
             Cmd::Seek(b) => { self.beat = b; self.reset_transport(); self.shared.beat.store(b.to_bits(), Ordering::Relaxed); }
             Cmd::Loop(l) => self.loop_r = l,
+            Cmd::ResetLevels => self.shared.reset_levels(),
         }
     }
     fn install(&mut self, mut p: PreparedSnap) {
@@ -339,6 +346,7 @@ impl Engine {
         assert!(clock.len()>=out.len()/ch.max(1));self.render_clocked(out,ch,Some(clock));
     }
     fn render_clocked(&mut self,out:&mut[f32],ch:usize,mut clock:Option<&mut[f64]>) {
+        self.levels=Default::default();
         let frames = out.len() / ch.max(1);
         let mut done = 0;
         while done < frames {
@@ -511,13 +519,15 @@ impl Engine {
         for (k, f) in snap.fx.iter().enumerate() { if f.target >= 4 { self.fx[k].1.as_mut().expect("prepared effect state").process(f, &mut self.buf, &beats[..=n], &snap, false); } }
         { let last = self.fx.len() - 1; match &snap.live { Some(f) => self.fx[last].1.as_mut().expect("prepared live state").process(f, &mut self.buf, &beats[..=n], &snap, true), None => if self.fx[last].1.as_ref().is_some_and(|f|f.active) { self.fx[last].1.as_mut().unwrap().reset(); } } }
         let mut pk = [0f32; 2];
-        for f in &mut self.buf { for c in 0..2 { let x = f[c] * snap.master; let y = if x.abs() < 0.9 { x } else { x.signum() * (0.9 + 0.1 * ((x.abs() - 0.9) * 10.0).tanh()) }; f[c] = y; pk[c] = pk[c].max(y.abs()); } }
+        for f in &mut self.buf {for value in f {*value*=snap.master;}}
         if let (Some(vol), true) = (snap.metro, self.metro_enabled) {
             for i in 0..n { let b = beats[i];
                 if self.click_beat != Some(b.floor() as i64) { self.click_beat=Some(b.floor() as i64);let down = (b.floor() as i64).rem_euclid(4) == 0; self.click = (if down { 1.0 } else { 0.55 }, if down { 1600.0 } else { 1000.0 }); self.click_ph = 0.0; }
                 if self.click.0 > 1e-4 { self.click_ph += self.click.1 / self.sr; let v = (self.click_ph * 2.0 * PI).sin() * self.click.0 * vol * 0.5;
                     self.click.0 *= 0.9985; self.buf[i][0] += v; self.buf[i][1] += v; } }
         }
+        let output=snap.output.prepare();
+        for f in &mut self.buf {for c in 0..2 {let x=f[c];let y=output.process(x);self.levels.observe(x,y);f[c]=y;pk[c]=pk[c].max(y.abs());}}
         for c in 0..2 { let old = Shared::get(&self.shared.meter[c]); self.shared.meter[c].store(pk[c].max(old * 0.92).to_bits(), Ordering::Relaxed); }
         self.beat = b1;
         if let Some((s,e))=self.loop_r { if e>s && self.beat>=e {

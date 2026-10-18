@@ -42,6 +42,7 @@ pub fn auto_mult(bpm: f64, reference: f64) -> f64 {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Track {
+    #[serde(default)] pub gain_db:f32,
     #[serde(default)] pub sections: Vec<(f64, f64)>,
     pub path: String, pub title: String, pub artist: String,
     pub bpm: f64, pub offset: f64, pub key: String, pub duration: f64,
@@ -262,7 +263,7 @@ pub struct Deck { pub vol: f32, pub hi: f32, pub mid: f32, pub low: f32, pub fil
 impl Default for Deck { fn default() -> Self { Deck { vol: 0.85, hi: 0.0, mid: 0.0, low: 0.0, filter: 0.0, mute: false, solo: false } } }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Mix { pub name: String, pub bpm: f64, pub tracks: Vec<Track>, pub decks: [Deck; 4], #[serde(default = "one")] pub master: f32,
+pub struct Mix { #[serde(default)] pub output:crate::levels::OutputSettings, pub name: String, pub bpm: f64, pub tracks: Vec<Track>, pub decks: [Deck; 4], #[serde(default = "one")] pub master: f32,
     #[serde(default = "yes")] pub key_lock: bool, #[serde(default)] pub metronome: bool, #[serde(default = "half")] pub metro_vol: f32, #[serde(default)] pub auto_stems: bool,
     /// stem colours inside transitions: 0 normal, 1 dimmed, 2 inverted
     #[serde(default)] pub trans_stem_style: u8,
@@ -277,7 +278,7 @@ pub struct Mix { pub name: String, pub bpm: f64, pub tracks: Vec<Track>, pub dec
 fn yes() -> bool { true }
 fn half() -> f32 { 0.5 }
 fn one() -> f32 { 1.0 }
-impl Default for Mix { fn default() -> Self { Mix { name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![], tempo_mode: 0, tempo_pts: vec![], ramp: (0.0, 0.0), phrase_edit: Default::default(), cue_marks: Default::default() } } }
+impl Default for Mix { fn default() -> Self { Mix { output:Default::default(), name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![], tempo_mode: 0, tempo_pts: vec![], ramp: (0.0, 0.0), phrase_edit: Default::default(), cue_marks: Default::default() } } }
 
 impl Mix {
     /// indices of main-deck tracks sorted by start
