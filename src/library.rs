@@ -2,6 +2,7 @@
 //! tag reading, background BPM/key analysis with limited concurrency, and the filtered/sorted view.
 //! Every file-system access that could stall on a failing or unplugged drive runs on a helper thread
 //! with a timeout, so a bad disk can slow a scan down but never hangs it or the UI.
+pub mod browse;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -67,6 +68,10 @@ pub struct Entry {
     #[serde(default)] pub error: Option<String>,
     #[serde(default)] pub analysis_error: Option<String>,
     #[serde(default)] pub analysis_version: u32,
+}
+
+impl Entry {
+    pub fn filename(&self)->&str {Path::new(&self.path).file_name().and_then(|s|s.to_str()).unwrap_or(&self.path)}
 }
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
@@ -279,7 +284,7 @@ pub fn analyse(path: &str) -> Result<(f64, String, f64), String> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SortCol { Title, Artist, Bpm, Key, Duration, Genre, Folder }
+pub enum SortCol { Filename, Title, Artist, Bpm, Key, Duration, Genre, Folder }
 
 pub struct Filter<'a> { pub query: &'a str, pub key_ref: Option<&'a str>, pub bpm_ref: Option<(f64, f64)> }
 
@@ -298,6 +303,7 @@ pub fn view(entries: &[Entry], f: &Filter, sort: SortCol, asc: bool) -> Vec<usiz
     let fold = |s: &str| s.to_lowercase();
     v.sort_by(|&a, &b| { let (x, y) = (&entries[a], &entries[b]);
         let o = match sort {
+            SortCol::Filename => fold(x.filename()).cmp(&fold(y.filename())).then_with(||x.path.cmp(&y.path)),
             SortCol::Title => fold(&x.title).cmp(&fold(&y.title)), SortCol::Artist => fold(&x.artist).cmp(&fold(&y.artist)).then_with(|| fold(&x.title).cmp(&fold(&y.title))),
             SortCol::Bpm => x.bpm.unwrap_or(f64::MAX).partial_cmp(&y.bpm.unwrap_or(f64::MAX)).unwrap_or(std::cmp::Ordering::Equal),
             SortCol::Key => camelot_ord(&x.key).cmp(&camelot_ord(&y.key)), SortCol::Duration => x.duration.partial_cmp(&y.duration).unwrap_or(std::cmp::Ordering::Equal),
@@ -312,6 +318,8 @@ pub enum Event { Imported(u64, Vec<Result<crate::import::ExtLib, String>>), Prog
 pub struct Library {
     pub cfg: Config, pub index: Index, pub states: HashMap<String, FolderState>, pub report: Option<ScanReport>,
     pub scanning: bool, pub progress: (usize, usize), pub analysing: (usize, usize), pub gen: u64,
+    /// Structural revision for indexed paths, independent of BPM/key updates.
+    pub path_gen:u64,
     cfg_dir: PathBuf, data_dir: PathBuf, tx: crossbeam_channel::Sender<Event>, rx: crossbeam_channel::Receiver<Event>,
     cancel: Arc<AtomicBool>, repaint: Arc<dyn Fn() + Send + Sync>, rescan_pending: bool, unsaved: usize, pos: HashMap<String, usize>,
     /// imported libraries (same order as cfg.imports) and path -> (import, track)
@@ -323,7 +331,7 @@ impl Library {
 
     pub fn new(cfg_dir: PathBuf, data_dir: PathBuf, repaint: Arc<dyn Fn() + Send + Sync>) -> Library {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let mut l = Library { cfg: load_config(&cfg_dir), index: load_index(&data_dir), states: HashMap::new(), report: None, scanning: false, progress: (0, 0), analysing: (0, 0), gen: 1,
+        let mut l = Library { cfg: load_config(&cfg_dir), index: load_index(&data_dir), states: HashMap::new(), report: None, scanning: false, progress: (0, 0), analysing: (0, 0), gen: 1, path_gen:1,
             cfg_dir, data_dir, tx, rx, cancel: Arc::new(AtomicBool::new(false)), repaint, rescan_pending: false, unsaved: 0, pos: HashMap::new(), ext: vec![], ext_map: HashMap::new(), imp_seq: 0 };
         l.reindex(); l.reimport(); l
     }
@@ -349,7 +357,7 @@ impl Library {
     pub fn ext_info(&self, path: &str) -> Option<(crate::import::Source, &crate::import::ExtTrack)> {
         let &(l, t) = self.ext_map.get(path)?; let lib = self.ext.get(l)?.as_ref().ok()?; Some((lib.source, lib.tracks.get(t)?)) }
     pub fn entry(&self, path: &str) -> Option<&Entry> { self.pos.get(path).and_then(|&i| self.index.entries.get(i)) }
-    fn reindex(&mut self) { self.pos = self.index.entries.iter().enumerate().map(|(i, e)| (e.path.clone(), i)).collect(); self.gen += 1; }
+    fn reindex(&mut self) { self.pos = self.index.entries.iter().enumerate().map(|(i, e)| (e.path.clone(), i)).collect(); self.gen += 1; self.path_gen+=1; }
     pub fn rescan(&mut self) {
         if self.scanning { self.rescan_pending = true; return; }
         self.cancel.store(true, Ordering::Relaxed); self.cancel = Arc::new(AtomicBool::new(false)); self.analysing = (0, 0);
@@ -407,4 +415,17 @@ impl Library {
     }
     #[allow(dead_code)]
     pub fn busy(&self) -> bool { self.scanning || self.analysing.1 > 0 }
+}
+
+#[cfg(test)]
+mod browse_tests {
+    use super::*;
+    #[test]
+    fn filename_sort_and_folder_filter_use_real_paths_and_component_boundaries() {
+        let entries=vec![Entry{path:"/Music/House/Zebra.wav".into(),title:"AAA".into(),..Default::default()},Entry{path:"/Music/House/Deep/alpha.flac".into(),title:"ZZZ".into(),..Default::default()},Entry{path:"/Music/House2/first.mp3".into(),..Default::default()}];
+        let filter=Filter{query:"",key_ref:None,bpm_ref:None};
+        assert_eq!(browse::folder_view(&entries,&filter,SortCol::Filename,true,Some("/Music/House")),vec![1,0]);
+        let nodes=browse::folder_tree(&["/Music".into()],&entries);
+        assert_eq!(nodes[0].count,3);assert_eq!(nodes[0].children[0].name,"House");assert_eq!(nodes[0].children[0].count,2);assert_eq!(nodes[0].children[0].children[0].name,"Deep");
+    }
 }

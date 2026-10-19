@@ -2,13 +2,25 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.28](https://img.shields.io/badge/status-beta%200.28-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.29](https://img.shields.io/badge/status-beta%200.29-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.28:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.29:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.24: source ranges, protected transitions and processed A/B monitoring](docs/screenshots/transition-workbench.png)
+
+## New in 0.29
+
+**A clearer Library:** actual filenames lead each taller row, with artist/title below and compact BPM, key and duration columns. Resize the Library panel vertically and the folder sidebar horizontally. Search includes filenames; Details reveals folder/genre, and hovering shows the complete path and imported metadata.
+
+Browse indexed music folders and subfolders with track counts. Advanced DJ imports, path remapping and source management live in collapsed sidebar sections. Sorting and filtering retain file-based selections safely while background analysis updates the index.
+
+Drag anywhere in a row onto a deck or sample lane. The marker shows the snapped destination, and imported clips retain the visible start position, including source offsets and resolved beat ratios. Selected files follow the visible list order. **Add last in mix** and double-click use the normal end-of-mix arrangement. Each batch is one undo step; failed files are reported while valid files continue, and a locked/replaced document rejects late imports.
+
+![MixStudio Library with actual filenames and indexed folder navigation, rendered from the real widgets with synthetic fixture files](docs/screenshots/library.png)
+
+See the [Library workflow and verification](docs/LIBRARY-2026-10-19.md).
 
 ## New in 0.28
 

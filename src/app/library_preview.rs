@@ -1,0 +1,16 @@
+// Manual offscreen rendering of the real widgets, using synthetic public fixture names.
+#[test]
+#[ignore = "manual headless library preview"]
+fn export_library_preview_meshes() {
+    let (mut a,ctx,_rx,dir)=setup();ctx.set_pixels_per_point(1.0);a.lib.cfg.folders=vec!["/Music".into()];a.lib.states.insert("/Music".into(),crate::library::FolderState::Available(12));
+    let names=[("House","Amber Coast - Sunrise Avenue (Extended Mix).flac","Amber Coast","Sunrise Avenue",126.0,"8A"),("House","Blue District - Keep It Moving (Club Mix).wav","Blue District","Keep It Moving",126.0,"9A"),("House/Deep","Coastal Drive - After Hours (Original Mix).mp3","Coastal Drive","After Hours",124.0,"8B"),("Disco","Disco Arcade - Summer Nights (Extended).flac","Disco Arcade","Summer Nights",122.0,"7A"),("House","Echo Rooms - Together Again (Vocal Mix).wav","Echo Rooms","Together Again",126.0,"8A"),("House/Deep","Late Arrival - Midnight Connection.flac","Late Arrival","Midnight Connection",124.0,"9A"),("House","Neon Avenue - One More Time (Dub Mix).mp3","Neon Avenue","One More Time",128.0,"10A"),("Techno","North Station - The Signal (Original Mix).wav","North Station","The Signal",130.0,"9A"),("Disco","Pacific State - Warm Light (Radio Edit).mp3","Pacific State","Warm Light",120.0,"7B"),("House","Silver Line - Need Your Love (Extended Mix).flac","Silver Line","Need Your Love",126.0,"8A"),("Techno","Urban Motion - Magnetic Fields.wav","Urban Motion","Magnetic Fields",132.0,"10A"),("House","Velvet Groove - All Night Long (Instrumental).flac","Velvet Groove","All Night Long",126.0,"8B")];
+    a.lib.index.entries=names.into_iter().map(|(folder,file,artist,title,bpm,key)|crate::library::Entry{path:format!("/Music/{folder}/{file}"),folder:"/Music".into(),artist:artist.into(),title:title.into(),bpm:Some(bpm),key:Some(key.into()),duration:372.0,..Default::default()}).collect();a.lib.gen+=1;
+    let mut textures=vec![];let mut output=None;
+    for _ in 0..3 {
+        let out=ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1440.0,600.0))),..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|a.library_tab(ui));});
+        for (id,delta) in &out.textures_delta.set {let pixels:Vec<[u8;4]>=match &delta.image{egui::ImageData::Color(i)=>i.pixels.iter().map(|c|c.to_array()).collect(),egui::ImageData::Font(i)=>i.srgba_pixels(None).map(|c|c.to_array()).collect()};textures.push(serde_json::json!({"id":format!("{id:?}"),"size":delta.image.size(),"pos":delta.pos,"pixels":pixels}));}
+        output=Some(out);
+    }
+    let output=output.unwrap();let meshes:Vec<_>=ctx.tessellate(output.shapes,output.pixels_per_point).into_iter().filter_map(|p|match p.primitive{egui::epaint::Primitive::Mesh(m)=>Some(serde_json::json!({"texture":format!("{:?}",m.texture_id),"clip":[p.clip_rect.min.x,p.clip_rect.min.y,p.clip_rect.max.x,p.clip_rect.max.y],"indices":m.indices,"vertices":m.vertices.iter().map(|v|serde_json::json!([v.pos.x,v.pos.y,v.uv.x,v.uv.y,v.color.to_array()])).collect::<Vec<_>>()})),_=>None}).collect();
+    std::fs::write("/tmp/mixstudio-library-preview.json",serde_json::to_vec(&serde_json::json!({"width":1440,"height":600,"textures":textures,"meshes":meshes})).unwrap()).unwrap();drop(a);std::fs::remove_dir_all(dir).ok();
+}

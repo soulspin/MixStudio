@@ -57,6 +57,7 @@ impl App {
     }
     fn activate_project(&mut self,target:Target) {
         self.stop_transition_audition();self.stop_comparison();self.clear_section();self.loop_on=false;self.set_loop(None);let _=self.out.tx.send(Cmd::Play(false));self.seek(0.0);let _=self.out.tx.send(Cmd::ResetLevels);self.source_levels.clear();
+        self.library_ui.geometry=None;
         self.stem_volume_drag=None; self.samples=Default::default(); self.drag=None;self.grid_drag=None;self.tl_drag=None;self.scratch_win=false;self.scratch_play=None;self.tempo_drag=None;
         self.auto_track=None;self.auto_drag=None;self.auto_solo=false;self.auto_rect=Rect::NOTHING;self.tc_drag=None;self.tc_side=0;
         self.fx_sel=None;self.fx_drag=None;self.live_fx=None;self.live_last=None;self.stem_sel=None;self.stem_drag=false;

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.29.0-beta
+
+- Redesign Library around readable filename-first rows, compact metadata columns, complete-path tooltips, details, search and filename sorting. Add a vertically resizable Library pane.
+- Add indexed folder/subfolder browsing with counts and collapse advanced import/source controls. Cache folder structure independently from BPM/key updates; preserve Shift anchors by file identity.
+- Drag whole rows to a visible snapped deck/sample destination, preserving list order and offset-aware positions. Decode and probe source caches in the background; apply each batch as one undoable edit with document/lock/error handling.
+- Resolve beat ratios between batch appends so following songs use the correct predecessor length. Add pointer-event, mixed-tempo, selection, folder-boundary, failure and document regressions.
+
 ## 0.28.0-beta
 
 - Add independent curved clip fade-in/out envelopes, direct length/shape handles and double-click linear reset; legacy shapes default to linear.
