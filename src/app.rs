@@ -741,8 +741,8 @@ impl App {
                 });
                 let mid = ui.max_rect().center().x; let cur = ui.cursor().min.x; ui.add_space((mid - 200.0 - cur).max(10.0));
                 egui::Frame::none().fill(C::from_rgb(28, 29, 33)).rounding(8.0).inner_margin(3.0).show(ui, |ui| { ui.horizontal(|ui| {
-                    for (k, n) in ["▭ Carousel", "☰ Playlist", "|||\\ Library", "〰 Studio"].iter().enumerate() {
-                        if seg_button(ui, n, self.top == k).on_hover_text(if k == 0 { "Coming in v2" } else { "" }).clicked() { self.top = k; if k == 1 { self.tab = Tab::Playlist; } if k == 2 { self.tab = Tab::Library; } }
+                    for (k, n) in [(1, "☰ Playlist"), (2, "|||\\ Library"), (3, "〰 Studio")] {
+                        if seg_button(ui, n, self.top == k).clicked() { self.top = k; if k == 1 { self.tab = Tab::Playlist; } if k == 2 { self.tab = Tab::Library; } }
                     } }); });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("⚙", |ui| {
@@ -2248,7 +2248,7 @@ mod section_ui_tests {
                 let status=texts.iter().find(|t|t.galley.text().starts_with(if loading>0 {"Analysing"}else{"Auto-order"})).expect("visible status");
                 let sr=Rect::from_min_size(status.pos,status.galley.size());
                 for t in &texts {
-                    if ["▭ Carousel","☰ Playlist","|||\\ Library","〰 Studio","Export","?","⚙"].contains(&t.galley.text()) {
+                    if ["☰ Playlist","|||\\ Library","〰 Studio","Export","?","⚙"].contains(&t.galley.text()) {
                         assert!(!sr.intersects(Rect::from_min_size(t.pos,t.galley.size())),"status overlaps {} at {width}",t.galley.text());
                     }
                 }
