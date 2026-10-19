@@ -12,12 +12,34 @@ fn library_result(name:&str)->(PathBuf,Result<(Audio,Analysis,bool),String>) {
     (PathBuf::from(name),Ok((Audio{sr:8000,l:vec![0.0;256000],r:vec![0.0;256000]},Analysis{title:name.into(),bpm:120.0,offset:0.375,duration:32.0,peak_sr:8000,..Default::default()},false)))
 }
 #[test]
-fn library_drop_keeps_the_visible_start_position_order_and_one_undo() {
+fn library_main_deck_drops_align_downbeats_despite_different_file_lead_ins() {
+    let (mut a,_ctx,_rx,dir)=setup();let id=a.persistence.id.clone();
+    let mut second=library_result("two.wav");second.1.as_mut().unwrap().1.offset=0.21;
+    a.finish_library_batch(&id,Some(library_drop::Target{lane:0,beat:20.0}),vec![library_result("one.wav"),second]);
+    a.mix.resolve_ratios();
+    for t in &a.mix.tracks[1..] {
+        assert!((t.start_beat/4.0-(t.start_beat/4.0).round()).abs()<1e-9,"main deck downbeat lost its bar alignment: {}",t.start_beat);
+    }
+    assert_eq!(a.mix.tracks[1].start_beat,20.0);
+    drop(a);std::fs::remove_dir_all(dir).ok();
+}
+#[test]
+fn library_main_drop_at_zero_keeps_the_intro_and_unsnapped_targets_stay_fractional() {
+    let (mut a,_ctx,_rx,dir)=setup();let id=a.persistence.id.clone();
+    a.finish_library_batch(&id,Some(library_drop::Target{lane:1,beat:0.0}),vec![library_result("intro.wav")]);
+    let t=a.mix.tracks.last().unwrap();assert_eq!(t.start_beat,4.0);assert!(t.vis_start(0.0)>=0.0);
+    a.snapping=Snapping::Off;
+    a.finish_library_batch(&id,Some(library_drop::Target{lane:0,beat:20.375}),vec![library_result("fractional.wav")]);
+    assert_eq!(a.mix.tracks.last().unwrap().start_beat,20.375);
+    drop(a);std::fs::remove_dir_all(dir).ok();
+}
+#[test]
+fn library_drop_keeps_the_downbeat_position_order_and_one_undo() {
     let (mut a,_ctx,_rx,dir)=setup();let before=serde_json::to_string(&a.mix).unwrap();a.loading=2;
     let id=a.persistence.id.clone();a.finish_library_batch(&id,Some(library_drop::Target{lane:1,beat:20.0}),vec![library_result("Z-first.wav"),library_result("A-second.wav")]);
     assert_eq!(a.loading,0);assert_eq!(a.undo.len(),1);assert_eq!(a.mix.tracks.len(),3);
     assert_eq!(a.mix.tracks[1].title,"Z-first.wav");assert_eq!(a.mix.tracks[2].title,"A-second.wav");assert_eq!(a.mix.tracks[1].lane,1);assert_eq!(a.mix.tracks[2].lane,0);
-    assert!((a.mix.tracks[1].vis_start(0.0)-20.0).abs()<1e-8);assert!((a.mix.tracks[2].vis_start(0.0)-52.0).abs()<1e-8);
+    assert_eq!(a.mix.tracks[1].start_beat,20.0);assert_eq!(a.mix.tracks[2].start_beat,52.0);
     a.do_undo();assert_eq!(serde_json::to_string(&a.mix).unwrap(),before);drop(a);std::fs::remove_dir_all(dir).ok();
 }
 #[test]

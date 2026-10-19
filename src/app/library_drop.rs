@@ -24,7 +24,7 @@ impl App {
             }
         }
         egui::show_tooltip_at_pointer(ctx,egui::LayerId::new(egui::Order::Tooltip,egui::Id::new("library_drag_tip")),egui::Id::new("library_drag_tip"),|ui|{
-            ui.label(target.map(|t|format!("{} file(s) → {} {} · bar {:.0}, beat {:.0}",payload.0.len(),if t.lane<2{"Deck"}else{"Sample"},if t.lane<2{t.lane+1}else{t.lane-1},(t.beat/4.0).floor()+1.0,t.beat.rem_euclid(4.0).floor()+1.0)).unwrap_or_else(||"Drop on a deck or sample lane".into()));
+            ui.label(target.map(|t|format!("{} file(s) → {} {} · {} at bar {:.0}, beat {:.0}{}",payload.0.len(),if t.lane<2{"Deck"}else{"Sample"},if t.lane<2{t.lane+1}else{t.lane-1},if t.lane<2{"downbeat"}else{"clip start"},(t.beat/4.0).floor()+1.0,t.beat.rem_euclid(4.0).floor()+1.0,if t.lane<2{" (intro kept at timeline start)"}else{""})).unwrap_or_else(||"Drop on a deck or sample lane".into()));
         });
         if ctx.input(|i|i.pointer.primary_released()) {egui::DragAndDrop::clear_payload(ctx);if let Some(target)=target{self.request_library_batch(payload.0.clone(),Some(target));}}
     }
@@ -53,8 +53,18 @@ impl App {
                 let reference=self.mix.bpm_at(cursor);let track=&mut self.mix.tracks[i];
                 let multiplier=crate::model::auto_mult(track.bpm,reference);track.beat_mult=multiplier;
                 track.trans.ratio=crate::model::RATIOS.iter().position(|(_,m)|m.is_some_and(|m|(m-multiplier).abs()<1e-8)).unwrap_or(1) as u8;
-                track.start_beat+=cursor-track.vis_start(0.0);let length=track.end(0.0)-track.vis_start(0.0);
+                // Decks align their analysed downbeat, not the file edge: leading
+                // audio is rarely an exact beat/bar. Samples retain exact edge placement.
+                if lane<2 {
+                    track.start_beat=cursor;
+                    let missing=(-track.vis_start(0.0)).max(0.0);
+                    let step=match self.snapping {Snapping::Off=>0.0,Snapping::Free=>1.0,Snapping::Half=>2.0,Snapping::Full=>4.0};
+                    // Keep pre-downbeat audio accessible at the timeline's left boundary.
+                    if missing>0.0 {track.start_beat+=if step>0.0 {(missing/step).ceil()*step}else{missing};}
+                } else {track.start_beat+=cursor-track.vis_start(0.0);}
+                let length=track.end(0.0)-track.vis_start(0.0);
                 cursor=track.end(0.0)-if lane<2{(self.bars as f64*4.0).min(length/2.0)}else{0.0};
+                if lane<2 {cursor=self.snap_beat(cursor).max(0.0);}
             }
             selected=Some(i);
         }

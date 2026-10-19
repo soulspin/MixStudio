@@ -157,8 +157,15 @@ mod tests {
             let dir=std::path::Path::new(&dir);std::fs::create_dir_all(dir).unwrap();
             let audio=vec![Some(std::sync::Arc::new(aa)),Some(std::sync::Arc::new(ab))];
             let snap=std::sync::Arc::new(crate::engine::Snap::build(&mix,&audio));
-            let (l,r)=crate::engine::render_offline(snap,16000,s,e);
-            crate::engine::write_wav(&dir.join("overlap-original.wav"),&l,&r,16000).unwrap();
+            let sr=std::env::var("MIXSTUDIO_DIAGNOSTIC_SR").ok().and_then(|v|v.parse().ok()).unwrap_or(16000);
+            let (l,r)=crate::engine::render_offline(snap,sr,s,e);
+            crate::engine::write_wav(&dir.join("overlap-original.wav"),&l,&r,sr).unwrap();
+            if std::env::var_os("MIXSTUDIO_DIAGNOSTIC_SOLOS").is_some() {
+                for deck in 0..2 {let mut solo=mix.clone();solo.decks[1-deck].mute=true;
+                    let (l,r)=crate::engine::render_offline(std::sync::Arc::new(crate::engine::Snap::build(&solo,&audio)),sr,s,e);
+                    crate::engine::write_wav(&dir.join(format!("deck-{deck}.wav")),&l,&r,sr).unwrap();
+                }
+            }
             if std::env::var_os("MIXSTUDIO_DIAGNOSTIC_REANALYSE").is_some() {
                 let mut corrected=mix.clone();
                 for (t,audio) in corrected.tracks.iter_mut().zip(&audio) {

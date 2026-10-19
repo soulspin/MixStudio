@@ -10,13 +10,19 @@
 
 ![MixStudio 0.24: source ranges, protected transitions and processed A/B monitoring](docs/screenshots/transition-workbench.png)
 
+## Fixed in 0.29.1
+
+Library drops onto main decks now align the analysed downbeat to the snapped destination. Aligning the raw file edge could leave two songs with different introductory offsets off the shared beat/bar grid. Following deck imports use the active snapping setting; samples keep their exact visible-edge placement. Drops near timeline zero retain introductory audio by moving the anchor forward by complete snap units.
+
+This placement repair does not replace saved beatgrids or change the audio renderer. The current source-analysis and musical downbeat limitations still apply. See the [beatmatch investigation](docs/BEATMATCH-2026-10-19.md).
+
 ## New in 0.29
 
 **A clearer Library:** actual filenames lead each taller row, with artist/title below and compact BPM, key and duration columns. Resize the Library panel vertically and the folder sidebar horizontally. Search includes filenames; Details reveals folder/genre, and hovering shows the complete path and imported metadata.
 
 Browse indexed music folders and subfolders with track counts. Advanced DJ imports, path remapping and source management live in collapsed sidebar sections. Sorting and filtering retain file-based selections safely while background analysis updates the index.
 
-Drag anywhere in a row onto a deck or sample lane. The marker shows the snapped destination, and imported clips retain the visible start position, including source offsets and resolved beat ratios. Selected files follow the visible list order. **Add last in mix** and double-click use the normal end-of-mix arrangement. Each batch is one undo step; failed files are reported while valid files continue, and a locked/replaced document rejects late imports.
+Drag anywhere in a row onto a deck or sample lane. The marker shows the snapped destination, and main-deck clips align their analysed downbeat (corrected in 0.29.1); sample clips retain the visible start position, including source offsets and resolved beat ratios. Selected files follow the visible list order. **Add last in mix** and double-click use the normal end-of-mix arrangement. Each batch is one undo step; failed files are reported while valid files continue, and a locked/replaced document rejects late imports.
 
 ![MixStudio Library with actual filenames and indexed folder navigation, rendered from the real widgets with synthetic fixture files](docs/screenshots/library.png)
 
