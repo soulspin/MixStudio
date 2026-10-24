@@ -109,7 +109,7 @@ impl App {
     }
     pub(super) fn comparison_tab(&mut self,ui:&mut egui::Ui) {
         egui::ScrollArea::vertical().id_salt("comparison_workbench").show(ui,|ui| {
-            self.beatmatch_ui(ui);
+            self.beatmatch_ui(ui,true);
             let Some(i)=self.sel_in.filter(|i|self.mix.logical_transitions().iter().any(|x|x.1==*i)) else { return; };
             if self.comparison.incoming!=Some(i) { self.open_comparison(i); }
             if self.alignment_stamp(i).as_ref()!=Some(&self.comparison.stamp) {
@@ -118,8 +118,8 @@ impl App {
             let Some((o,i,s,e))=self.mix.logical_transitions().into_iter().find(|x|x.1==i) else { return; };
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Compare attacks");
-                if ui.button("← 4 beats").clicked(){self.comparison.center-=4.0;}
-                if ui.button("4 beats →").clicked(){self.comparison.center+=4.0;}
+                if ui.button("⬅ 4 beats").clicked(){self.comparison.center-=4.0;}
+                if ui.button("4 beats ➡").clicked(){self.comparison.center+=4.0;}
                 if ui.button("At playhead").clicked(){self.comparison.center=self.beat();}
                 ui.label("View:"); for span in [2.0,4.0,8.0,16.0,32.0] { ui.selectable_value(&mut self.comparison.span,span,format!("{span:.0} beats")); }
                 ui.checkbox(&mut self.comparison.metro,"Preview metronome");
@@ -197,11 +197,11 @@ impl App {
             if self.beat()>=from && self.beat()<=to { let xx=x(self.beat()); painter.line_segment([pos2(xx,rect.top()),pos2(xx,rect.bottom())],Stroke::new(1.5_f32,C::WHITE)); }
             ui.horizontal_wrapped(|ui| {
                 for (slot,a) in self.comparison.anchors.iter_mut().enumerate() { if let Some(a)=a {
-                    ui.label(format!("{}: beat {:.0} ← source",if slot==0{"A"}else{"B"},a.beat+1.0));
+                    ui.label(format!("{}: beat {:.0} ⬅ source",if slot==0{"A"}else{"B"},a.beat+1.0));
                     ui.add_enabled(editable,egui::DragValue::new(&mut a.source).speed(0.001).fixed_decimals(3).suffix(" s"));
                 } }
                 if let [Some(a),Some(b)]=self.comparison.anchors { match crate::gridtools::anchored(&self.mix.tracks[i],a,b) {
-                    Ok((_,p))=>{ui.label(format!("Preview: {:.3} → {:.3} BPM ({:+.3}%)",self.mix.tracks[i].bpm,p.bpm,p.percent)); if ui.add_enabled(editable,egui::Button::new("Apply both anchors")).clicked(){self.apply_comparison_anchors();}},
+                    Ok((_,p))=>{ui.label(format!("Preview: {:.3} ➡ {:.3} BPM ({:+.3}%)",self.mix.tracks[i].bpm,p.bpm,p.percent)); if ui.add_enabled(editable,egui::Button::new("Apply both anchors")).clicked(){self.apply_comparison_anchors();}},
                     Err(e)=>{ui.colored_label(C::LIGHT_YELLOW,e);},
                 } }
             });

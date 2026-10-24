@@ -25,6 +25,12 @@ pub fn anchored(t:&Track,a:Anchor,b:Anchor)->Result<(Track,Adjustment),String> {
     Ok((fixed,Adjustment{bpm,percent:(1.0/scale-1.0)*100.0}))
 }
 
+/// Apply a measured correction line as two anchors, fixing phase and a uniform tempo error together.
+pub fn measured(t:&Track,line:[(f64,f64);2])->Result<(Track,Adjustment),String> {
+    let g=t.grid_raw(); let [(a,ca),(b,cb)]=line;
+    anchored(t,Anchor{beat:a,source:g.sec(a)+ca},Anchor{beat:b,source:g.sec(b)+cb})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

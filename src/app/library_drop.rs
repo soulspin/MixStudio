@@ -24,7 +24,7 @@ impl App {
             }
         }
         egui::show_tooltip_at_pointer(ctx,egui::LayerId::new(egui::Order::Tooltip,egui::Id::new("library_drag_tip")),egui::Id::new("library_drag_tip"),|ui|{
-            ui.label(target.map(|t|format!("{} file(s) → {} {} · {} at bar {:.0}, beat {:.0}{}",payload.0.len(),if t.lane<2{"Deck"}else{"Sample"},if t.lane<2{t.lane+1}else{t.lane-1},if t.lane<2{"downbeat"}else{"clip start"},(t.beat/4.0).floor()+1.0,t.beat.rem_euclid(4.0).floor()+1.0,if t.lane<2{" (intro kept at timeline start)"}else{""})).unwrap_or_else(||"Drop on a deck or sample lane".into()));
+            ui.label(target.map(|t|format!("{} file(s) ➡ {} {} · {} at bar {:.0}, beat {:.0}{}",payload.0.len(),if t.lane<2{"Deck"}else{"Sample"},if t.lane<2{t.lane+1}else{t.lane-1},if t.lane<2{"downbeat"}else{"clip start"},(t.beat/4.0).floor()+1.0,t.beat.rem_euclid(4.0).floor()+1.0,if t.lane<2{" (intro kept at timeline start)"}else{""})).unwrap_or_else(||"Drop on a deck or sample lane".into()));
         });
         if ctx.input(|i|i.pointer.primary_released()) {egui::DragAndDrop::clear_payload(ctx);if let Some(target)=target{self.request_library_batch(payload.0.clone(),Some(target));}}
     }

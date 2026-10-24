@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add one-click **Auto-align B** to the Transition, Beatgrid and Compare tabs: measure the overlap, apply a consistent offset or tempo-drift correction to the incoming grid as one Undo step, then measure again to show the remaining error. Uncertain evidence is never applied.
+- Correct consistent tempo drift from the measurement (two fitted anchors, at most ±2 %) instead of only reporting it.
+- Measure outro/intro overlaps whose drums do not coincide against the shared mix grid, using A's attacks up to 16 bars before and B's up to 16 bars after the overlap.
+- Nudge B by ±1/±10 ms from the Transition tab, or with `,` / `.` (Shift for 10 ms).
+- Fix symbols that rendered as "□" (arrows, tab icons, key-change labels) and add a regression test that checks every UI string against the bundled fonts.
+- Tidy panel styling: section headings, track fact chips, hairline borders and grouped Track/Transition controls. Beatmatch now sits at the top of the Transition tab.
+- Developer: `MIXSTUDIO_SCREENSHOT=out.png` saves the app's own frame and exits; `MIXSTUDIO_DEMO_TAB=beatmatch` demonstrates Auto-align.
+
 ## 0.29.0-beta
 
 - Redesign Library around readable filename-first rows, compact metadata columns, complete-path tooltips, details, search and filename sorting. Add a vertically resizable Library pane.

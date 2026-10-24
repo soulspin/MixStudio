@@ -47,12 +47,12 @@ pub fn bpm_score(a: f64, b: f64) -> (f64, f64) {
     ((-(pct / 4.0).powi(2)).exp() * pen, pct)
 }
 
-/// Transition rating: (score 0..1, 0 = green / 1 = yellow / 2 = red, label like "8A→9A ±1 · +1.6%").
+/// Transition rating: (score 0..1, 0 = green / 1 = yellow / 2 = red, label like "8A➡9A ±1 · +1.6%").
 pub fn rate(a: &Item, b: &Item) -> (f64, u8, String) {
     let (ks, kn) = key_score(&a.key, &b.key); let (bs, pct) = bpm_score(a.bpm, b.bpm);
     let s = 0.5 * ks + 0.5 * bs;
     let col = if ks >= 0.84 && bs >= 0.6 { 0 } else if ks >= 0.4 && bs >= 0.25 { 1 } else { 2 };
-    (s, col, format!("{}→{} {kn} · {pct:+.1}%", a.key, b.key))
+    (s, col, format!("{}➡{} {kn} · {pct:+.1}%", a.key, b.key))
 }
 
 pub struct Opts { pub mode: Mode, pub curve: Curve }

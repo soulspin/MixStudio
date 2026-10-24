@@ -8,6 +8,10 @@ pub enum Verdict { Stable, Drifting, Uncertain }
 pub struct Report {
     pub verdict: Verdict, pub offset_ms: f64, pub drift_ms: f64, pub jitter_ms: f64,
     pub correction_seconds: f64, pub pairs: usize, pub sampled: usize,
+    /// Robust line through the per-beat source corrections: (mix beat, source seconds) at the first and last paired beat.
+    pub line: [(f64, f64); 2],
+    /// False when each track was measured against the shared mix grid separately (drums did not overlap).
+    pub paired: bool,
 }
 #[derive(Clone,Debug)]
 pub struct BeatEvidence { pub beat:f64, pub reliable:bool, pub percussion:bool }
@@ -76,6 +80,51 @@ fn combined_attack(a:&Audio,center:f64,period:f64)->Option<(f64,bool)> {
     }
 }
 
+/// Beats reached outside the overlap when its drums do not coincide: A before it, B after it.
+const REACH_BEATS: f64 = 64.0;
+
+// One track's attacks against its own grid: (mix beat, offset in beats, local beat period in source seconds).
+fn grid_attacks(t:&Track,au:&Audio,from:f64,to:f64)->Vec<(f64,f64,f64)> {
+    let g=t.grid(); let lo=from.max(t.vis_start(0.0)).ceil() as i64+1; let hi=to.min(t.end(0.0)).floor() as i64-1;
+    if hi<=lo { return vec![]; }
+    let stride=((hi-lo) as f64/96.0).ceil().max(1.0) as usize; let mut v=vec![];
+    for k in (lo..hi).step_by(stride) {
+        let beat=k as f64; if g.cuts().any(|c|(c-beat).abs()<0.5) { continue; }
+        let p=g.region_sec(beat+0.5,beat)-g.region_sec(beat-0.5,beat);
+        if let Some((x,_))=combined_attack(au,g.sec(beat),p) { v.push((beat,x/p,p)); }
+    }
+    v
+}
+
+/// Outro/intro overlaps often have drums on only one side at a time. Both clips share the mix grid,
+/// so measure A's attacks (overlap and before) and B's (overlap and after) separately and compare.
+fn grid_relative(a:&Track,aa:&Audio,b:&Track,ab:&Audio,start:f64,end:f64,bpm_at:&impl Fn(f64)->f64)->Option<Report> {
+    let xa=grid_attacks(a,aa,start-REACH_BEATS,end); let xb=grid_attacks(b,ab,start,end+REACH_BEATS);
+    if xa.len()<12 || xb.len()<12 || xb.last()?.0-xb[0].0<16.0 { return None; }
+    let mut av:Vec<_>=xa.iter().map(|p|p.1).collect(); let ma=median(&mut av);
+    let mut ad:Vec<_>=xa.iter().map(|p|(p.1-ma).abs()).collect(); let ja=median(&mut ad);
+    let rel:Vec<(f64,f64)>=xb.iter().map(|&(k,y,p)|(k,(y-ma)*p)).collect();
+    let mid=(rel[0].0+rel[rel.len()-1].0)*0.5; let bpm=bpm_at(mid); if !bpm.is_finite() || bpm<=0.0 { return None; }
+    let period=xb.iter().map(|p|p.2).sum::<f64>()/xb.len() as f64; let ms=60000.0/bpm/period; // source seconds -> mix ms
+    let line=fit_line(&rel,mid); let slope=(line[1].1-line[0].1)/(line[1].0-line[0].0).max(1e-9);
+    let mut dev:Vec<_>=rel.iter().map(|(k,s)|(s-line[0].1-slope*(k-line[0].0)).abs()).collect();
+    let jb=median(&mut dev); let tail=dev[(dev.len()*9/10).min(dev.len()-1)];
+    let mut sv:Vec<_>=rel.iter().map(|p|p.1).collect(); let correction=median(&mut sv);
+    let jitter=(jb*ms).max(ja*60000.0/bpm); let drift=(line[1].1-line[0].1)*ms;
+    let verdict=if jitter>6.0 || tail*ms>15.0 { Verdict::Uncertain } else if drift.abs()>8.0 { Verdict::Drifting } else { Verdict::Stable };
+    Some(Report{verdict,offset_ms:correction*ms,drift_ms:drift,jitter_ms:jitter,correction_seconds:correction,pairs:xb.len(),sampled:xa.len(),line,paired:false})
+}
+
+// Median pairwise slope and median intercept tolerate a few outlying attacks.
+fn fit_line(points:&[(f64,f64)],mid:f64)->[(f64,f64);2] {
+    let mut slopes=vec![];
+    for i in 0..points.len() { for j in i+1..points.len() { if points[j].0-points[i].0>=4.0 { slopes.push((points[j].1-points[i].1)/(points[j].0-points[i].0)); } } }
+    let slope=if slopes.is_empty() {0.0} else {median(&mut slopes)};
+    let mut centred:Vec<_>=points.iter().map(|(x,y)|y-slope*(x-mid)).collect(); let c=median(&mut centred);
+    let at=|x:f64|(x,c+slope*(x-mid));
+    [at(points[0].0),at(points[points.len()-1].0)]
+}
+
 /// Read-only evidence for the ignored local-corpus diagnostic; residuals are not ground truth.
 #[cfg(test)]
 pub(crate) fn diagnostic_attacks(a: &Audio, center: f64, period: f64) -> (Option<f64>, Option<f64>, Option<(f64, bool)>) {
@@ -108,7 +157,9 @@ pub fn inspect(a:&Track, aa:&Audio, b:&Track, ab:&Audio, start:f64, end:f64, bpm
             let delta=y/pb-x/pa; pairs.push((beat,delta*60000.0/bpm)); source.push(delta*pb);
         }
     }
-    if pairs.len()<12 || pairs.len()*2<sampled || pairs.last().zip(pairs.first()).is_none_or(|(last,first)|last.0-first.0<(end-start)*0.6) { return Err(format!("Not enough consistent rhythm attacks ({}/{} beats). Listen and adjust manually.",pairs.len(),sampled)); }
+    if pairs.len()<12 || pairs.len()*2<sampled || pairs.last().zip(pairs.first()).is_none_or(|(last,first)|last.0-first.0<(end-start)*0.6) {
+        return grid_relative(a,aa,b,ab,start,end,&bpm_at).ok_or_else(||format!("Not enough consistent rhythm attacks ({}/{} beats), even around the overlap. Listen and adjust manually.",pairs.len(),sampled));
+    }
     let mut slopes=vec![];
     for i in 0..pairs.len() { for j in i+1..pairs.len() { if pairs[j].0-pairs[i].0>=4.0 { slopes.push((pairs[j].1-pairs[i].1)/(pairs[j].0-pairs[i].0)); } } }
     if slopes.is_empty() { return Err("Not enough attack coverage to measure drift.".into()); }
@@ -116,11 +167,12 @@ pub fn inspect(a:&Track, aa:&Audio, b:&Track, ab:&Audio, start:f64, end:f64, bpm
     let mut centered:Vec<_>=pairs.iter().map(|(x,y)|y-slope*(x-mid)).collect(); let offset=median(&mut centered);
     let mut deviations:Vec<_>=pairs.iter().map(|(x,y)|(y-offset-slope*(x-mid)).abs()).collect();
     let jitter=median(&mut deviations); let tail=deviations[(deviations.len()*9/10).min(deviations.len()-1)]; let drift=slope*(pairs.last().unwrap().0-pairs[0].0);
+    let line=fit_line(&pairs.iter().map(|p|p.0).zip(source.iter().copied()).collect::<Vec<_>>(),mid);
     let correction=median(&mut source);
     let mut source_spread:Vec<_>=source.iter().map(|s|(s-correction).abs()).collect(); source_spread.sort_by(f64::total_cmp);
     let source_tail=source_spread[(source_spread.len()*9/10).min(source_spread.len()-1)];
     let verdict=if jitter>6.0 || tail>15.0 || (drift.abs()<=8.0 && source_tail>0.008) { Verdict::Uncertain } else if drift.abs()>8.0 { Verdict::Drifting } else { Verdict::Stable };
-    Ok(Report {verdict,offset_ms:offset,drift_ms:drift,jitter_ms:jitter,correction_seconds:correction,pairs:pairs.len(),sampled})
+    Ok(Report {verdict,offset_ms:offset,drift_ms:drift,jitter_ms:jitter,correction_seconds:correction,pairs:pairs.len(),sampled,line,paired:true})
     })(); (report,evidence)
 }
 
@@ -214,6 +266,26 @@ mod tests {
         let a=track();let aa=kicks(0.0,0.0);let ab=kicks(0.0,0.040);
         let r=measure(&a,&aa,&a,&ab,2.0,42.0,|_|120.0).unwrap();
         assert_eq!(r.verdict,Verdict::Drifting,"{r:?}");assert!(r.drift_ms>25.0,"{r:?}");
+    }
+    #[test]
+    fn outro_intro_overlap_without_coinciding_drums_is_measured_against_the_grid() {
+        let mut a=track(); a.duration=40.0; let mut b=a.clone();
+        let kicks_at=|range:std::ops::Range<usize>,shift:f64|{let times:Vec<_>=range.map(|i|0.25+i as f64*0.5+shift).collect();let (l,r)=crate::testgen::synth_kicks(&times,40.0,16000);Audio{sr:16000,l,r}};
+        let aa=kicks_at(0..24,0.0); let ab=kicks_at(38..79,0.015);
+        let r=measure(&a,&aa,&b,&ab,20.0,40.0,|_|120.0).unwrap();
+        assert!(!r.paired && r.verdict==Verdict::Stable,"{r:?}"); assert!((r.offset_ms-15.0).abs()<2.0,"{r:?}");
+        b.adjust_grid(crate::model::GridScope::All,30.0,r.correction_seconds).unwrap();
+        let after=measure(&a,&aa,&b,&ab,20.0,40.0,|_|120.0).unwrap(); assert!(after.offset_ms.abs()<2.0,"{after:?}");
+        let silent=Audio{sr:16000,l:vec![0.0;640000],r:vec![0.0;640000]};
+        assert!(measure(&a,&aa,&b,&silent,20.0,40.0,|_|120.0).is_err());
+    }
+    #[test]
+    fn measured_drift_line_corrects_phase_and_tempo_together() {
+        let a=track();let aa=kicks(0.0,0.0);let ab=kicks(0.012,0.040);
+        let r=measure(&a,&aa,&a,&ab,2.0,42.0,|_|120.0).unwrap(); assert_eq!(r.verdict,Verdict::Drifting,"{r:?}");
+        let (fixed,p)=crate::gridtools::measured(&a,r.line).unwrap(); assert!(p.percent<0.0 && p.percent>-0.5,"{p:?}");
+        let after=measure(&a,&aa,&fixed,&ab,2.0,42.0,|_|120.0).unwrap();
+        assert_eq!(after.verdict,Verdict::Stable,"{after:?}"); assert!(after.offset_ms.abs()<2.0 && after.drift_ms.abs()<3.0,"{after:?}");
     }
     #[test]
     fn silence_sustained_bass_and_short_overlaps_do_not_produce_a_correction() {

@@ -36,17 +36,17 @@ impl App {
                 ui.add(egui::Label::new(dim(&format!("{k}: {s}"))).truncate()).on_hover_text(&s); }); }
         ui.horizontal(|ui| { ui.add(egui::TextEdit::singleline(&mut self.lib_imp).hint_text("…or paste a library file path").desired_width(150.0));
             if ui.add_enabled(!self.lib_imp.trim().is_empty(), egui::Button::new("Import")).clicked() { let p = PathBuf::from(self.lib_imp.trim()); self.lib_imp.clear(); self.import_file(p); } });
-        ui.label(dim("rekordbox.xml (File ▸ Export Collection in xml format), Traktor collection.nml, _Serato_/database V2, Engine Library/Database2/m.db, iTunes / Music Library.xml. Read-only."));
+        ui.label(dim("rekordbox.xml (File › Export Collection in xml format), Traktor collection.nml, _Serato_/database V2, Engine Library/Database2/m.db, iTunes / Music Library.xml. Read-only."));
         ui.separator();
         egui::CollapsingHeader::new("Path remapping").id_salt("remaps").show(ui, |ui| {
             if !self.lib_remaps_init { self.lib_remaps = self.lib.cfg.remaps.clone(); self.lib_remaps_init = true; }
-            ui.label(dim("Rewrite path prefixes of imported tracks, e.g. C:\\Users\\Mike\\Music → /mnt/windows/Users/Mike/Music"));
+            ui.label(dim("Rewrite path prefixes of imported tracks, e.g. C:\\Users\\Mike\\Music ➡ /mnt/windows/Users/Mike/Music"));
             let mut del = None;
             for (i, r) in self.lib_remaps.iter_mut().enumerate() { ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut r.from).hint_text("from").desired_width(95.0)); ui.label("→");
+                ui.add(egui::TextEdit::singleline(&mut r.from).hint_text("from").desired_width(95.0)); ui.label("➡");
                 ui.add(egui::TextEdit::singleline(&mut r.to).hint_text("to").desired_width(95.0)); if ui.small_button("✖").clicked() { del = Some(i); } }); }
             if let Some(i) = del { self.lib_remaps.remove(i); }
-            ui.horizontal(|ui| { if ui.button("＋ Add rule").clicked() { self.lib_remaps.push(Default::default()); }
+            ui.horizontal(|ui| { if ui.button("+ Add rule").clicked() { self.lib_remaps.push(Default::default()); }
                 let changed = self.lib_remaps != self.lib.cfg.remaps;
                 if ui.add_enabled(changed, egui::Button::new("Apply")).clicked() { let v: Vec<_> = self.lib_remaps.iter().filter(|r| !r.from.trim().is_empty()).cloned().collect(); self.lib_remaps = v.clone(); self.lib.set_remaps(v); self.lib_cur_key = None; } });
         });
