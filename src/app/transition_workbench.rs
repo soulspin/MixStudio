@@ -90,6 +90,9 @@ impl App {
             self.sel_in=Some(i);
             ui.label(egui::RichText::new(format!("A: {}  |  B: {}",self.mix.tracks[o].title,self.mix.tracks[i].title)).strong());
             ui.label(format!("Overlap: mix bars {:.2}–{:.2} · {:.2} bars · {:.1} seconds",s/4.0+1.0,e/4.0+1.0,(e-s)/4.0,self.mix.secs(s,e)));
+            section(ui,"Beatmatch");
+            self.beatmatch_ui(ui,false);
+            section(ui,"Details");
             for (side,label) in [(0,"A outgoing"),(1,"B incoming")] {
                 let ranges=self.transition_source_ranges(i,side);
                 let line=ranges.iter().map(|(_,_,a,b)|format!("{} – {}",source_time(*a),source_time(*b))).collect::<Vec<_>>().join("; ");
@@ -104,7 +107,7 @@ impl App {
             self.harmony_ui(ui,o,i);
             ui.horizontal_wrapped(|ui| {self.song_gain_control(ui,o,"A gain");self.song_gain_control(ui,i,"B gain");});
             self.transition_listen_ui(ui,i);
-            ui.separator();
+            section(ui,"Shape");
             ui.horizontal_wrapped(|ui| {
                 ui.label("Overlap length:");
                 for bars in [4,8,16,32] {
@@ -129,11 +132,11 @@ impl App {
             let stems_ready=[o,i].iter().all(|i|self.stems.contains_key(&self.mix.tracks[*i].path));
             ui.label(if stems_ready {"Stems ready: stem choices and preset processing are active."}else{"Stems unavailable: the preset volume curve is used. Separate both tracks to hear individual stem choices."});
             if !stems_ready && ui.button("Separate stems for both").clicked() {self.request_stems(o);self.request_stems(i);}
-            if ui.button("Open Beatgrid: measure beatmatch").clicked() {self.stop_transition_audition();self.sel=Some(i);self.tab=Tab::Grid;}
+            if ui.button("Open Beatgrid ➡ source grid tools").clicked() {self.stop_transition_audition();self.sel=Some(i);self.tab=Tab::Grid;}
         });
     }
     fn transition_listen_ui(&mut self,ui:&mut egui::Ui,incoming:usize) {
-        ui.separator();
+        section(ui,"Listen");
         ui.horizontal_wrapped(|ui| {
             ui.label("Before:");ui.add(egui::DragValue::new(&mut self.transition_pre).range(0..=8).suffix(" bars"));
             ui.label("After:");ui.add(egui::DragValue::new(&mut self.transition_post).range(0..=8).suffix(" bars"));
