@@ -138,9 +138,14 @@ impl App {
         }
     }
     pub(super) fn library_tab(&mut self,ui:&mut egui::Ui) {
+        // The folder list is its own card; a gutter and a solid scrollbar keep it from running into the files.
         egui::SidePanel::left("library_navigation_v3").resizable(true).default_width(260.0).width_range(170.0..=400.0)
-            .frame(egui::Frame::none().inner_margin(egui::Margin{left:0.0,right:10.0,top:2.0,bottom:0.0}))
-            .show_inside(ui,|ui|{egui::ScrollArea::vertical().id_salt("library_navigation_scroll").auto_shrink([false,false]).show(ui,|ui|self.library_sidebar(ui));});
+            .frame(egui::Frame::none().fill(C::from_rgb(32,33,38)).rounding(Rounding::same(6.0)).inner_margin(egui::Margin::same(8.0)).outer_margin(egui::Margin{left:0.0,right:6.0,top:0.0,bottom:0.0}))
+            .show_inside(ui,|ui|{ui.spacing_mut().scroll=egui::style::ScrollStyle::solid();ui.spacing_mut().scroll.bar_inner_margin=6.0;
+                egui::ScrollArea::vertical().id_salt("library_navigation_scroll").auto_shrink([false,false]).show(ui,|ui|self.library_sidebar(ui));});
+        egui::Frame::none().inner_margin(egui::Margin{left:10.0,right:0.0,top:0.0,bottom:0.0}).show(ui,|ui|self.library_files(ui));
+    }
+    fn library_files(&mut self,ui:&mut egui::Ui) {
         use crate::library::SortCol;
         let mut append=false;
         ui.add_space(2.0);
