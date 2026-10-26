@@ -1,6 +1,6 @@
 [package]
 name = "mixstudio"
-version = "0.29.1-beta"
+version = "0.30.0-beta"
 authors = ["soulspin"]
 license = "MIT"
 description = "A DAW-style DJ mixing app where every song is its own clip on a timeline"

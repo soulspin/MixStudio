@@ -111,11 +111,11 @@ fn grid_relative(a:&Track,aa:&Audio,b:&Track,ab:&Audio,start:f64,end:f64,bpm_at:
     let mut av:Vec<_>=xa.iter().map(|p|p.1).collect(); let ma=median(&mut av);
     // A is the reference: its own grid must hold steady over the measured span, or B would be aligned to a drifting grid.
     let own:Vec<(f64,f64)>=xa.iter().map(|&(k,x,p)|(k,x*p)).collect(); let amid=(own[0].0+own[own.len()-1].0)*0.5;
-    let aline=fit_line(&own,amid); let aslope=(aline[1].1-aline[0].1)/(aline[1].0-aline[0].0).max(1e-9);
+    let aline=fit_line(&own,amid);
     let mut ad:Vec<_>=xa.iter().map(|p|(p.1-ma).abs()).collect(); let ja=median(&mut ad);
-    let mut ares:Vec<_>=own.iter().map(|(k,s)|(s-aline[0].1-aslope*(k-aline[0].0)).abs()).collect(); ares.sort_by(f64::total_cmp);
     let a_ms=60000.0/bpm_at(amid)/(xa.iter().map(|p|p.2).sum::<f64>()/xa.len() as f64);
-    let a_unsteady=(aline[1].1-aline[0].1).abs()*a_ms>8.0 || ares[(ares.len()*9/10).min(ares.len()-1)]*a_ms>15.0;
+    // Drift is what misaligns B; a few outlying A attacks (offbeat bass notes) do not, as only A's median is used.
+    let a_unsteady=(aline[1].1-aline[0].1).abs()*a_ms>8.0;
     let rel:Vec<(f64,f64)>=xb.iter().map(|&(k,y,p)|(k,(y-ma)*p)).collect();
     let mid=(rel[0].0+rel[rel.len()-1].0)*0.5; let bpm=bpm_at(mid); if !bpm.is_finite() || bpm<=0.0 { return None; }
     let period=xb.iter().map(|p|p.2).sum::<f64>()/xb.len() as f64; let ms=60000.0/bpm/period; // source seconds -> mix ms
