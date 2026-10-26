@@ -126,3 +126,21 @@ fn library_keys_select_all_visible_and_enter_adds_them_in_order() {
     assert!(a.loading>before,"Enter should start adding the selection");
     drop(a);std::fs::remove_dir_all(dir).ok();
 }
+#[test]
+fn library_preview_plays_the_source_at_its_own_tempo_and_restores_the_mix() {
+    let (mut a,ctx,_rx,dir)=setup();a.tab=Tab::Library;
+    let mut seed=7u32;let noise:Vec<f32>=(0..8000*32).map(|_|{seed=seed.wrapping_mul(1664525).wrapping_add(1013904223);((seed>>8) as f32/8388608.0-1.0)*0.4}).collect();
+    let an=Analysis{bpm:123.0,offset:0.3,duration:32.0,peak_sr:8000,peaks:vec![[80,100,90];600],..Default::default()};
+    a.store.insert("test.wav".into(),(Arc::new(Audio{sr:8000,l:noise.clone(),r:noise.clone()}),Arc::new(an)));
+    a.seek(10.0);a.loop_on=true;a.set_loop(Some((8.0,16.0)));
+    a.toggle_listen("test.wav".into(),"Test".into(),&ctx);
+    assert!(a.listen.as_ref().is_some_and(|l|l.ready.is_some()));assert_eq!(a.timeline_beat(),10.0,"the mix playhead must stay put");assert_eq!(a.active_loop,None);
+    let snap=a.build_playback_snap();assert_eq!(snap.tracks.len(),1);
+    let beat=a.beat();let sec=0.3+(beat-4.0)*60.0/123.0;assert!((sec-32.0/3.0).abs()<1e-6,"no drop detected: start a third of the way in");
+    let (l,_)=crate::engine::render_offline(Arc::new(snap),8000,beat,beat+2.0);let s0=(sec*8000.0).round() as usize;let n=l.len().min(4000);
+    let corr=|lag:i64|{let src=&noise[(s0 as i64+lag) as usize..];let (mut xy,mut xx,mut yy)=(0.0,0.0,0.0);for i in 200..n {let (x,y)=(l[i] as f64,src[i] as f64);xy+=x*y;xx+=x*x;yy+=y*y;}xy/(xx*yy).sqrt().max(1e-12)};
+    assert!((-3..=3).map(corr).fold(f64::MIN,f64::max)>0.9,"preview is not the unstretched source at the cue");
+    a.stop_listen();assert!(a.listen.is_none());assert_eq!(a.beat(),10.0);assert_eq!(a.active_loop,Some((8.0,16.0)));assert!(a.loop_on);
+    a.toggle_listen("test.wav".into(),"Test".into(),&ctx);a.tab=Tab::Track;a.validate_listen();assert!(a.listen.is_none(),"leaving the Library stops the preview");
+    drop(a);std::fs::remove_dir_all(dir).ok();
+}

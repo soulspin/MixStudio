@@ -49,6 +49,7 @@ impl App {
         if self.comparison.preview_end.is_some_and(|end|self.beat()>=end) { self.stop_comparison(); }
     }
     pub(super) fn build_playback_snap(&self)->Snap {
+        if let Some(snap)=self.listen_snap() { return snap; }
         let mut normal=self.build_snap();
         self.filter_transition_audition(&mut normal);
         if self.tab!=Tab::Compare { return normal; }

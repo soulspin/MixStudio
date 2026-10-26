@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Library preview:** ▶ on any row plays the file on its own at its original tempo, from the first detected drop (else a third of the way in). A preview bar shows a clickable waveform, position and stop; Space or a second click stops it. The mix playhead, loop and timeline view are restored, and leaving the Library or reaching the end stops it. Never written to the project or export.
 - **Library layout:** Library mode (top bar) gives the browser most of the window while keeping both decks visible as drop targets; the Library tab opens larger. Both sizes are remembered separately.
 - Folder sidebar rows truncate long names and right-align counts (full path on hover); a compact header with **+ Add**.
 - Search field with icon and inline clear; framed filter toggles; sort direction as an arrow; analysis progress bar.
