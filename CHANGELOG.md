@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Beat analysis (cache v14):** the beat tracker could drift smoothly off a steady track's kicks (tens of ms, without skipping a beat), or sit on offbeat hi-hats or a constant ~50 ms beside soft kicks. Two songs at 125/126 BPM then fell out of sync after import even though both were stretched to the mix tempo. Analysis now searches kicks on a straight clock directly and adopts it when it is supported throughout the source and lands clearly more kicks; a final check moves a grid half a beat or by its median kick offset only when that lands at least half as many kicks again. Supported tempo changes are left alone.
+- Beatgrid flags Dynamic clips whose saved grid differs from the current analysis and offers **Use current analysis**. Reset to analysis now keeps the downbeat on a whole beat with the clip's previous bar phase.
+- The grid-relative beatmatch measurement no longer reports a stable offset when the outgoing track drifts against its own grid.
 - Add one-click **Auto-align B** to the Transition, Beatgrid and Compare tabs: measure the overlap, apply a consistent offset or tempo-drift correction to the incoming grid as one Undo step, then measure again to show the remaining error. Uncertain evidence is never applied.
 - Correct consistent tempo drift from the measurement (two fitted anchors, at most ±2 %) instead of only reporting it.
 - Measure outro/intro overlaps whose drums do not coincide against the shared mix grid, using A's attacks up to 16 bars before and B's up to 16 bars after the overlap.

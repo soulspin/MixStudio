@@ -218,7 +218,7 @@ impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } 
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 13;
+pub const ANALYSIS_VERSION: u32 = 14;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -253,6 +253,8 @@ pub struct RhythmEvidence {
     pub grid_supported:bool,
     /// A widely supported steady clock replaced a large DP phase excursion.
     #[serde(default)] pub phase_bridged:bool,
+    /// The tracked grid sat on offbeat hi-hats or beside the kicks and was moved onto them.
+    #[serde(default)] pub kick_phase_shifted:bool,
     /// Relative bass-accent separation for the chosen bar phase, not confidence.
     #[serde(default)] pub downbeat_bass_margin:Option<f64>,
 }
@@ -836,6 +838,12 @@ fn detect_rhythm(m:&[f32],sr:u32)->(f64,f64,Vec<f64>,RhythmEvidence) {
     beats=refined;
     if let Some((clock,inliers))=phase::bridge(&beats,&observed,bpm) {
         beats=clock;observed=inliers;evidence.phase_bridged=true;
+    } else if let Some((clock,inliers))=phase::steady_clock(m,sr,&beats,bpm) {
+        beats=clock;observed=inliers;evidence.phase_bridged=true;
+    }
+    if let Some(shifted)=phase::kick_phase(m,sr,&beats) {
+        for o in &mut observed { let k=(o.0.max(0.0) as usize).min(beats.len()-1); o.1+=shifted[k]-beats[k]; }
+        beats=shifted;evidence.kick_phase_shifted=true;
     }
     evidence.observed_beats=observed.len();evidence.predicted_beats=beats.len();
     let duration=m.len() as f64/sr as f64;

@@ -1855,6 +1855,21 @@ impl App {
             let _=tx.send(Msg::BeatCheck(stamp,report,evidence)); ctx.request_repaint();
         });
     }
+    /// A Dynamic clip whose saved map no longer matches the analysis cache (an older detector version).
+    fn stale_analysis(&self, i:usize)->bool {
+        let Some(t)=self.mix.tracks.get(i) else { return false; };
+        let Some((_,an))=self.store.get(&t.path) else { return false; };
+        t.grid_mode==1 && t.sections.is_empty() && t.map.as_ref().is_some_and(|m|m.beats.len()!=an.beats.len() || m.beats.iter().zip(&an.beats).any(|(a,b)|(a-b).abs()>0.002))
+    }
+    fn reset_to_analysis(&mut self, i:usize) {
+        let Some((_,an))=self.mix.tracks.get(i).and_then(|t|self.store.get(&t.path)).cloned() else { return; };
+        self.snapshot(); let old=self.mix.tracks[i].clone(); let t=&mut self.mix.tracks[i];
+        t.bpm=an.bpm; t.offset=an.offset; t.map=an.beat_map(); t.flex=an.flex_map(); t.grid_mode=1;
+        // Keep the source file roughly in place, but land the new downbeat on a whole beat
+        // with the clip's previous bar phase: a moved downbeat must not leave kicks between mix beats.
+        let kept=old.vis_start(0.0)+(t.start_beat-t.vis_start(0.0)); let bar=old.start_beat.round();
+        t.start_beat=bar+((kept-bar)/4.0).round()*4.0;
+    }
     /// Measured corrections need an editable, uncut incoming clip.
     fn beat_check_editable(&self, incoming:usize)->bool {
         !self.arrangement_locked() && self.transition_members(incoming).is_some_and(|groups|groups.iter().all(|g|g.len()==1)) && self.mix.tracks[incoming].sections.is_empty()
@@ -1929,6 +1944,10 @@ impl App {
                     if a.rhythm.as_ref().is_some_and(|e|e.phase_bridged) {ui.colored_label(C::LIGHT_YELLOW,"Source analysis: a supported steady clock bridges an inconsistent passage. Reset to analysis adopts it; listen and check bar 1.");}
                     if let Some(note)=a.rhythm.as_ref().and_then(|e|e.warning()) {ui.colored_label(C::LIGHT_YELLOW,note);}
                 }
+                if self.stale_analysis(i) { ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(C::LIGHT_YELLOW,"This clip keeps a beatgrid from an older analysis. The current analysis differs; adopt it and listen.");
+                    if ui.add_enabled(editable,egui::Button::new("Use current analysis")).clicked() { self.reset_to_analysis(i); }
+                }); }
                 if !t.sections.is_empty() { ui.colored_label(C::LIGHT_YELLOW,"Grid editing is protected after section edits. Undo the section edits to correct the source grid first."); }
                 if t.grid_mode==2 { ui.colored_label(C::LIGHT_YELLOW,"Flex can cause audible tempo jumps. Dynamic is recommended for steady tracks."); }
                 ui.horizontal_wrapped(|ui| {
@@ -1946,13 +1965,7 @@ impl App {
                     }
                     ui.label(egui::RichText::new("− earlier / + later grid markers in source audio").color(DIM));
                     if ui.add_enabled(editable,egui::Button::new("Set downbeat at target")).on_hover_text("Reassign this beat as a downbeat on the nearest mix bar. This changes the clip anchor.").clicked() { self.snapshot(); self.set_downbeat_at(i,beat); }
-                    if ui.add_enabled(editable && self.store.contains_key(&t.path),egui::Button::new("Reset to analysis")).clicked() {
-                        if let Some((_,an))=self.store.get(&t.path).cloned() { self.snapshot(); let old=self.mix.tracks[i].clone(); let t=&mut self.mix.tracks[i];
-                            t.bpm=an.bpm; t.offset=an.offset; t.map=an.beat_map(); t.flex=an.flex_map(); t.grid_mode=1;
-                            // Keep the source file's placement on the mix timeline.
-                            t.start_beat=old.vis_start(0.0)+(t.start_beat-t.vis_start(0.0));
-                        }
-                    }
+                    if ui.add_enabled(editable && self.store.contains_key(&t.path),egui::Button::new("Reset to analysis")).clicked() { self.reset_to_analysis(i); }
                     ui.collapsing("Fixed BPM…",|ui| {
                         ui.label("Sets a linear grid. Dynamic restores analysed timing."); let mut bpm=t.bpm;
                         ui.add_enabled(editable,egui::DragValue::new(&mut bpm).range(40.0..=250.0).speed(0.01).fixed_decimals(2).suffix(" BPM"));
@@ -2312,6 +2325,16 @@ mod section_ui_tests {
         a.open_comparison(1); a.comparison.anchors=[Some(crate::gridtools::Anchor{beat:24.0,source:4.020}),Some(crate::gridtools::Anchor{beat:48.0,source:16.050})];
         a.mix.tracks[1].offset+=0.001; let before=serde_json::to_string(&a.mix).unwrap(); a.apply_comparison_anchors();
         assert_eq!(serde_json::to_string(&a.mix).unwrap(),before); assert!(a.undo.is_empty());
+        drop(a); std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn reset_to_analysis_lands_a_moved_downbeat_on_the_same_bar_phase() {
+        let (mut a,_ctx,_rx,dir)=setup(); let path=a.mix.tracks[0].path.clone();
+        let an=a.store[&path].1.clone(); let mut t=a.mix.tracks[0].clone();
+        t.offset=an.offset+0.23; t.map=None; t.grid_mode=0; t.start_beat=276.0; a.mix.tracks[0]=t; // an old grid on the offbeat
+        a.reset_to_analysis(0);
+        let t=&a.mix.tracks[0]; assert_eq!(t.offset,an.offset); assert_eq!(t.start_beat,276.0,"downbeat must stay on the bar, not between beats");
+        assert_eq!(a.undo.len(),1);
         drop(a); std::fs::remove_dir_all(dir).ok();
     }
     #[test]
