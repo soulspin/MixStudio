@@ -8,161 +8,17 @@
 
 > ⚠️ **Beta 0.30:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
-![MixStudio 0.24: source ranges, protected transitions and processed A/B monitoring](docs/screenshots/transition-workbench.png)
+![MixStudio 0.30: Auto-align at the top of the Transition tab](docs/screenshots/beatmatch.png)
 
 ## New in 0.30
 
-**Beatmatch that stays on the kicks.** Two steady tracks at 125 and 126 BPM could drift apart after import even though both were stretched to the mix tempo. The beat tracker sometimes slid smoothly off a steady track's kicks by tens of milliseconds, or settled on the offbeat hi-hats or a constant ~50 ms beside soft kicks. Analysis now searches the kicks on a straight clock directly and adopts it only when it is supported throughout the file and lands clearly more kicks; a final check moves a grid half a beat or by its median kick offset under the same rule. Supported tempo changes are left alone. On a read-only sweep of 301 analysable local tracks, 72 grids changed, all landing more kicks (9,907 → 22,914 beats on the kick); 229 were unchanged.
-
-Cache version 14 refreshes derived analysis. **Saved project grids stay unchanged:** Beatgrid now flags a Dynamic clip whose saved grid differs from the current analysis and offers **Use current analysis**. Reset keeps the downbeat on a whole beat in the clip's previous bar phase. Listen and check bar 1 afterwards.
-
-**One-click Auto-align.** **Transition → Beatmatch → Auto-align B** measures the overlap, applies a consistent offset or tempo-drift correction to the incoming grid as one Undo step, then measures again so you see what remains. Uncertain evidence is never applied. Outro/intro overlaps whose drums do not coincide are measured against the shared mix grid, using A up to 16 bars before and B up to 16 bars after the overlap; a drifting outgoing grid makes the result Uncertain instead of falsely stable. Nudge B by ±1/±10 ms with the buttons or `,` / `.` (Shift for 10 ms).
-
-![MixStudio 0.30: Auto-align at the top of the Transition tab, after correcting a deliberate 15 ms offset](docs/screenshots/beatmatch.png)
-
-**A roomier Library with preview.** Library mode gives the browser most of the window while both decks stay visible as drop targets. Press ▶ on any row to hear the file alone at its original tempo, from the first detected drop; click or drag the preview waveform to jump, and press Space to stop. The mix playhead, loop and timeline view are restored, and nothing enters the project or export. Folder rows truncate long names with right-aligned counts, keys show as Camelot chips, Enter adds the selection and Ctrl+A selects every visible file.
+- **Beatgrids lock to the kicks.** Analysis now catches beat maps that drift off a steady track's kicks or sit on the offbeat hi-hats, so tracks at e.g. 125 and 126 BPM stay in sync after import. Beatgrid offers **Use current analysis** for clips saved with an older grid.
+- **One-click Auto-align.** **Transition → Auto-align B** measures the overlap, corrects offset or tempo drift as one Undo step and measures again. Nudge B by ±1/±10 ms with `,` / `.`.
+- **A roomier Library with preview.** Library mode gives the browser most of the window; press ▶ on any row to hear a file at its original tempo from the first drop.
 
 ![MixStudio 0.30 Library with a preview playing, rendered from the real widgets with synthetic fixture files](docs/screenshots/library-preview.png)
 
-Symbols that rendered as "□" (arrows, tab icons, key-change labels) now use glyphs from the bundled fonts, guarded by a test. See the [0.30 beatmatch and Library verification](docs/BEATMATCH-LIBRARY-2026-10-26.md).
-
-## Fixed in 0.29.1
-
-Library drops onto main decks now align the analysed downbeat to the snapped destination. Aligning the raw file edge could leave two songs with different introductory offsets off the shared beat/bar grid. Following deck imports use the active snapping setting; samples keep their exact visible-edge placement. Drops near timeline zero retain introductory audio by moving the anchor forward by complete snap units.
-
-This placement repair does not replace saved beatgrids or change the audio renderer. The current source-analysis and musical downbeat limitations still apply. See the [beatmatch investigation](docs/BEATMATCH-2026-10-19.md).
-
-## New in 0.29
-
-**A clearer Library:** actual filenames lead each taller row, with artist/title below and compact BPM, key and duration columns. Resize the Library panel vertically and the folder sidebar horizontally. Search includes filenames; Details reveals folder/genre, and hovering shows the complete path and imported metadata.
-
-Browse indexed music folders and subfolders with track counts. Advanced DJ imports, path remapping and source management live in collapsed sidebar sections. Sorting and filtering retain file-based selections safely while background analysis updates the index.
-
-Drag anywhere in a row onto a deck or sample lane. The marker shows the snapped destination, and main-deck clips align their analysed downbeat (corrected in 0.29.1); sample clips retain the visible start position, including source offsets and resolved beat ratios. Selected files follow the visible list order. **Add last in mix** and double-click use the normal end-of-mix arrangement. Each batch is one undo step; failed files are reported while valid files continue, and a locked/replaced document rejects late imports.
-
-![MixStudio Library with actual filenames and indexed folder navigation, rendered from the real widgets with synthetic fixture files](docs/screenshots/library.png)
-
-See the [Library workflow and verification](docs/LIBRARY-2026-10-19.md).
-
-## New in 0.28
-
-**Curved clip fades:** select a song or sample, drag its corner handles to set fade length, then drag the round midpoint vertically to bend the envelope. Double-click the midpoint to restore a linear fade. Old projects keep their linear fades.
-
-**Faster samples:** Alt-drag a selected song section or stem onto Sample 1/2. Copies reference the original audio and retain arranged source cuts, beat ratios and automation. Shift-click samples or Shift-drag empty sample space to select multiple clips, then drag one to move the group with its timing intact. Alt-drag an existing sample to duplicate it.
-
-**Stem volume curves:** separate the source, then open **Track → Edit stem volumes**, or select four-stem view and **A**. Click in a stem row to add a volume point, drag it to adjust volume/time, and right-click a point to remove it. **Reset stem volumes** restores all four envelopes to 100%. These multiply existing stem mutes and transition processing, using the same engine for playback and export. Stem-edited projects prepare the required stems when opened or relinked; export waits until they are available.
-
-See the [editing workflow and verification](docs/CLIP-SAMPLE-STEMS-2026-10-18.md). Analysis and saved beatgrids are unchanged.
-
-## New in 0.27
-
-**Transition → Harmonic match** explains same, neighboring and relative major/minor Camelot keys. Open **Key details and mixing tips** for musical key names, common source-key matches and practical blend advice; **Listen together** starts the existing processed A/B audition. Unknown keys remain unknown. These are whole-track source labels, not a local harmonic measurement or confidence score. Pitch-following-tempo warnings include split fragments.
-
-![MixStudio 0.27: explained harmonic matches and processed audition](docs/screenshots/harmony-panel.png)
-
-The [Beat This! pilot](docs/BEAT-THIS-EVALUATION-2026-10-18.md) tested the official neural model locally on six music files and two authored references. It remains an optional research tool: this release keeps v13 beat analysis and does not bundle an AI runtime/model or replace saved grids. See the [harmony workflow and verification](docs/HARMONY-2026-10-18.md).
-
-## New in 0.26
-
-Fix a reproduced beatmatch failure where two correctly detected 126-BPM songs fell out of sync because a Dynamic grid followed offbeat percussion during a breakdown, drifting almost half a beat before returning. Analysis can now bridge a large phase excursion using a steady clock supported by attacks throughout the source. Supported tempo motion vetoes this correction, including temporary changes and halftime kick patterns; this remains a heuristic requiring listening.
-
-Beatgrid explains when source analysis used this correction. Cache version 13 refreshes derived analysis. **Saved project grids stay unchanged:** on an uncut source clip, use **Beatgrid → Reset to analysis** to adopt the new result, then listen and check bar 1. See the [phase-continuity investigation and verification](docs/BEATGRID-PHASE-2026-10-18.md).
-
-## New in 0.25
-
-Adjust **Song gain** in Track or for A/B in Transition; logical split fragments share the setting. Track can measure whole-source sample peak and stereo RMS in the background. RMS includes silence and is not perceived loudness or LUFS.
-
-Open **Master**, or the **M** shortcut beside the output meter, for music gain in dB, soft-clipper bypass/ceiling, and held peaks before/after clipping with peak attenuation. Measurements follow audio consumed by the device. The click keeps independent volume and shares the output ceiling. This is a sample soft clipper, not a true-peak limiter or automatic normalizer. See the [level controls and verification record](docs/LEVELS-2026-10-18.md).
-
-![MixStudio 0.25: master gain, output soft clipping and peak holds](docs/screenshots/master-levels.png)
-
-## New in 0.24
-
-The Transition tab now shows the outgoing and incoming source intervals, including arranged cuts, alongside the overlap’s mix bars and duration. Processed audition adds before/after bars, repeat, and **Monitor A / Both / Monitor B** without restarting the playhead. Project deck mute/solo is temporarily overridden; shared FX tails continue across switches. Export and saved mixer settings stay unchanged.
-
-**Protect this transition** saves its lock and disables that transition’s preset, stem and volume-curve edits. This first version freezes arrangement moves, trims, cuts, reorder and automatic beat-ratio changes while any transition is protected; unlock in Transition to edit placement. Master, FX and other transitions’ presets remain separately editable. See the [workflow and verification record](docs/TRANSITIONS-2026-10-17.md).
-
-## New in 0.23
-
-Tempo analysis no longer forces every result into 85–175 BPM. It compares rhythmic accents and bass-attack coverage when considering half/double tempo, covering explicit slow pulses, fast pulses and eighth-note percussion. Beatgrid advises checking bar 1 when the selected downbeat lacks a distinct bass accent or there is too little evidence to assess it. These checks are heuristics, not musical certainty.
-
-The [tempo and metre verification report](docs/TEMPO-METER-2026-10-16.md) separates authored rhythm references, a small visually marked waveform pilot and the unlabelled music corpus. Cache version 12 refreshes derived analysis; saved grids and edits remain intact. Use **Beatgrid → Reset to analysis** on an uncut source clip to adopt the result. Listen and check its interpretation before arranging sections.
-
-## New in 0.22
-
-Beat analysis now rejects unsupported grids from stationary noise, isolated attacks with noise and sustained carrier tones. Gain-safe onset calculations preserve very quiet rhythmic recordings. Beatgrid shows an advisory when source evidence is insufficient or sparse. The [real-file test report](docs/BEAT-ANALYSIS-2026-10-16.md) records the corpus, measured changes and limits; these are not annotated musical accuracy scores.
-
-Analysis cache version 11 refreshes derived results while retaining library tags and saved project grids. For an existing uncut source clip, use **Beatgrid → Reset to analysis** to adopt the new result; review it before section editing. Musical downbeats and half/double tempo still require listening and manual judgement.
-
-## New in 0.21.2
-
-Key lock now uses Signalsmith Stretch for cleaner vocals and polyphonic music during tempo changes. A buffered audio worker prepares playback ahead of the device callback; transport changes discard stale queued audio and the playhead follows consumed samples. See the [playback verification record](docs/PLAYBACK-2026-10-16.md).
-
-## New in 0.21
-
-This maintenance release addresses the prioritised renderer, editing and storage findings in the [application audit](docs/AUDIT-2026-10-16.md). See the [fixes and verification record](docs/MAINTENANCE-2026-10-16.md) for scope and remaining limits.
-
-- **Playback:** remove the hidden 64-track key-lock and 16-effect limits, prepare DSP state outside the audio callback, retain unchanged effect history, and clear deleted/replaced effects safely. Seek resets filters and transport history.
-- **Timing:** accurate tempo integration and loop boundaries, including tempo-floor crossings; identical rendered output across tested callback partitions. Tiny loops reanchor stretched audio. Effect starts/releases follow sample timing.
-- **Editing:** retain full transition envelopes and source-cut smoothing after splitting, keep logical fragments together when changing transition position/length, lanes or ratios, and map phrases through the source grid and arranged occurrences. Layout remains stable on later frames.
-- **File safety:** validate projects/recovery before activation or replacement, reject damaged sources where integrity can be checked, retain library metadata under unreadable subfolders, verify cached model hashes, preserve complete FX export tails, and isolate MP3 scratch files.
-
-Compare dry audition includes every split fragment. Automatic beatmatch measurement/correction and two-anchor correction require unsplit clips; correct source grids before splitting. Existing split projects saved before this release lack logical fragment identity and are not automatically regrouped. A layout that oscillates between automatic half/double ratios keeps only the conflicting ratios explicit; Undo restores the previous layout.
-
-## New in 0.20
-
-- **More precise beat/BPM analysis:** fit steady tempo from supported sample-level attacks, preserve fractional BPM, interpolate missing kicks between supported attacks, and retain rhythm in side-dominant stereo without letting a sustained stereo pad hide centred kicks. Sparse attacks cannot qualify as a precise steady fit. Dynamic remains the default; deliberate ramps keep variable timing.
-- **Existing libraries refresh:** detector version 10 invalidates old derived library BPM/key values while retaining tags. Cancelled analysis jobs cannot overwrite a newer scan.
-- **Editing and source safety:** fix duplicate automation points and drag crashes, preserve explicit beat ratios when splitting, resolve Auto-tempo reorder against the requested order, handle Unicode keys safely, and keep dropped audio in unique persistent source paths.
-
-Existing project grids and manual edits stay saved as they were. Reopen a project to load the new analysis, then use **Beatgrid → Reset to analysis** on an uncut source clip to adopt it. Correct the grid before making section edits. A displayed decimal is precision of representation, not a confidence guarantee.
-
-Read the [full audit and prioritised open issues](docs/AUDIT-2026-10-16.md). The controlled test results are not a guarantee of perfect beat counts or musical downbeats on arbitrary recordings. The renderer timing, long-set key-lock and split-transition findings were subsequently addressed in 0.21; analysis confidence and broader music validation remain ongoing work.
-
-## New in 0.19
-
-- **Autosave and recovery:** check for changes once a second and keep a separate recovery snapshot approximately every 15 seconds while editing. Disk writes run on a background worker. Startup offers recoverable copies; **Restore copy** opens one without overwriting the original and requires **Save as…**.
-- **Safer manual saves:** write a sibling temporary file, sync it, then replace the project. Keep the previous saved version beside it as `<project>.bak`. Failed writes preserve the previous file.
-- **Protected project changes and normal close:** before New/Open replaces unsaved work, wait for a confirmed recovery write. Normal close also waits for confirmation; failure leaves the current project/app open. Old file dialogs, analysis results and edit drags cannot mutate the next document.
-- **Relink moved audio:** use the project menu's **Locate missing audio…**, choose the same recording, review it and confirm. Update every split/arranged occurrence while keeping timing, beatgrids, sections, cues and phrase edits. Replacements shorter than source material used by the project are rejected; relinking has one Undo step.
-
-Use the project-name menu for **Recover unsaved projects…**, **Locate missing audio…** and recovery status/errors. **Ctrl+S** saves and **Ctrl+Shift+S** opens Save as. A `*` beside the project name indicates unsaved changes (updated on the next one-second check).
-
-Recovery files live in the app's configuration folder under `recovery` (`~/.config/mixstudio/recovery` on Linux). Keep them for later or explicitly discard an individual copy. Successful manual saving removes the active recovery and any copy restored into that document. To use a manual `.bak` backup, copy it to a `.json` filename and open that copy. Recovery snapshots are limited to 64 MiB; oversized or invalid snapshots fail visibly rather than replace a usable copy. Forced termination can lose changes made since the latest completed autosave.
-
-## New in 0.18
-
-- **Richer rhythm evidence:** combine bass attacks with broadband percussion onsets. Sparse, sustained or conflicting evidence stays uncertain. The comparison view marks weak sampled beats in yellow and supported pairs in green/cyan; unmarked beats have not been measured.
-- **Compare view:** outgoing and incoming source waveforms share a mix-beat axis, with 2–32 beat zoom, navigation, separate **Listen A / B / both** buttons and a preview metronome. Dry audition bypasses transition curves, EQ, FX and stem automation and stops at the visible range's end. It restores the exact suspended loop and stays out of project/export data.
-- **Two manual anchors:** assign two incoming source attacks to known mix beats, inspect the proposed BPM and hear/see the proposed grid before applying it. One Undo restores the old grid. The correction fits phase and a uniform tempo error while preserving the existing grid's local shape.
-
-### Correct an overlap with two anchors
-
-1. Open **Compare** (or **Beatgrid → Compare waveforms + anchors**) and select the transition. **Measure overlap** adds evidence markers; uncertain evidence does not prevent manual inspection.
-2. Choose **Set A**, set its **Target mix beat**, then click the corresponding attack in the yellow incoming waveform. Beat numbers in this view start at 1. Fine-adjust the source time below the waveforms if needed.
-3. Navigate later in the overlap, choose **Set B**, and assign a second clear attack to its target beat. Separate A and B by at least four beats; a longer interval makes drift easier to judge.
-4. Toggle **Preview proposed grid**, listen to A/B/both with the metronome, then choose **Apply both anchors** when satisfied. Until Apply, saved projects and exports retain the original grid.
-
-Anchors correct the incoming source clip and currently require unlocked editing, an uncut clip and a 1:1 beat ratio. They do not infer musical phrasing or remove arbitrary local timing errors. Correct the source grid before arranging sections; use single/following-beat edits for remaining local errors.
-
-## New in 0.17
-
-- **Dedicated Beatgrid tab:** source analysis, active grid BPM, mix BPM and beat ratio shown together. Whole-grid, single-beat and following-beat modes stay visible, with ±1/±10 ms correction, previous/next beat and zoom to target.
-- **Assisted beatmatch:** choose a transition and **Measure overlap**. A background bass-attack check reports signed offset, drift, scatter and usable beat count. Consistent evidence enables an explicit incoming-grid correction with one Undo; drifting or uncertain evidence stays advisory.
-- **Safer edits:** fractional grid anchors preserve neighbouring beat positions during single-beat edits, stale measurements cannot apply after timing changes, and arranged sections are protected from grid changes.
-- **Clearer Track tab:** reachable clip properties and stem controls; timing tools live in Beatgrid. The playback buffer fix from 0.16.1 is retained.
-
-The check compares bass attacks, not musical phrasing. Silence, sustained bass and unclear drums can leave too little evidence; listen after every correction. Single/following editing and overlap measurements currently require a 1:1 beat ratio. Correct the source grid before arranging sections.
-
-## New in 0.16
-
-- **Arrange sections inside a song:** select a beat- or bar-snapped range, repeat it, copy/paste it at the playhead, or delete it and close the gap.
-- **Ripple editing:** later songs keep their transition overlaps when a song becomes longer or shorter. Later samples, effect blocks and manual tempo points move with the edit.
-- **Audition the selection:** loop the marked section, then return to normal clip movement with **Move**. Each section edit has one Undo step.
-- **Timing fixes:** fine grid offsets stay precise, edited sections keep their original source beatgrid, and splice fades/reset handling work in the shared playback/export renderer. **Dynamic** stays the default; experimental **Flex** is selected manually.
-
-The clipboard in this first version rearranges sections **within the same source song**. It does not copy audio between different songs. Original audio files are never rewritten.
-
+Details: [release notes](docs/RELEASE-NOTES.md) · [changelog](CHANGELOG.md) · [0.30 verification](docs/BEATMATCH-LIBRARY-2026-10-26.md)
 
 ## Why
 
@@ -170,61 +26,44 @@ Live DJ software is built for performing: two decks, a crossfader, and one shot 
 
 It's native, fast, and doesn't need an account. No sign-up, no license keys, no cloud. It's your music on your machine.
 
-## Features (Beta 0.19)
+## Features
 
-- **Timeline decks:** songs alternate on Deck 1 and Deck 2 as coloured clips with 3-band waveforms (low/mid/high), beat and bar lines, bar numbers and heuristic phrase tags (Intro / Build / Drop / Breakdown / Outro). There's an overview strip, a time ruler, zoom (Ctrl+scroll), scrolling, a playhead, click-to-seek, and clip dragging with snapping (off / beat / half bar / bar).
-- **Automatic analysis:** global BPM (tempogram + full-track comb + beat regression, about 0.02 BPM), musical key (chromagram plus Krumhansl profiles) shown as **Camelot** codes, and bar 1. Results and waveforms are cached and re-analysed automatically when the analysis improves.
-- **Dynamic beatgrids:** every beat is tracked (dynamic-programming beat tracking, refined to the kick attack on a ripple-free low-band envelope and smoothed over 16 beats, so soft intro kicks and clicky main kicks land on the same grid), so tracks that drift in tempo (live-played, older or AI-generated material) still stay locked. The Beatgrid tab shows the analysis BPM, active grid and mix tempo. Projects saved before 0.3 load with the old fixed grid.
-- **Beat-locked time-stretch:** every track plays at the mix tempo through its beat map, so the stretch ratio changes continuously and each beat lands on a mix beat (kicks within a few ms in the self-tests, even against a drifting track). Key lock (on by default) uses a built-in WSOLA stretcher that keeps the pitch; grains containing a kick or snare attack are placed exactly on the beat map, so attacks don't shift when a track is sped up or slowed down. Switch it off for classic varispeed. Playback and export share the same engine.
-- **Editable beatgrid:** nudge ±1/±10 ms, Alt+drag the grid on a clip, set the downbeat (Shift+click a beat line or "Set downbeat at target"). These work on beat maps too. BPM ×2 / ÷2, **tap tempo** (a hand-set BPM switches the track to a fixed grid), and reset to analysis.
-- **Beatgrid editor:** zoom in until beat markers (▼) appear on the clips. Use the persistent **Beatgrid** mode controls (or hover a marker for the popup): **Adjust full grid** (drag shifts the whole beat map), **Beat + following** (beats up to one bar to the left stay anchored and the following beats stretch; the tempo change is shown in %), or **Single beat**. Right-click a marker for *Set downbeat here* / *Set first beat here*. Fixed grids are turned into an editable beat map on the first edit, playback and export follow every edit immediately, and every edit can be undone. Correct the source beatgrid before arranging sections; grid changes are protected after section edits.
-- **Section editing:** choose **Select** above the timeline and drag a range on one waveform. The existing snap setting chooses beats, half bars or bars. **Ctrl+C / Ctrl+V** copies and inserts within the same source song at the playhead; **Ctrl+D** repeats directly after the selection; **Delete + close gap** shortens the song. Following songs and their transitions move together, as do later samples, effect blocks and manual tempo nodes. **Loop selection** auditions the range. Original audio stays untouched; edits are saved in the mix JSON and each command has one Undo step. **Move** restores normal clip dragging. Section edges have short splice fades, and continuous source ranges merge automatically.
-- **Timeline editing:** **Ctrl+E** splits the clip under the mouse (or at the playhead) into two clips that keep their source offsets. Drag a clip's left/right edge to trim or extend it, and drag a track's end onto the next clip to close a gap. Drag a transition's blue bar to move the incoming track. Drag a track down into a sample lane (or a sample up onto the decks). **Alt+drag** a sample to duplicate it, and drag the white squares on a sample to set its fade-in/out. Moves and trims snap magnetically to the playhead, clip edges and transition boundaries (yellow snap line), otherwise to the grid.
-- **AI stem separation:** one click, or automatically for new tracks, splits a song into **drums, bass, melody and vocals** with [HT-Demucs](https://github.com/facebookresearch/demucs). It runs in the background through ONNX Runtime, on your **NVIDIA GPU via CUDA** when available, otherwise on the CPU. Stems are cached on disk, so each track is separated only once.
-- **Per-stem transitions:** when both tracks have stems, the overlap shows four real stem lanes, and the Drums / Bass / Melody / Vocals choices (**None / Swap / Crossfade / Full**) drive the audio in playback and export. Swap the bass at the drop, keep the incoming vocals out, or let the drums ride. Without stems, the preset's volume curve is used.
-- **Stem editing per track:** the **1 / 2 / 4** buttons in a clip's title bar switch between the full waveform, instrumental / vocals, and drums / bass / melody / vocals lanes. **Ctrl+drag** on a lane selects a range; right-click it to **Mute selection** (shown hatched), **Unmute selection**, or **Copy to sample lane**, which renders that stem range to a real audio clip (saved in `~/.cache/mixstudio/clips`) placed in sync on a sample lane. Mutes apply in playback and export, with or without key lock. If the stem model isn't downloaded yet, MixStudio offers to download it. ⚙ → *Transition stem colours* switches stems inside transitions between normal, dimmed and inverted colours.
-- **Automation:** the **A** button in a clip's title bar shows multi-point automation lanes for **volume, low / mid / high EQ and filter** over the waveform. Pick a parameter (or **Solo** it), click to add a point, drag to move, right-click to delete. Points move with the clip. **Z** zooms the decks vertically. The Transition tab has its own multi-point volume curves for the outgoing and incoming track.
-- **Effect blocks:** in the **Effects** tab, add **Reverb, Echo / delay, Flanger** or **Filter sweep** blocks to a deck, a sample lane or the master. They show as coloured strips on the timeline (drag to move, drag an edge to resize); reverb and echo ring out past the block end (tail). Parameters: mix, decay/feedback, depth, time. The **XY pad** auditions an effect live on the master while the mix plays; release and **Commit to a block** to keep it. Save any block as a **preset** (`~/.config/mixstudio/fx-presets.json`). Automation and effects apply in playback and export.
-- **Tempo lane:** choose **Constant** (the mix tempo), **Auto** (every track at its own tempo, gliding through each transition), **Manual** (draw tempo nodes in the tempo lane: click to add, drag, right-click to delete) or **Fixed ramp** (start → end BPM across the mix, set in the Master tab). The engine follows the continuous tempo curve in playback and export.
-- **Stretch mode per track** (Track tab): **Key lock** (WSOLA, keeps the pitch), **Vinyl** (varispeed, pitch follows tempo) or **Beat slice** (each beat plays at its original speed from the beat start), or the mix default.
-- **Export formats** (Master tab): **WAV 16-bit, WAV 24-bit, FLAC 24-bit** (built-in, pure Rust) and **MP3 320 kbps** (through ffmpeg when it's installed).
-- **Transitions:** overlaps become transition regions with presets that act on the audio: **Crossfade**, **Bass swap**, **High to low**, **Low to high** (filter sweeps) and **Echo out**. You can set the overlap length (4/8/16/32 bars), and the volume curves are drawn on the clips.
-- **Mixer:** 3-band EQ (High/Mid/Low), filter (LP ↔ HP), volume, solo and mute per deck, plus level meters and a master meter.
-- **Auto-order:** one click reorders the playlist for smooth transitions. Every pair of tracks is scored on Camelot key (same key, ±1, relative A/B, with energy-boost moves +2 / +7 weighted lower) and tempo (including half/double time). An optional energy curve (build up, peak in the middle, or flat) is also scored. A greedy start plus simulated annealing and 2-opt finds the order, taking about 20 ms for 100 tracks. Choose *Balanced*, *Harmonic first* or *Tempo first* in the ⏷ menu next to the button. Keep the first track in place, or lock any track with 🔒 in the playlist. The layout and beat-matched transitions are rebuilt, and Undo restores the old order.
-- **Compatibility indicators:** every transition shows a green / yellow / red badge with the key move and tempo change (e.g. `8A→9A ±1 · +1.6%`), on the timeline and in the playlist's *Next transition* column.
-- **Library:** add your music folders once (📁 *Add folder*). They're scanned recursively in the background (mp3, wav, flac, ogg, m4a/aac, aiff), and title, artist, album, genre and duration are read from the tags. The folder list is saved in `~/.config/mixstudio/library.json` and rescanned at every start; the index is incremental (path, size and modification time), so only new or changed files are read and removed files disappear. BPM and key are analysed in the background with limited concurrency (shared with the normal analysis cache) and a progress bar. The table is sortable (Title, Artist, BPM, Key, Duration, Genre, Folder), has a search box and **key-compatible** / **BPM ±%** filters relative to the selected (or current) track, and stays fast with 10 000+ files (virtualized rows). Double-click, *Add to mix*, or drag the selection onto the timeline; Ctrl/Shift for multi-select. Unplugged or failing drives show as *not available* / *not responding*; every disk access has a timeout, so a dying disk can't hang the scan, and their tracks stay in the index until the drive is back.
-- **Sample lanes:** drop extra audio on Sample 1/2. It's synced to the mix tempo.
-- **Metronome:** a click on mix beats, accented on the downbeat, with its own volume. It's never exported.
-- **Undo/redo**, **save/load mixes as JSON**, **export** of the whole mix (WAV, FLAC, MP3), and **drag and drop** of audio files (mp3, wav, flac, ogg, m4a).
+**Timeline and tempo**
+- Songs alternate on Deck 1 and Deck 2 as clips with 3-band waveforms, beat/bar lines, phrase tags (Intro / Build / Drop / Breakdown / Outro), an overview strip and snapping (off / beat / half bar / bar).
+- Every track is time-stretched through its beat map onto one mix tempo: **Constant**, **Auto** (each track at its own tempo, gliding through transitions), **Manual** tempo nodes or a **Fixed ramp**. Beat ratios (1:2, 2:3 …) lock half- and double-time tracks.
+- Key lock with Signalsmith Stretch, or Vinyl (varispeed) and Beat slice per track. Playback and export share one engine.
+
+**Analysis and beatgrids**
+- Automatic BPM, Camelot key, downbeat, phrases and a dynamic beat map per track, cached and refreshed when the detector improves.
+- Grid modes per clip (Fixed, Dynamic, Flex, Imported, Manual), ±1/±10 ms corrections, single-beat and beat-and-following edits, tap tempo, ×2/÷2 and two-anchor corrections in **Compare**.
+- **Auto-align** and **Measure** check paired bass and percussion attacks in each overlap (or against the mix grid when the drums don't coincide) and only apply consistent evidence.
+
+**Transitions and sound**
+- Presets (Crossfade, Bass swap, High to low, Low to high, Echo out), overlap length, multi-point volume curves, protected transitions and processed A/B audition.
+- AI stem separation (HT-Demucs via ONNX Runtime, GPU or CPU) with per-stem transition choices, stem mutes, stem volume curves and stem-to-sample copies.
+- Per-deck 3-band EQ, filter, volume, mute/solo; automation lanes; effect blocks (reverb, echo, flanger, filter sweep, scratch) with an XY pad and presets; master gain, soft clipper and peak meters.
+- Harmonic-match explanations and green/yellow/red compatibility badges for every transition; **Auto-order** sorts a playlist by key, tempo and energy.
+
+**Editing and library**
+- Non-destructive section editing (copy, repeat, delete + close gap, loop), split, trim, curved clip fades, sample lanes and Alt-drag sample copies. Every edit has one Undo step.
+- Library of indexed music folders with folder browsing, search, key/BPM filters, background BPM/key analysis and preview; read-only import from Rekordbox, Traktor, Serato, Engine DJ and iTunes with path remapping and cue points.
+- Autosave with recovery copies, atomic saves with a `.bak`, relinking of moved audio, and export to WAV 16/24-bit, FLAC 24-bit or MP3 320 kbps (with ffmpeg).
 
 ## Screenshots
 
-![Non-destructive section editing](docs/screenshots/sections.png)
+![Source ranges, protected transitions and processed A/B monitoring](docs/screenshots/transition-workbench.png)
 
-Captured on Linux using the app's generated demo music. Beatgrid shows 0.21, Recovery 0.19, Compare 0.18, Track 0.17, and the other views 0.16.
-
-| Transition editing | Track properties |
+| Transition editing | Beatgrid and assisted beatmatch |
 |---|---|
-| ![Transition presets, stem controls and volume curves](docs/screenshots/transition.png) | ![Track properties and stem controls](docs/screenshots/track.png) |
+| ![Transition presets, stem controls and volume curves](docs/screenshots/transition.png) | ![Beatgrid modes, fine timing controls and assisted beatmatch](docs/screenshots/grid.png) |
 
-| Beatgrid and assisted beatmatch | Automation and effects |
+| Automation and effects | Non-destructive section editing |
 |---|---|
-| ![Beatgrid modes, fine timing controls and assisted beatmatch](docs/screenshots/grid.png) | ![Automation curve and effect blocks](docs/screenshots/effects.png) |
-
-![Playlist with tempo, key and transition information](docs/screenshots/playlist.png)
+| ![Automation curve and effect blocks](docs/screenshots/effects.png) | ![Non-destructive section editing](docs/screenshots/sections.png) |
 
 ![Whole mix overview with four songs and two sample lanes](docs/screenshots/wide.png)
 
-## Roadmap
-
-- Export a selected region, CUE sheets and split files
-- Section clipboard across songs, plus more flexible arrangement trim/extend tools
-- Better analysis confidence and correction workflows for difficult tracks
-- Per-stem automation and higher-quality time-stretching
-- Library folder watching and set creation across a whole library
-- Headphone cue / pre-listen and MIDI controllers
-- Video export, DJ-library export and VST effects
-- Local lyric transcription; requires a separate verified model/runtime pipeline
+Captured on Linux with the app's generated demo music. More screenshots accompany the [release notes](docs/RELEASE-NOTES.md).
 
 ## Platforms
 
@@ -264,7 +103,7 @@ The first time you separate a track, MixStudio downloads the model (166 MB, veri
 
 **Model and license:** `htdemucs_fp16weights.onnx` from [StemSplitio/htdemucs-onnx](https://huggingface.co/StemSplitio/htdemucs-onnx) (pinned revision). It's an ONNX export of HT-Demucs by Meta AI Research ([facebookresearch/demucs](https://github.com/facebookresearch/demucs)). Both the original weights/code and the export are **MIT-licensed**. The model isn't bundled with MixStudio.
 
-Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates four test tracks and builds a demo mix. Set `MIXSTUDIO_DEMO_TAB=sections` to open a prepared section-editing example. Other demo views: `transition`, `playlist`, `wide`, `grid`, `effects`, `autoorder` (the default view is `track`).
+Want to try it without your own music? `mixstudio --demo /tmp/ms-demo` generates four test tracks and builds a demo mix. Set `MIXSTUDIO_DEMO_TAB=sections` to open a prepared section-editing example. Other demo views: `transition`, `beatmatch`, `library`, `listen`, `playlist`, `wide`, `grid`, `compare`, `effects`, `master`, `recovery` (the default view is `track`). `MIXSTUDIO_SCREENSHOT=out.png` saves the window after a few seconds and exits.
 
 Run `cargo test --locked` for the automated regression and headless interaction tests. `mixstudio --selftest /tmp/ms-test` runs analysis, beat alignment, stretching, rendering, imports and export checks; the model separation check skips if its model has not been downloaded. A local-audio integration check can be run separately:
 
@@ -281,42 +120,48 @@ The optional check reads local source files and writes an edited test mix and sh
 
 ## Usage
 
-1. Open the **Library** tab, add your music folders, and double-click or drag tracks onto the timeline. Or click **+** (Add tracks) or drop audio files on the window. Each new song goes on the next deck and overlaps the previous one by 16 bars.
-2. Drag clips to adjust overlaps, and click a blue transition bar to choose a preset in the **Transition** tab.
-3. Fix any beatgrid in the **Track** tab, and set the mix tempo and key lock in **Master**.
-4. Choose **Select** above the timeline and drag a range on one song. Use **Repeat**, **Copy / Paste**, **Delete + close gap** or **Loop selection**. Paste inserts at the playhead within that same source song. Switch to **Move** to drag clips normally.
-5. Use **Auto-order** for a key/tempo-aware playlist, then choose an export format in **Master** and export the mix.
+1. Open **Library**, add your music folders, press ▶ to preview, then double-click, press Enter or drag tracks onto the timeline. You can also click **+** or drop audio files on the window. Each new song goes on the next deck and overlaps the previous one by 16 bars.
+2. Drag clips to adjust overlaps and click a blue transition bar. In **Transition**, use **Auto-align B**, then choose a preset, stems and curves and **Play transition** to listen.
+3. Check grids in **Beatgrid** if a song still drifts, and set the mix tempo, key lock and output level in **Master**.
+4. Choose **Select** above the timeline and drag a range on one song to repeat, copy, delete or loop it. Switch back to **Move** to drag clips.
+5. Use **Auto-order** for a key/tempo-aware playlist, then export from **Master**.
 
 | Shortcut | Action |
 |---|---|
-| Space | Play / pause |
-| Ctrl + scroll | Zoom around the pointer |
-| Scroll | Move in time |
+| Space | Play / pause (stops a preview or audition) |
+| Ctrl + scroll / Scroll | Zoom around the pointer / move in time |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
-| Ctrl+C / Ctrl+V | Copy selected section / insert at playhead within the same song |
-| Ctrl+D | Repeat the selected section directly after itself |
-| Delete | Delete the selected section and close the gap; otherwise remove the selected track in Move mode |
-| Escape | Clear the section selection and its playback loop |
-| Z | Zoom the decks vertically |
+| Ctrl+S / Ctrl+Shift+S | Save / save as |
+| Ctrl+C / Ctrl+V / Ctrl+D | Copy section / insert at playhead in the same song / repeat after itself |
+| Delete | Delete the selected section and close the gap; otherwise remove the selected track |
+| Escape | Clear the section selection and its loop |
 | Ctrl+E | Split the clip under the mouse / at the playhead |
-| Alt + drag on a sample | Duplicate it |
-| Alt + drag on a clip | Move the beatgrid |
+| `,` / `.` | Nudge the incoming track 1 ms earlier / later (Shift: 10 ms) |
+| Enter / Ctrl+A | Library: add the selection to the mix / select every visible file |
+| Z | Zoom the decks vertically |
+| Alt + drag | Duplicate a sample / move a clip's beatgrid |
 | Shift + click on a beat line | Set the downbeat |
 | Double-click a knob / fader | Reset |
 
 ## Known limitations
 
-- Stem separation on the CPU is slower than real time on long tracks (about 1–2× real time on 8 cores). A GPU is much faster.
-- Stems are held in memory as 16-bit audio (about 30 MB per minute per track).
-- WSOLA is good, but not Rubber Band quality. Big tempo changes on pads and vocals can sound grainy.
-- **Dynamic** is the safe default for gradual drift. **Flex** is experimental and can produce bad beat timing on some tracks; irregular source beat spacing can cause severe tempo changes in Auto mode. Use Dynamic if this happens.
-- Section clipboard is currently limited to the same source song. An arranged clip's trim can reverse during one drag; to restore material removed by a committed trim, use Undo.
-- Save files store source paths and edits, not the audio itself. Keep the original audio available.
-- Analysis is tuned for 4/4 dance music. Some tracks are detected at half or double tempo (use ×2 / ÷2 or tap tempo).
-- Section tags are a rough energy guess.
-- File dialogs use the XDG desktop portal (KDE/GNOME), then kdialog, then zenity. If none works, the status line says why: type or paste a folder path in the Library tab, or drop a folder on the window. `MIXSTUDIO_DIALOG=kdialog` (or portal/zenity) forces one; `mixstudio --dialog-check` lists what is available.
-- Carousel, video export, headphone cue and VST hosting are not implemented.
-- Decoded audio is held in memory (about 100 MB per 6-minute track).
+- Analysis is tuned for 4/4 dance music. Half/double tempo and which kick is bar 1 can still be wrong: listen, and use ×2 / ÷2, tap tempo or **Set downbeat**. Some drum & bass files cannot be analysed.
+- **Dynamic** is the safe default grid. **Flex** is experimental and can produce bad timing on some tracks.
+- Long exports hold the whole mix in memory (about 2.2 GB per hour at 44.1 kHz), and decoded sources stay in memory (about 100 MB per 6-minute track; stems add about 30 MB per minute).
+- Stem separation on the CPU runs at about 1–2× real time on 8 cores; a GPU is much faster.
+- The section clipboard works within the same source song.
+- Projects store source paths and edits, not the audio. Keep the original files available, or use **Locate missing audio…**.
+- File dialogs use the XDG portal, then kdialog, then zenity; `mixstudio --dialog-check` lists what works. You can also paste a folder path in the Library.
+- Video export, headphone cue, MIDI controllers and VST hosting are not implemented.
+
+## Roadmap
+
+- Streaming export for long mixes, region export, CUE sheets and split files
+- Section clipboard across songs and more flexible trim/extend tools
+- Better analysis confidence, half/double and bar-1 handling for difficult tracks
+- Library folder watching and set building across a whole library
+- Headphone cue and MIDI controllers
+- Video export, DJ-library export and VST effects
 
 ## Not affiliated
 
@@ -325,55 +170,3 @@ MixStudio is inspired by the timeline approach of DJ.Studio, but it's an indepen
 ## License
 
 [MIT](LICENSE) © 2026 soulspin
-
-### Scratch effect (v0.11)
-Add a **Scratch** block in the effects grid on a deck or sample lane. It drives the turntable position under the block
-(smooth varispeed, a falling line plays in reverse) and loops when the block is longer than the pattern.
-Presets: Baby scratch, Downer, Transformer, Reverse, Chirp. **✎ Pattern editor…** opens the syntax editor:
-`A`–`E` position targets within the beat (A = start, E = end), `.` next beat, `r` release (mute), `>` open, `-` hold;
-with live graph, Easing, Preview, Save as preset and Delete. Applies in playback and export.
-
-### Phrase detection (v0.12)
-Analysis finds phrase boundaries on the 8/16/32-bar grid from energy, spectrum (3 bands) and novelty, and labels
-them **Intro / Build / Drop / Breakdown / Outro** (heuristic). Coloured phrase strips and markers sit on every clip:
-click a phrase to cycle its label, right-click to choose one or reset to the detection (edits are saved in the project).
-Clips snap to other clips' phrase boundaries. Auto-order and *Overlap outros with intros* start the next track's
-intro on the previous track's outro. (Analysis cache v9: stale cached analysis is regenerated.)
-
-### Import from other DJ software (v0.13)
-The Library tab has a sidebar with your MixStudio folders and **Other DJ software**: *Find libraries* looks in the
-usual places (home, Documents, Music, mounted drives incl. Windows/macOS user folders), or *Browse…* / paste a file:
-Rekordbox XML (File ▸ Export Collection in xml format), Traktor `collection.nml`, Serato `_Serato_/database V2`
-(+ crates), Engine DJ `Engine Library/Database2/m.db`, iTunes / Music `Library.xml`. Playlists and folders appear as a
-tree; the table shows the other app's BPM and key (e.g. *Key (Rekordbox)*) next to MixStudio's. Cue points
-(Rekordbox, Traktor) become orange markers on the clip when the track is added to the mix. **Path remapping** rewrites
-prefixes such as `C:\Users\Mike\Music` → `/mnt/windows/Users/Mike/Music`. Imports are strictly read-only (Engine's
-database is read from a temporary copy). Not yet: Serato / Engine cue points (stored in file tags / compressed blobs).
-
-### Big tempo jumps (v0.14)
-Each transition has a **Beat ratio** (transition panel): *Auto*, 1:1, 1:2, 2:1, 2:3, 3:2. With 1:2 one beat of the
-incoming track spans two mix beats, so a 70 BPM track locks onto a 140 BPM mix (kicks within a millisecond in the
-selftest); 2:3 maps two track beats onto three mix beats. *Auto* (default) switches to half / double time only when it
-is clearly closer to the tempo it joins, which also fixes Auto tempo gliding 140 → 70 BPM between such tracks.
-
-### Beatgrids (v0.15)
-- **Grid mode per clip** (Beatgrid tab): *Fixed* (straight grid at the average BPM), *Dynamic* (the analysed beat map),
-  *Flex* (piecewise grid that follows tempo jumps and ramps, found by change-point detection on the tempo curve),
-  *Imported* (Rekordbox/Traktor grid, when the track came from an import) and *Manual* (set automatically when you
-  edit the grid). Split clips keep their own mode.
-- **Stabilize tempo** (Track tab): in Auto tempo a stabilized clip plays flat at its average tempo. Typical use: split
-  at the intro and outro, stabilize just those clips so they mix on a straight grid; boundaries stay seamless.
-- **Tempo lane**: per clip the average BPM (orange) and the local tempo (grey); zoom in to see drift % labels.
-- **Downbeats**: bar lines red, beats yellow, bars stay visible zoomed out; *Set downbeat* recolours them.
-
-### Section editing and timing corrections (v0.16)
-- Ordered source ranges keep repeated and deleted sections non-destructive; the waveform and audio renderer use the same arrangement mapping.
-- Source automation follows copied/deleted ranges. Manual tempo interpolation outside the edit is preserved when later points ripple.
-- Short splice fades and section-aware WSOLA pre-roll avoid carrying audio from the previous section across a cut. Beat Slice evaluates its source endpoints inside the current section.
-- Selection clears when its song, grid or timeline placement changes, preventing actions on an outdated range. Edited trim gestures use the drag-start arrangement so dragging back restores material within the same gesture.
-- Dynamic/Flex/Imported grid evaluation preserves fine fractional offsets. Returning to an analysed grid restores its compatible source BPM; Flex is never enabled automatically.
-
-### Beatgrid controls and assisted alignment (v0.17)
-The **Beatgrid** tab separates source-grid correction from clip placement. Fine corrections use source seconds; positive values move grid markers later in the source, making the corresponding audio play earlier against the mix grid. The selected target is the nearest visible clip beat to the playhead. **Beat + following** stretches from the marker one bar before the target.
-
-**Measure overlap** compares paired bass attacks on a background thread. Positive offset means incoming attacks are late. The report distinguishes consistent offset, drift and inconsistent attacks. Only sufficiently supported constant offsets enable **Correct incoming grid**. The check rejects sparse attacks and limited coverage; it does not infer the musical downbeat or rewrite analysis. Changed timing or audio invalidates the result, and each applied correction has one Undo step.
