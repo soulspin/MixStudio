@@ -67,9 +67,21 @@ pub(super) struct State {
     pub folder:Option<String>,pub details:bool,pub geometry:Option<library_drop::Geometry>,
     tree:Vec<crate::library::browse::FolderNode>,tree_key:Option<(u64,Vec<String>)>,
 }
+/// Full-width navigation row: name truncated to fit, count right-aligned.
+fn nav_row(ui:&mut egui::Ui,name:&str,count:usize,selected:bool)->egui::Response {
+    let (rect,response)=ui.allocate_exact_size(vec2(ui.available_width(),24.0),Sense::click());
+    let painter=ui.painter();
+    if selected {painter.rect_filled(rect,Rounding::same(5.0),C::from_rgb(60,58,20));} else if response.hovered() {painter.rect_filled(rect,Rounding::same(5.0),C::from_rgb(44,46,52));}
+    let counter=painter.layout_no_wrap(count.to_string(),FontId::proportional(11.0),DIM);
+    let right=rect.right()-8.0-counter.size().x; painter.galley(pos2(right,rect.center().y-counter.size().y*0.5),counter,DIM);
+    let mut job=egui::text::LayoutJob::simple_singleline(name.to_string(),FontId::proportional(13.0),if selected {ACCENT} else {TXT});
+    job.wrap=egui::text::TextWrapping::truncate_at_width((right-rect.left()-16.0).max(20.0));
+    let text=ui.fonts(|f|f.layout_job(job)); painter.galley(pos2(rect.left()+6.0,rect.center().y-text.size().y*0.5),text,TXT);
+    response
+}
 fn folder_node(ui:&mut egui::Ui,node:&crate::library::browse::FolderNode,current:Option<&str>,selected:&mut Option<String>,remove:&mut Option<String>,root:bool) {
     let row=|ui:&mut egui::Ui,selected:&mut Option<String>,remove:&mut Option<String>| {
-        let r=ui.selectable_label(current==Some(node.path.as_str()),format!("{} ({})",node.name,node.count));
+        let r=nav_row(ui,&node.name,node.count,current==Some(node.path.as_str()));
         if r.clicked(){*selected=Some(node.path.clone());}
         let r=r.on_hover_text(&node.path);
         if root {r.context_menu(|ui|{if ui.button("Remove from library").clicked(){*remove=Some(node.path.clone());ui.close_menu();}});}
@@ -87,16 +99,20 @@ impl App {
         self.library_ui.folder=folder;self.lib_node=None;self.lib_sel.clear();self.lib_anchor=None;self.lib_view_key=None;
     }
     fn library_sidebar(&mut self,ui:&mut egui::Ui) {
-        ui.heading("Music folders");
-        if ui.button("+ Add folder…").clicked(){self.pick_folder();}
-        if ui.selectable_label(self.lib_node.is_none()&&self.library_ui.folder.is_none(),format!("All music ({})",self.lib.index.entries.len())).clicked(){self.choose_library_folder(None);}
+        ui.spacing_mut().item_spacing.y=2.0;
+        ui.horizontal(|ui|{
+            ui.label(egui::RichText::new("FOLDERS").size(10.5).color(DIM).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{if ui.small_button("+ Add").on_hover_text("Add a music folder").clicked(){self.pick_folder();}});
+        });
+        ui.add_space(4.0);
+        if nav_row(ui,"All music",self.lib.index.entries.len(),self.lib_node.is_none()&&self.library_ui.folder.is_none()).clicked(){self.choose_library_folder(None);}
         let key=(self.lib.path_gen,self.lib.cfg.folders.clone());
         if self.library_ui.tree_key.as_ref()!=Some(&key){self.library_ui.tree=crate::library::browse::folder_tree(&self.lib.cfg.folders,&self.lib.index.entries);self.library_ui.tree_key=Some(key);}
         let mut selected=None;let mut remove=None;
         for node in &self.library_ui.tree {folder_node(ui,node,self.library_ui.folder.as_deref(),&mut selected,&mut remove,true);}
         if let Some(folder)=selected{self.choose_library_folder(Some(folder));}
         if let Some(folder)=remove{self.lib.remove_folder(&folder);self.choose_library_folder(None);}
-        ui.separator();
+        ui.add_space(8.0);ui.separator();ui.spacing_mut().item_spacing.y=6.0;
         egui::CollapsingHeader::new("DJ software imports").id_salt("library_import_settings").show(ui,|ui|self.lib_import_settings(ui));
         egui::CollapsingHeader::new("Manage sources").id_salt("library_sources").show(ui,|ui|{
             if ui.add_enabled(!self.lib.cfg.folders.is_empty(),egui::Button::new("Rescan folders")).clicked(){self.lib.rescan();}
@@ -122,48 +138,90 @@ impl App {
         }
     }
     pub(super) fn library_tab(&mut self,ui:&mut egui::Ui) {
-        egui::SidePanel::left("library_navigation_v2").resizable(true).default_width(200.0).width_range(160.0..=340.0).show_inside(ui,|ui|{egui::ScrollArea::vertical().id_salt("library_navigation_scroll").show(ui,|ui|self.library_sidebar(ui));});
+        // The folder list is its own card; a gutter and a solid scrollbar keep it from running into the files.
+        egui::SidePanel::left("library_navigation_v3").resizable(true).default_width(260.0).width_range(170.0..=400.0)
+            .frame(egui::Frame::none().fill(C::from_rgb(32,33,38)).rounding(Rounding::same(6.0)).inner_margin(egui::Margin::same(8.0)).outer_margin(egui::Margin{left:0.0,right:6.0,top:0.0,bottom:0.0}))
+            .show_inside(ui,|ui|{ui.spacing_mut().scroll=egui::style::ScrollStyle::solid();ui.spacing_mut().scroll.bar_inner_margin=6.0;
+                egui::ScrollArea::vertical().id_salt("library_navigation_scroll").auto_shrink([false,false]).show(ui,|ui|self.library_sidebar(ui));});
+        egui::Frame::none().inner_margin(egui::Margin{left:10.0,right:0.0,top:0.0,bottom:0.0}).show(ui,|ui|self.library_files(ui));
+    }
+    fn library_files(&mut self,ui:&mut egui::Ui) {
         use crate::library::SortCol;
         let mut append=false;
+        ui.add_space(2.0);
         ui.horizontal(|ui|{
-            let width=(ui.available_width()-205.0).max(120.0);
-            ui.add(egui::TextEdit::singleline(&mut self.lib_q).hint_text("Search filename, title, artist…").desired_width(width));
-            if ui.small_button("Clear").clicked(){self.lib_q.clear();}
-            let n=self.lib_sel.len();if ui.add_enabled(n>0&&!self.arrangement_locked(),egui::Button::new(egui::RichText::new(format!("Add last in mix ({n})")).color(if n>0{C::BLACK}else{DIM})).fill(if n>0{ACCENT}else{PANEL})).clicked(){append=true;}
+            let n=self.lib_sel.len();let label=if n>1 {format!("Add {n} to mix")} else {"Add to mix".into()};
+            let add=egui::Button::new(egui::RichText::new(label).color(if n>0{C::BLACK}else{DIM})).fill(if n>0{ACCENT}else{PANEL}).min_size(vec2(110.0,26.0));
+            let width=(ui.available_width()-128.0).max(140.0);
+            egui::Frame::none().fill(BG).rounding(Rounding::same(6.0)).stroke(Stroke::new(1.0_f32,LINE)).inner_margin(egui::Margin::symmetric(8.0,3.0)).show(ui,|ui|{
+                ui.set_width(width-18.0);
+                ui.horizontal(|ui|{
+                    ui.label(egui::RichText::new("🔍").color(DIM));
+                    let clear=!self.lib_q.is_empty();
+                    ui.add(egui::TextEdit::singleline(&mut self.lib_q).hint_text("Search filename, title, artist…").frame(false).desired_width(ui.available_width()-if clear {22.0} else {0.0}));
+                    if clear && ui.add(egui::Button::new(egui::RichText::new("✖").size(11.0).color(DIM)).frame(false)).on_hover_text("Clear search").clicked(){self.lib_q.clear();}
+                });
+            });
+            if ui.add_enabled(n>0&&!self.arrangement_locked(),add).on_hover_text("Append the selection after the last song (Enter). Double-click a row adds one file.").clicked(){append=true;}
         });
+        ui.add_space(4.0);
         ui.horizontal_wrapped(|ui|{
-            ui.checkbox(&mut self.lib_key,"Compatible key");ui.checkbox(&mut self.lib_bpm,"BPM ±");ui.add(egui::DragValue::new(&mut self.lib_pct).range(1.0..=30.0).speed(0.2).suffix("%"));
-            egui::ComboBox::from_id_salt("library_sort").width(100.0).selected_text(sort_name(self.lib_sort)).show_ui(ui,|ui|{for col in [SortCol::Filename,SortCol::Title,SortCol::Artist,SortCol::Bpm,SortCol::Key,SortCol::Duration,SortCol::Folder,SortCol::Genre]{ui.selectable_value(&mut self.lib_sort,col,sort_name(col));}});
-            if ui.small_button(if self.lib_asc{"Ascending"}else{"Descending"}).clicked(){self.lib_asc=!self.lib_asc;}
-            ui.checkbox(&mut self.library_ui.details,"Details");
+            toggle_button(ui,&mut self.lib_key,"Compatible key").on_hover_text("Show keys that mix harmonically with the selected mix track");
+            toggle_button(ui,&mut self.lib_bpm,"BPM range").on_hover_text("Show tracks within this tempo range of the selected mix track");
+            ui.add_enabled(self.lib_bpm,egui::DragValue::new(&mut self.lib_pct).range(1.0..=30.0).speed(0.2).prefix("±").suffix(" %"));
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Sort").color(DIM));
+            egui::ComboBox::from_id_salt("library_sort").width(96.0).selected_text(sort_name(self.lib_sort)).show_ui(ui,|ui|{for col in [SortCol::Filename,SortCol::Title,SortCol::Artist,SortCol::Bpm,SortCol::Key,SortCol::Duration,SortCol::Folder,SortCol::Genre]{ui.selectable_value(&mut self.lib_sort,col,sort_name(col));}});
+            if ui.button(if self.lib_asc{"⏶"}else{"⏷"}).on_hover_text(if self.lib_asc{"Ascending"}else{"Descending"}).clicked(){self.lib_asc=!self.lib_asc;}
+            toggle_button(ui,&mut self.library_ui.details,"Details").on_hover_text("Show folder and genre columns");
         });
-        if self.lib_key||self.lib_bpm {ui.label(egui::RichText::new(self.lib_ref().map(|(t,k,b)|format!("Match: {t} · {k} · {b:.1} BPM")).unwrap_or_else(||"Add/select a mix track as filter reference".into())).size(11.0).color(DIM));}
+        if self.lib_key||self.lib_bpm {ui.label(egui::RichText::new(self.lib_ref().map(|(t,k,b)|format!("Matching {t} · {k} · {b:.1} BPM")).unwrap_or_else(||"Select a mix track to filter by its key and tempo".into())).size(11.0).color(DIM));}
         self.refresh_library_view();
+        if self.listen.is_some() { ui.add_space(2.0); self.listen_ui(ui); ui.add_space(2.0); }
         ui.horizontal(|ui|{
-            ui.label(egui::RichText::new(format!("{} files · {} selected",self.lib_view.len(),self.lib_sel.len())).color(DIM).size(11.0));
-            if self.lib.scanning{ui.spinner();ui.label("Scanning folders…");}else if self.lib.analysing.1>0{ui.label(format!("Analysing BPM/key {}/{}",self.lib.analysing.0,self.lib.analysing.1));}else{ui.label(egui::RichText::new("Drag a row onto the timeline · Ctrl/Shift selects multiple").size(11.0).color(DIM));}
+            ui.label(egui::RichText::new(if self.lib_sel.is_empty() {format!("{} files",self.lib_view.len())} else {format!("{} files · {} selected",self.lib_view.len(),self.lib_sel.len())}).color(DIM).size(11.5));
+            if self.lib.scanning{ui.spinner();ui.label(egui::RichText::new("Scanning folders…").size(11.5).color(DIM));}
+            else if self.lib.analysing.1>0{let (done,total)=self.lib.analysing;ui.add(egui::ProgressBar::new(done as f32/total.max(1) as f32).desired_width(120.0).desired_height(8.0));ui.label(egui::RichText::new(format!("Analysing BPM/key {done}/{total}")).size(11.5).color(DIM));}
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|ui.label(egui::RichText::new("▶ previews · drag rows onto a deck · Ctrl/Shift selects · Enter adds").size(11.0).color(DIM)));
         });
-        if self.lib_view.is_empty(){ui.label(if self.lib.cfg.folders.is_empty()&&self.lib_node.is_none(){"Add a music folder to start your library."}else{"No files match. Clear search or filters, or choose another folder."});}
-        let mut columns=vec![(SortCol::Filename,"Filename / artist and title"),(SortCol::Bpm,"BPM"),(SortCol::Key,"Key"),(SortCol::Duration,"Length")];
+        ui.add_space(2.0);
+        if self.lib_view.is_empty(){ui.add_space(24.0);ui.vertical_centered(|ui|ui.label(egui::RichText::new(if self.lib.cfg.folders.is_empty()&&self.lib_node.is_none(){"Add a music folder to start your library."}else{"No files match. Clear the search or filters, or choose another folder."}).color(DIM)));}
+        let mut columns=vec![(SortCol::Filename,"Track"),(SortCol::Bpm,"BPM"),(SortCol::Key,"Key"),(SortCol::Duration,"Length")];
         if self.library_ui.details {columns.extend([(SortCol::Folder,"Folder"),(SortCol::Genre,"Genre")]);}
+        let roots=self.lib.cfg.folders.clone();
         let available=ui.available_height();let mods=ui.input(|i|i.modifiers);
-        let mut table=egui_extras::TableBuilder::new(ui).id_salt("library_files_v2").striped(true).resizable(true).sense(Sense::click_and_drag()).max_scroll_height(available).min_scrolled_height(0.0)
-            .column(egui_extras::Column::remainder().at_least(180.0)).column(egui_extras::Column::initial(62.0).at_least(45.0)).column(egui_extras::Column::initial(48.0).at_least(35.0)).column(egui_extras::Column::initial(60.0).at_least(45.0));
-        if self.library_ui.details{table=table.column(egui_extras::Column::initial(120.0)).column(egui_extras::Column::initial(80.0));}
-        let mut sorted=None;let mut click=None;let mut double=None;let mut drag=None;
-        table.header(22.0,|mut header|{for (col,name) in &columns {header.col(|ui|{if ui.selectable_label(self.lib_sort==*col,*name).clicked(){sorted=Some(*col);}});}})
-            .body(|body|{body.rows(40.0,self.lib_view.len(),|mut row|{
+        let mut table=egui_extras::TableBuilder::new(ui).id_salt("library_files_v3").striped(true).resizable(true).sense(Sense::click_and_drag()).max_scroll_height(available).min_scrolled_height(0.0)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(egui_extras::Column::exact(34.0)).column(egui_extras::Column::remainder().at_least(220.0)).column(egui_extras::Column::initial(70.0).at_least(50.0)).column(egui_extras::Column::initial(58.0).at_least(44.0)).column(egui_extras::Column::initial(66.0).at_least(50.0));
+        if self.library_ui.details{table=table.column(egui_extras::Column::initial(170.0).at_least(60.0)).column(egui_extras::Column::initial(100.0).at_least(50.0));}
+        let mut sorted=None;let mut click=None;let mut double=None;let mut drag=None;let mut listen=None;
+        table.header(26.0,|mut header|{header.col(|_|{});for (col,name) in &columns {header.col(|ui|{
+            let on=self.lib_sort==*col; let arrow=if on {if self.lib_asc {" ⏶"} else {" ⏷"}} else {""};
+            if ui.add(egui::Button::new(egui::RichText::new(format!("{name}{arrow}")).size(11.5).strong().color(if on {ACCENT} else {DIM})).frame(false)).clicked(){sorted=Some(*col);}
+        });}})
+            .body(|body|{body.rows(46.0,self.lib_view.len(),|mut row|{
                 let k=row.index();let e=&self.library_entries()[self.lib_view[k]];let selected=self.lib_sel.contains(&e.path);row.set_selected(selected);
                 let unavailable=e.error.is_some() || (e.folder!=crate::library::EXT_FOLDER && matches!(self.lib.states.get(&e.folder),Some(crate::library::FolderState::Missing|crate::library::FolderState::NotResponding)));
                 let color=if unavailable{DIM}else{TXT};
-                row.col(|ui|{ui.vertical(|ui|{
-                    ui.add(egui::Label::new(egui::RichText::new(e.filename()).strong().size(13.0).color(color)).truncate());
+                row.col(|ui|{
+                    let on=self.listening(&e.path);
+                    let button=egui::Button::new(egui::RichText::new(if on {"⏹"} else {"▶"}).size(12.0).color(if on {BG} else {TXT})).fill(if on {ACCENT} else {C::from_rgb(52,54,60)}).rounding(Rounding::same(12.0)).min_size(vec2(24.0,24.0));
+                    if ui.add_enabled(!unavailable,button).on_hover_text(if on {"Stop preview"} else {"Preview from the first drop at original tempo"}).clicked(){listen=Some((e.path.clone(),e.filename().to_string()));}
+                });
+                row.col(|ui|{ui.add_space(4.0);ui.vertical(|ui|{ui.spacing_mut().item_spacing.y=2.0;
+                    ui.add(egui::Label::new(egui::RichText::new(e.filename()).strong().size(13.5).color(color)).truncate());
                     let metadata=if e.artist.is_empty(){e.title.clone()}else if e.title.is_empty(){e.artist.clone()}else{format!("{} · {}",e.artist,e.title)};
-                    ui.add(egui::Label::new(egui::RichText::new(metadata).size(11.0).color(DIM)).truncate());
+                    ui.add(egui::Label::new(egui::RichText::new(metadata).size(11.5).color(DIM)).truncate());
                 });});
-                for text in [e.bpm.map(|b|format!("{b:.1}")).unwrap_or_else(||"—".into()),e.key.clone().unwrap_or_else(||"—".into()),fmt_t(e.duration)]{row.col(|ui|{ui.add(egui::Label::new(egui::RichText::new(text).color(color).size(12.0)).truncate());});}
-                if self.library_ui.details{for text in [PathBuf::from(&e.path).parent().map(|p|p.display().to_string()).unwrap_or_default(),e.genre.clone()]{row.col(|ui|{ui.add(egui::Label::new(egui::RichText::new(text).size(11.0).color(DIM)).truncate());});}}
-                let response=row.response().on_hover_ui(|ui|{ui.set_max_width(480.0);ui.strong(e.filename());ui.label(format!("{} · {}",e.artist,e.title));ui.label(&e.path);
+                row.col(|ui|{ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{ui.add_space(8.0);ui.label(egui::RichText::new(e.bpm.map(|b|format!("{b:.1}")).unwrap_or_else(||"—".into())).size(13.0).color(if e.bpm.is_some() {color} else {DIM}));});});
+                row.col(|ui|{match &e.key {Some(key)=>chip(ui,key.clone(),if unavailable {DIM} else {key_col(key)}),None=>{ui.label(egui::RichText::new("—").color(DIM));}}});
+                row.col(|ui|{ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{ui.add_space(8.0);ui.label(egui::RichText::new(fmt_t(e.duration)).size(12.5).color(color));});});
+                if self.library_ui.details{
+                    let parent=PathBuf::from(&e.path).parent().map(|p|p.display().to_string()).unwrap_or_default();
+                    let folder=roots.iter().find_map(|r|parent.strip_prefix(r.as_str()).map(|rest|rest.trim_start_matches('/').to_string())).filter(|f|!f.is_empty()).unwrap_or(parent);
+                    for text in [folder,e.genre.clone()]{row.col(|ui|{ui.add(egui::Label::new(egui::RichText::new(text).size(11.5).color(DIM)).truncate());});}
+                }
+                let response=row.response().on_hover_ui(|ui|{ui.set_max_width(480.0);ui.strong(e.filename());ui.label(format!("{} · {}",e.artist,e.title));ui.label(egui::RichText::new(&e.path).size(11.0).color(DIM));
                     if let Some((source,track))=self.lib.ext_info(&e.path){ui.label(format!("{} tags: {} BPM · {}",source.name(),track.bpm.map(|b|format!("{b:.2}")).unwrap_or_else(||"unknown".into()),track.key.as_deref().unwrap_or("unknown")));}
                     if let Some(error)=&e.error{ui.colored_label(C::LIGHT_RED,error);}else if unavailable{ui.colored_label(C::YELLOW,"Source drive is unavailable");}
                 });
@@ -171,9 +229,19 @@ impl App {
                 if response.drag_started()&&!self.arrangement_locked(){let paths=if selected{self.library_selected_paths()}else{vec![e.path.clone()]};response.dnd_set_drag_payload(LibDrag(paths.clone()));drag=Some(paths);}
             });});
         if let Some(col)=sorted{if self.lib_sort==col{self.lib_asc=!self.lib_asc;}else{self.lib_sort=col;self.lib_asc=true;}}
+        if let Some((path,title))=listen{let ctx=ui.ctx().clone();self.toggle_listen(path,title,&ctx);}
         if let Some(paths)=drag{self.lib_sel=paths.into_iter().collect();}
         if let Some((k,mods))=click{self.select_library_row(k,mods);}
         if let Some(path)=double{self.lib_add(vec![path]);}else if append{self.lib_add(self.library_selected_paths());}
+    }
+    /// Enter adds the selection; Ctrl+A selects every visible file.
+    pub(super) fn library_keys(&mut self,ctx:&egui::Context) {
+        if self.tab!=Tab::Library {return;}
+        if ctx.input(|i|i.key_pressed(egui::Key::Enter)) && !self.lib_sel.is_empty() && !self.arrangement_locked() {self.lib_add(self.library_selected_paths());}
+        if ctx.input(|i|i.modifiers.command && i.key_pressed(egui::Key::A)) {
+            let paths:Vec<_>=self.lib_view.iter().filter_map(|&i|self.library_entries().get(i)).map(|e|e.path.clone()).collect();
+            self.lib_anchor=paths.first().cloned(); self.lib_sel=paths.into_iter().collect();
+        }
     }
     pub(super) fn select_library_row(&mut self,k:usize,mods:egui::Modifiers) {
         let Some(entry)=self.lib_view.get(k).and_then(|&i|self.library_entries().get(i))else{return;};let path=entry.path.clone();

@@ -107,9 +107,40 @@ fn clicking_a_folder_filters_its_descendants_without_matching_similar_names() {
     a.lib.index.entries=vec![crate::library::Entry{path:"/Music/House/one.wav".into(),folder:"/Music".into(),..Default::default()},crate::library::Entry{path:"/Music/House/Deep/two.wav".into(),folder:"/Music".into(),..Default::default()},crate::library::Entry{path:"/Music/House2/three.wav".into(),folder:"/Music".into(),..Default::default()}];a.lib.gen+=1;
     let draw=|a:&mut App,events|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,420.0))),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|a.library_tab(ui));});
     draw(&mut a,vec![]);let out=draw(&mut a,vec![]);
-    let target=out.shapes.iter().find_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape {if t.galley.text()=="House (2)"{Some(t.pos+t.galley.size()*0.5)}else{None}}else{None}).unwrap();
+    let target=out.shapes.iter().find_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape {if t.galley.text()=="House"{Some(t.pos+t.galley.size()*0.5)}else{None}}else{None}).unwrap();
     let pointer=|pressed|egui::Event::PointerButton{pos:target,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
     draw(&mut a,vec![egui::Event::PointerMoved(target),pointer(true)]);draw(&mut a,vec![pointer(false)]);
     assert_eq!(a.library_ui.folder.as_deref(),Some("/Music/House"));assert_eq!(a.lib_view.len(),2);assert!(a.lib_view.iter().all(|&i|!a.lib.index.entries[i].path.contains("House2")));
+    drop(a);std::fs::remove_dir_all(dir).ok();
+}
+#[test]
+fn library_keys_select_all_visible_and_enter_adds_them_in_order() {
+    let (mut a,ctx,_rx,dir)=setup();a.tab=Tab::Library;
+    a.lib.index.entries=vec![crate::library::Entry{path:"/Music/b.wav".into(),..Default::default()},crate::library::Entry{path:"/Music/a.wav".into(),..Default::default()},crate::library::Entry{path:"/Music/skip.wav".into(),..Default::default()}];a.lib.gen+=1;
+    a.lib_q=".wav".into();a.lib_sort=crate::library::SortCol::Filename;a.lib_asc=true;a.refresh_library_view();
+    let key=|key,command|{let modifiers=egui::Modifiers{command,ctrl:command,..Default::default()};egui::RawInput{modifiers,events:vec![egui::Event::Key{key,physical_key:None,pressed:true,repeat:false,modifiers}],..Default::default()}};
+    let _=ctx.run(key(egui::Key::A,true),|ctx|a.library_keys(ctx));
+    assert_eq!(a.library_selected_paths(),vec!["/Music/a.wav","/Music/b.wav","/Music/skip.wav"]);
+    a.lib_q="a.wav".into();a.refresh_library_view();assert_eq!(a.library_selected_paths(),vec!["/Music/a.wav"]);
+    let before=a.loading;let _=ctx.run(key(egui::Key::Enter,false),|ctx|a.library_keys(ctx));
+    assert!(a.loading>before,"Enter should start adding the selection");
+    drop(a);std::fs::remove_dir_all(dir).ok();
+}
+#[test]
+fn library_preview_plays_the_source_at_its_own_tempo_and_restores_the_mix() {
+    let (mut a,ctx,_rx,dir)=setup();a.tab=Tab::Library;
+    let mut seed=7u32;let noise:Vec<f32>=(0..8000*32).map(|_|{seed=seed.wrapping_mul(1664525).wrapping_add(1013904223);((seed>>8) as f32/8388608.0-1.0)*0.4}).collect();
+    let an=Analysis{bpm:123.0,offset:0.3,duration:32.0,peak_sr:8000,peaks:vec![[80,100,90];600],..Default::default()};
+    a.store.insert("test.wav".into(),(Arc::new(Audio{sr:8000,l:noise.clone(),r:noise.clone()}),Arc::new(an)));
+    a.seek(10.0);a.loop_on=true;a.set_loop(Some((8.0,16.0)));
+    a.toggle_listen("test.wav".into(),"Test".into(),&ctx);
+    assert!(a.listen.as_ref().is_some_and(|l|l.ready.is_some()));assert_eq!(a.timeline_beat(),10.0,"the mix playhead must stay put");assert_eq!(a.active_loop,None);
+    let snap=a.build_playback_snap();assert_eq!(snap.tracks.len(),1);
+    let beat=a.beat();let sec=0.3+(beat-4.0)*60.0/123.0;assert!((sec-32.0/3.0).abs()<1e-6,"no drop detected: start a third of the way in");
+    let (l,_)=crate::engine::render_offline(Arc::new(snap),8000,beat,beat+2.0);let s0=(sec*8000.0).round() as usize;let n=l.len().min(4000);
+    let corr=|lag:i64|{let src=&noise[(s0 as i64+lag) as usize..];let (mut xy,mut xx,mut yy)=(0.0,0.0,0.0);for i in 200..n {let (x,y)=(l[i] as f64,src[i] as f64);xy+=x*y;xx+=x*x;yy+=y*y;}xy/(xx*yy).sqrt().max(1e-12)};
+    assert!((-3..=3).map(corr).fold(f64::MIN,f64::max)>0.9,"preview is not the unstretched source at the cue");
+    a.stop_listen();assert!(a.listen.is_none());assert_eq!(a.beat(),10.0);assert_eq!(a.active_loop,Some((8.0,16.0)));assert!(a.loop_on);
+    a.toggle_listen("test.wav".into(),"Test".into(),&ctx);a.tab=Tab::Track;a.validate_listen();assert!(a.listen.is_none(),"leaving the Library stops the preview");
     drop(a);std::fs::remove_dir_all(dir).ok();
 }

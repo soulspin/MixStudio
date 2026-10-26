@@ -1,17 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.30.0-beta
 
-- **Beat analysis (cache v14):** the beat tracker could drift smoothly off a steady track's kicks (tens of ms, without skipping a beat), or sit on offbeat hi-hats or a constant ~50 ms beside soft kicks. Two songs at 125/126 BPM then fell out of sync after import even though both were stretched to the mix tempo. Analysis now searches kicks on a straight clock directly and adopts it when it is supported throughout the source and lands clearly more kicks; a final check moves a grid half a beat or by its median kick offset only when that lands at least half as many kicks again. Supported tempo changes are left alone.
-- Beatgrid flags Dynamic clips whose saved grid differs from the current analysis and offers **Use current analysis**. Reset to analysis now keeps the downbeat on a whole beat with the clip's previous bar phase.
-- The grid-relative beatmatch measurement no longer reports a stable offset when the outgoing track drifts against its own grid.
-- Add one-click **Auto-align B** to the Transition, Beatgrid and Compare tabs: measure the overlap, apply a consistent offset or tempo-drift correction to the incoming grid as one Undo step, then measure again to show the remaining error. Uncertain evidence is never applied.
-- Correct consistent tempo drift from the measurement (two fitted anchors, at most ±2 %) instead of only reporting it.
-- Measure outro/intro overlaps whose drums do not coincide against the shared mix grid, using A's attacks up to 16 bars before and B's up to 16 bars after the overlap.
-- Nudge B by ±1/±10 ms from the Transition tab, or with `,` / `.` (Shift for 10 ms).
-- Fix symbols that rendered as "□" (arrows, tab icons, key-change labels) and add a regression test that checks every UI string against the bundled fonts.
-- Tidy panel styling: section headings, track fact chips, hairline borders and grouped Track/Transition controls. Beatmatch now sits at the top of the Transition tab.
-- Developer: `MIXSTUDIO_SCREENSHOT=out.png` saves the app's own frame and exits; `MIXSTUDIO_DEMO_TAB=beatmatch` demonstrates Auto-align.
+- **Beat analysis (cache v14):** search kicks on a straight clock directly and adopt it when it is supported throughout the source, the tracker departs from it, no run of attacks corroborates the departure and it lands clearly more kicks. A final check moves a grid half a beat or by its median kick offset only when that lands at least half as many kicks again. Fixes steady tracks drifting tens of ms off their kicks or sitting on offbeat hi-hats, which made 125/126 BPM imports fall out of sync.
+- Beatgrid flags Dynamic clips whose saved grid differs from the current analysis and offers **Use current analysis**. Reset to analysis keeps the downbeat on a whole beat with the clip's previous bar phase.
+- **Auto-align B** in the Transition, Beatgrid and Compare tabs: measure, apply a consistent offset or tempo-drift correction (two fitted anchors, at most ±2 %) as one Undo step, then measure again. Uncertain evidence is never applied.
+- Measure outro/intro overlaps whose drums do not coincide against the shared mix grid (A up to 16 bars before, B up to 16 bars after). A drifting outgoing grid makes the result Uncertain.
+- Nudge B by ±1/±10 ms in the Transition tab or with `,` / `.` (Shift for 10 ms). Beatmatch sits at the top of the Transition tab.
+- **Library preview:** ▶ on any row plays the file alone at its original tempo from the first detected drop (else a third in), with a clickable waveform, position and stop. Space or a second click stops it; the mix playhead, loop and timeline view are restored. Never written to the project or export.
+- **Library layout:** Library mode gives the browser most of the window with both decks visible; the Library tab opens larger; sizes are remembered separately. The folder list is a padded card with truncated names, right-aligned counts and a solid scrollbar. Search with icon and inline clear, framed filter toggles, arrow sort direction, analysis progress bar, airier rows with Camelot key chips and folders relative to the music root.
+- **Enter** adds the selected Library files; **Ctrl+A** selects every visible file.
+- Fix symbols that rendered as "□" and add a regression test that checks every UI string against the bundled fonts. Tidy panel styling with section headings, fact chips and hairline borders.
+- Developer: `MIXSTUDIO_SCREENSHOT=out.png` saves the app's own frame and exits; `MIXSTUDIO_DEMO_TAB=beatmatch|library|listen` demonstrate the new features.
 
 ## 0.29.0-beta
 

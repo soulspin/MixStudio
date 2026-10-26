@@ -2,13 +2,29 @@
 
 **A DAW-style DJ mixing app written in Rust, where every song is its own clip on a timeline.**
 
-![Status: Beta 0.29](https://img.shields.io/badge/status-beta%200.29-e8e000?style=flat-square&labelColor=24262b)
+![Status: Beta 0.30](https://img.shields.io/badge/status-beta%200.30-e8e000?style=flat-square&labelColor=24262b)
 ![Rust](https://img.shields.io/badge/rust-stable-24262b?style=flat-square)
 ![License: MIT](https://img.shields.io/badge/license-MIT-24262b?style=flat-square)
 
-> ⚠️ **Beta 0.29:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
+> ⚠️ **Beta 0.30:** MixStudio works and is fun to use, but it's early. Expect rough edges, and keep your mixes backed up.
 
 ![MixStudio 0.24: source ranges, protected transitions and processed A/B monitoring](docs/screenshots/transition-workbench.png)
+
+## New in 0.30
+
+**Beatmatch that stays on the kicks.** Two steady tracks at 125 and 126 BPM could drift apart after import even though both were stretched to the mix tempo. The beat tracker sometimes slid smoothly off a steady track's kicks by tens of milliseconds, or settled on the offbeat hi-hats or a constant ~50 ms beside soft kicks. Analysis now searches the kicks on a straight clock directly and adopts it only when it is supported throughout the file and lands clearly more kicks; a final check moves a grid half a beat or by its median kick offset under the same rule. Supported tempo changes are left alone. On a read-only sweep of 301 analysable local tracks, 72 grids changed, all landing more kicks (9,907 → 22,914 beats on the kick); 229 were unchanged.
+
+Cache version 14 refreshes derived analysis. **Saved project grids stay unchanged:** Beatgrid now flags a Dynamic clip whose saved grid differs from the current analysis and offers **Use current analysis**. Reset keeps the downbeat on a whole beat in the clip's previous bar phase. Listen and check bar 1 afterwards.
+
+**One-click Auto-align.** **Transition → Beatmatch → Auto-align B** measures the overlap, applies a consistent offset or tempo-drift correction to the incoming grid as one Undo step, then measures again so you see what remains. Uncertain evidence is never applied. Outro/intro overlaps whose drums do not coincide are measured against the shared mix grid, using A up to 16 bars before and B up to 16 bars after the overlap; a drifting outgoing grid makes the result Uncertain instead of falsely stable. Nudge B by ±1/±10 ms with the buttons or `,` / `.` (Shift for 10 ms).
+
+![MixStudio 0.30: Auto-align at the top of the Transition tab, after correcting a deliberate 15 ms offset](docs/screenshots/beatmatch.png)
+
+**A roomier Library with preview.** Library mode gives the browser most of the window while both decks stay visible as drop targets. Press ▶ on any row to hear the file alone at its original tempo, from the first detected drop; click or drag the preview waveform to jump, and press Space to stop. The mix playhead, loop and timeline view are restored, and nothing enters the project or export. Folder rows truncate long names with right-aligned counts, keys show as Camelot chips, Enter adds the selection and Ctrl+A selects every visible file.
+
+![MixStudio 0.30 Library with a preview playing, rendered from the real widgets with synthetic fixture files](docs/screenshots/library-preview.png)
+
+Symbols that rendered as "□" (arrows, tab icons, key-change labels) now use glyphs from the bundled fonts, guarded by a test. See the [0.30 beatmatch and Library verification](docs/BEATMATCH-LIBRARY-2026-10-26.md).
 
 ## Fixed in 0.29.1
 

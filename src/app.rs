@@ -8,6 +8,7 @@ mod sample_ui;
 mod stem_volume;
 mod library_ui;
 mod library_drop;
+mod library_listen;
 use crate::analysis::{self, Analysis, Audio, PEAK_HOP};
 use crate::engine::{self, Cmd, Shared, Snap};
 use crate::model::{Mix, Preset, StemMode, Track};
@@ -59,7 +60,7 @@ enum TlDrag { Edge { ti: usize, left: bool, original: Box<Track> }, Fade { ti: u
 /// `auto`: apply a confident result as soon as it arrives (Auto-align), then measure again to verify.
 struct BeatCheckState { evidence:Vec<crate::beatcheck::BeatEvidence>, stamp:Vec<u64>, incoming:usize, result:Option<Result<crate::beatcheck::Report,String>>, auto:bool }
 
-enum Msg { LibraryBatch(String,Option<library_drop::Target>,library_drop::LoadedRows), SourceLevels(String,Arc<Audio>,Result<crate::levels::SourceLevels,String>), RelinkReady(String,String,Result<Option<(PathBuf,Audio,Analysis)>,String>), BeatCheck(Vec<u64>,Result<crate::beatcheck::Report,String>,Vec<crate::beatcheck::BeatEvidence>), Found(Vec<PathBuf>), ImportPick(PathBuf), Picked(Vec<PathBuf>, Option<usize>,String), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>,String), Status(String), Opened(PathBuf), SaveTo(PathBuf,String), ExportTo(PathBuf,String), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>) }
+enum Msg { ListenReady(String,Result<(Arc<Audio>,Arc<Analysis>),String>), LibraryBatch(String,Option<library_drop::Target>,library_drop::LoadedRows), SourceLevels(String,Arc<Audio>,Result<crate::levels::SourceLevels,String>), RelinkReady(String,String,Result<Option<(PathBuf,Audio,Analysis)>,String>), BeatCheck(Vec<u64>,Result<crate::beatcheck::Report,String>,Vec<crate::beatcheck::BeatEvidence>), Found(Vec<PathBuf>), ImportPick(PathBuf), Picked(Vec<PathBuf>, Option<usize>,String), Loaded(PathBuf, Result<(Audio, Analysis), String>, Option<(usize, f64)>,String), Status(String), Opened(PathBuf), SaveTo(PathBuf,String), ExportTo(PathBuf,String), Stems(String, Result<Arc<crate::stems::Stems>, String>), LibFolders(Vec<PathBuf>) }
 
 struct StemJob { path: String, audio: Arc<Audio>, prog: Arc<std::sync::atomic::AtomicU32> }
 
@@ -72,6 +73,7 @@ pub struct App {
     section_state: Vec<u64>, select_sections: bool, section_range: Option<(usize, f64, f64)>, section_drag: Option<(usize, f64)>, section_copy: Option<crate::sections::SectionCopy>,
     source_levels:HashMap<String,(Arc<Audio>,Option<Result<crate::levels::SourceLevels,String>>)>,
     mix: Mix, store: HashMap<String, (Arc<Audio>, Arc<Analysis>)>,
+    listen: Option<library_listen::Listen>,
     out: crate::audio::Audio, ppb: f32, scroll: f64, tab: Tab, top: usize,
     sel: Option<usize>, sel_in: Option<usize>, undo: Vec<String>, redo: Vec<String>,
     tx: crossbeam_channel::Sender<Msg>, rx: crossbeam_channel::Receiver<Msg>, loading: usize,
@@ -187,7 +189,7 @@ impl App {
             if let Ok(e) = crate::stems::session_info() { *ep.lock().unwrap() = e; }
             let _ = tx.send(Msg::Stems(j.path, r)); ctx.request_repaint(); }); }
         let persistence=persistence::Persistence::new(lib.recovery_dir(),&Mix::default(),demo.is_none());
-        let mut a = App { samples:Default::default(), stem_volume_drag:None, persistence, transition_audition:None, transition_pre:2, transition_post:1, transition_repeat:true, comparison:Default::default(), active_loop:None, beat_check:None, section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, source_levels:HashMap::new(), mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
+        let mut a = App { listen:None, samples:Default::default(), stem_volume_drag:None, persistence, transition_audition:None, transition_pre:2, transition_post:1, transition_repeat:true, comparison:Default::default(), active_loop:None, beat_check:None, section_state: vec![], select_sections: false, section_range: None, section_drag: None, section_copy: None, source_levels:HashMap::new(), mix: Mix::default(), store: HashMap::new(), out, ppb: 7.0, scroll: -4.0, tab: Tab::Playlist, top: 3,
             sel: None, sel_in: None, undo: vec![], redo: vec![], tx, rx, loading: 0, drag: None, loop_on: false, bars: 8, snapping: Snapping::Full, lock: false,
             file: None, status: String::new(), follow: true, grid_drag: None, tl_drag: None, scratch_win: false, scratch_play: None, tempo_drag: None, export_fmt: 0, ffmpeg: crate::export::has_ffmpeg(), auto_track: None, auto_param: 0, auto_solo: false, auto_drag: None, auto_rect: Rect::NOTHING, vzoom: false, tc_side: 0, tc_drag: None, fx_sel: None, fx_drag: None, fx_kind: crate::fx::FxKind::Reverb, fx_target: 4, fx_name: String::new(), fx_presets: crate::fx::load_presets(), live_fx: None, live_start: 0.0, live_last: None, stem_sel: None, stem_drag: false, dl_offer: None, tl_hover: None, bm_mode: BmMode::Grid, bm_drag: None, bm_pop: None, taps: vec![], stems: HashMap::new(), stem_prog: HashMap::new(), stem_err: HashMap::new(), stem_tx, dl_prog, ep, ao_mode: Default::default(), ao_curve: Default::default(), ao_keep_first: true,
             lib,
@@ -208,6 +210,9 @@ impl App {
             a.ppb = 7.5; a.tab = Tab::Track; a.sel = Some(1); a.mix.metronome = true; a.follow = false;
             match std::env::var("MIXSTUDIO_DEMO_TAB").as_deref() { Ok("transition") => { a.tab = Tab::Transition; a.sel = None; }
                 Ok("master") => { a.tab = Tab::Master; a.sel = None; }
+                Ok("library") => { a.top = 2; a.tab = Tab::Library; a.sel = None; }
+                // Preview a demo file, paused so a screenshot makes no sound.
+                Ok("listen") => { a.top = 2; a.tab = Tab::Library; a.sel = None; let p=a.mix.tracks[0].path.clone(); a.toggle_listen(p,"Kick Test A minor.wav".into(),ctx); let _=a.out.tx.send(Cmd::Play(false)); }
                 // Offset B by 15 ms, then Auto-align it (screenshots and manual verification).
                 Ok("beatmatch") => { let k=std::env::var("MIXSTUDIO_DEMO_TRANSITION").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(0);
                     let i=a.mix.logical_transitions().get(k).map(|x|x.1).or(a.sel_in).unwrap(); a.sel_in=Some(i); a.tab = Tab::Transition; a.sel = None; a.nudge_incoming(i,15.0); a.request_beat_check(i,ctx,true); }
@@ -249,6 +254,7 @@ impl App {
     fn playing(&self) -> bool { self.out.shared.playing.load(std::sync::atomic::Ordering::Relaxed) }
     fn set_loop(&mut self,range:Option<(f64,f64)>) { self.active_loop=range; let _=self.out.tx.send(Cmd::Loop(range)); }
     fn toggle_playback(&mut self) {
+        if self.listen.is_some() {self.stop_listen();return;}
         if self.transition_audition.is_some() {self.stop_transition_audition();return;}
         if self.playing() && self.comparison.audition!=0 { self.stop_comparison(); }
         else { let _=self.out.tx.send(Cmd::Play(!self.playing())); }
@@ -262,8 +268,7 @@ impl App {
     }
     fn insert_cached(&mut self,p:PathBuf,au:Audio,an:Analysis,sample:Option<(usize,f64)>,cached:bool) {
         let key = p.display().to_string();
-        let mut t = Track { path: key.clone(), title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-            key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, fade_curve:[0.0;2], stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, gain_db:0.0, beat_mult:1.0, grid_mode: 1, stabilize: false, flex: None, imported: None, sections: vec![] };
+        let mut t = base_track(key.clone(), &an);
         if let Some((src, et)) = self.lib.ext_info(&key) { if !et.cues.is_empty() {
             let v: Vec<(f64, String)> = et.cues.iter().map(|c| (c.pos, if !c.name.is_empty() { c.name.clone() } else if c.hot >= 0 { format!("{} hot cue {}", src.name(), (b'A' + (c.hot as u8).min(25)) as char) } else { format!("{} cue", src.name()) })).collect();
             self.mix.cue_marks.insert(key.clone(), v); } }
@@ -662,6 +667,7 @@ impl eframe::App for App {
         self.poll_persistence();
         while let Ok(m) = self.rx.try_recv() { match m {
             Msg::LibraryBatch(id,target,rows)=>self.finish_library_batch(&id,target,rows),
+            Msg::ListenReady(path,result)=>self.listen_ready(&path,result),
             Msg::RelinkReady(id,old,result)=>{if id!=self.persistence.id {continue;}self.persistence.relink_busy=false;
                 match result {Ok(Some((path,audio,analysis)))=>self.persistence.candidate=Some(persistence::Candidate{old,path,audio:Arc::new(audio),analysis:Arc::new(analysis),confirmed:false}),Ok(None)=>{},Err(e)=>self.status=format!("Could not read replacement: {e}")}
             },
@@ -703,10 +709,12 @@ impl eframe::App for App {
         if !files.is_empty() { self.load_files(files, None); }
         self.validate_comparison();
         self.validate_transition_audition();
+        self.validate_listen();
         let _ = self.out.snapshot(Arc::new(self.build_playback_snap()));
         if !ctx.wants_keyboard_input() {
             if ctx.input(|i|i.modifiers.command && i.key_pressed(egui::Key::S)) { if ctx.input(|i|i.modifiers.shift) || self.file.is_none(){self.dialog(true,1);}else if let Some(p)=self.file.clone(){self.save(p);} }
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) { self.toggle_playback(); }
+            self.library_keys(ctx);
             for (key,sign) in [(egui::Key::Comma,1.0),(egui::Key::Period,-1.0)] {
                 if ctx.input(|i| !i.modifiers.command && i.key_pressed(key)) {
                     let target=if matches!(self.tab,Tab::Transition|Tab::Grid|Tab::Compare) { self.sel_in.or(self.sel) } else { self.sel.or(self.sel_in) };
@@ -725,7 +733,10 @@ impl eframe::App for App {
         if self.playing() || self.loading > 0 || self.lib.scanning { ctx.request_repaint(); } else { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
         self.top_bar(ctx);
         self.tab_bar(ctx);
-        let bottom_panel=if self.tab==Tab::Library {egui::TopBottomPanel::bottom("library_bottom").resizable(true).default_height(360.0).height_range(210.0..=ctx.screen_rect().height()*0.65)}else{egui::TopBottomPanel::bottom("bottom").exact_height(if self.tab==Tab::Compare {380.0}else{232.0})};
+        // Library mode (top bar) gives the browser most of the window; the Library tab keeps a smaller remembered size.
+        let screen=ctx.screen_rect().height();
+        let bottom_panel=if self.tab==Tab::Library && self.top==2 {egui::TopBottomPanel::bottom("library_focus").resizable(true).default_height(screen*0.58).height_range(260.0..=screen*0.85)}
+            else if self.tab==Tab::Library {egui::TopBottomPanel::bottom("library_bottom").resizable(true).default_height((screen*0.45).max(360.0)).height_range(210.0..=screen*0.8)}else{egui::TopBottomPanel::bottom("bottom").exact_height(if self.tab==Tab::Compare {380.0}else{232.0})};
         bottom_panel.frame(egui::Frame::none().fill(C::from_rgb(28, 29, 33)).inner_margin(10.0)).show(ctx, |ui| self.bottom(ui));
         self.transport(ctx);
         egui::SidePanel::right("master").exact_width(42.0).resizable(false).frame(egui::Frame::none().fill(BG)).show(ctx, |ui| self.master_meter(ui));
@@ -946,7 +957,7 @@ impl App {
         let tl_x0 = area.left() + HEAD_W; let tl_w = area.right() - tl_x0;
         let bpm = self.mix.bpm;
         let len = self.mix.length_beats().max(64.0);
-        let beat_now = self.beat();
+        let beat_now = self.timeline_beat();
         if ui.rect_contains_pointer(Rect::from_min_max(pos2(tl_x0, area.top()), area.max)) {
             let (zoom, sc, mx) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.pointer.hover_pos()));
             if zoom != 1.0 { let mxb = mx.map(|m| self.scroll + ((m.x - tl_x0) / self.ppb) as f64).unwrap_or(self.scroll);
@@ -954,7 +965,7 @@ impl App {
             let d = if sc.x.abs() > sc.y.abs() { sc.x } else { sc.y };
             if d != 0.0 && zoom == 1.0 { self.scroll -= (d / self.ppb) as f64; self.follow = false; }
         }
-        if self.playing() && self.follow { let px = (beat_now - self.scroll) as f32 * self.ppb; if px > tl_w * 0.85 || px < 0.0 { self.scroll = beat_now - (tl_w * 0.15 / self.ppb) as f64; } }
+        if self.playing() && self.follow && self.listen.is_none() { let px = (beat_now - self.scroll) as f32 * self.ppb; if px > tl_w * 0.85 || px < 0.0 { self.scroll = beat_now - (tl_w * 0.15 / self.ppb) as f64; } }
         self.scroll = self.scroll.clamp(-16.0, len);
         let ppb = self.ppb; let scroll = self.scroll;
         let bx = |b: f64| tl_x0 + ((b - scroll) as f32) * ppb;
@@ -2030,6 +2041,11 @@ impl App {
 
 }
 
+/// A new clip for an analysed source at its own tempo and analysed (Dynamic) grid.
+fn base_track(key: String, an: &Analysis) -> Track {
+    Track { path: key, title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
+        key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, fade_curve:[0.0;2], stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, gain_db:0.0, beat_mult:1.0, grid_mode: 1, stabilize: false, flex: None, imported: None, sections: vec![] }
+}
 /// Small dim section title with a hairline, used to group panel controls.
 fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(6.0);
@@ -2041,8 +2057,16 @@ fn section(ui: &mut egui::Ui, title: &str) {
 }
 /// Compact rounded label for track facts (BPM, key, duration).
 fn chip(ui: &mut egui::Ui, text: impl Into<String>, col: C) {
-    egui::Frame::none().fill(col.gamma_multiply(0.18)).rounding(Rounding::same(4.0)).inner_margin(egui::Margin::symmetric(6.0, 1.0))
-        .show(ui, |ui| { ui.label(egui::RichText::new(text.into()).color(col).size(12.0)); });
+    let galley = ui.painter().layout_no_wrap(text.into(), FontId::proportional(12.0), col);
+    let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(12.0, 4.0), Sense::hover());
+    ui.painter().rect_filled(rect, Rounding::same(4.0), col.gamma_multiply(0.18));
+    ui.painter().galley(rect.min + vec2(6.0, 2.0), galley, col);
+}
+/// Framed on/off button for filters, visible in both states.
+fn toggle_button(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
+    let r = ui.add(egui::Button::new(egui::RichText::new(text).color(if *on { ACCENT } else { TXT })).selected(*on));
+    if r.clicked() { *on = !*on; }
+    r
 }
 fn compat_col(c: u8) -> C { match c { 0 => C::from_rgb(90, 200, 110), 1 => C::from_rgb(230, 200, 60), _ => C::from_rgb(230, 80, 70) } }
 
