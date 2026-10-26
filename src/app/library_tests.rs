@@ -107,9 +107,22 @@ fn clicking_a_folder_filters_its_descendants_without_matching_similar_names() {
     a.lib.index.entries=vec![crate::library::Entry{path:"/Music/House/one.wav".into(),folder:"/Music".into(),..Default::default()},crate::library::Entry{path:"/Music/House/Deep/two.wav".into(),folder:"/Music".into(),..Default::default()},crate::library::Entry{path:"/Music/House2/three.wav".into(),folder:"/Music".into(),..Default::default()}];a.lib.gen+=1;
     let draw=|a:&mut App,events|ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(pos2(0.0,0.0),vec2(1000.0,420.0))),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|a.library_tab(ui));});
     draw(&mut a,vec![]);let out=draw(&mut a,vec![]);
-    let target=out.shapes.iter().find_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape {if t.galley.text()=="House (2)"{Some(t.pos+t.galley.size()*0.5)}else{None}}else{None}).unwrap();
+    let target=out.shapes.iter().find_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape {if t.galley.text()=="House"{Some(t.pos+t.galley.size()*0.5)}else{None}}else{None}).unwrap();
     let pointer=|pressed|egui::Event::PointerButton{pos:target,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
     draw(&mut a,vec![egui::Event::PointerMoved(target),pointer(true)]);draw(&mut a,vec![pointer(false)]);
     assert_eq!(a.library_ui.folder.as_deref(),Some("/Music/House"));assert_eq!(a.lib_view.len(),2);assert!(a.lib_view.iter().all(|&i|!a.lib.index.entries[i].path.contains("House2")));
+    drop(a);std::fs::remove_dir_all(dir).ok();
+}
+#[test]
+fn library_keys_select_all_visible_and_enter_adds_them_in_order() {
+    let (mut a,ctx,_rx,dir)=setup();a.tab=Tab::Library;
+    a.lib.index.entries=vec![crate::library::Entry{path:"/Music/b.wav".into(),..Default::default()},crate::library::Entry{path:"/Music/a.wav".into(),..Default::default()},crate::library::Entry{path:"/Music/skip.wav".into(),..Default::default()}];a.lib.gen+=1;
+    a.lib_q=".wav".into();a.lib_sort=crate::library::SortCol::Filename;a.lib_asc=true;a.refresh_library_view();
+    let key=|key,command|{let modifiers=egui::Modifiers{command,ctrl:command,..Default::default()};egui::RawInput{modifiers,events:vec![egui::Event::Key{key,physical_key:None,pressed:true,repeat:false,modifiers}],..Default::default()}};
+    let _=ctx.run(key(egui::Key::A,true),|ctx|a.library_keys(ctx));
+    assert_eq!(a.library_selected_paths(),vec!["/Music/a.wav","/Music/b.wav","/Music/skip.wav"]);
+    a.lib_q="a.wav".into();a.refresh_library_view();assert_eq!(a.library_selected_paths(),vec!["/Music/a.wav"]);
+    let before=a.loading;let _=ctx.run(key(egui::Key::Enter,false),|ctx|a.library_keys(ctx));
+    assert!(a.loading>before,"Enter should start adding the selection");
     drop(a);std::fs::remove_dir_all(dir).ok();
 }

@@ -208,6 +208,7 @@ impl App {
             a.ppb = 7.5; a.tab = Tab::Track; a.sel = Some(1); a.mix.metronome = true; a.follow = false;
             match std::env::var("MIXSTUDIO_DEMO_TAB").as_deref() { Ok("transition") => { a.tab = Tab::Transition; a.sel = None; }
                 Ok("master") => { a.tab = Tab::Master; a.sel = None; }
+                Ok("library") => { a.top = 2; a.tab = Tab::Library; a.sel = None; }
                 // Offset B by 15 ms, then Auto-align it (screenshots and manual verification).
                 Ok("beatmatch") => { let k=std::env::var("MIXSTUDIO_DEMO_TRANSITION").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(0);
                     let i=a.mix.logical_transitions().get(k).map(|x|x.1).or(a.sel_in).unwrap(); a.sel_in=Some(i); a.tab = Tab::Transition; a.sel = None; a.nudge_incoming(i,15.0); a.request_beat_check(i,ctx,true); }
@@ -707,6 +708,7 @@ impl eframe::App for App {
         if !ctx.wants_keyboard_input() {
             if ctx.input(|i|i.modifiers.command && i.key_pressed(egui::Key::S)) { if ctx.input(|i|i.modifiers.shift) || self.file.is_none(){self.dialog(true,1);}else if let Some(p)=self.file.clone(){self.save(p);} }
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) { self.toggle_playback(); }
+            self.library_keys(ctx);
             for (key,sign) in [(egui::Key::Comma,1.0),(egui::Key::Period,-1.0)] {
                 if ctx.input(|i| !i.modifiers.command && i.key_pressed(key)) {
                     let target=if matches!(self.tab,Tab::Transition|Tab::Grid|Tab::Compare) { self.sel_in.or(self.sel) } else { self.sel.or(self.sel_in) };
@@ -725,7 +727,10 @@ impl eframe::App for App {
         if self.playing() || self.loading > 0 || self.lib.scanning { ctx.request_repaint(); } else { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
         self.top_bar(ctx);
         self.tab_bar(ctx);
-        let bottom_panel=if self.tab==Tab::Library {egui::TopBottomPanel::bottom("library_bottom").resizable(true).default_height(360.0).height_range(210.0..=ctx.screen_rect().height()*0.65)}else{egui::TopBottomPanel::bottom("bottom").exact_height(if self.tab==Tab::Compare {380.0}else{232.0})};
+        // Library mode (top bar) gives the browser most of the window; the Library tab keeps a smaller remembered size.
+        let screen=ctx.screen_rect().height();
+        let bottom_panel=if self.tab==Tab::Library && self.top==2 {egui::TopBottomPanel::bottom("library_focus").resizable(true).default_height(screen*0.58).height_range(260.0..=screen*0.85)}
+            else if self.tab==Tab::Library {egui::TopBottomPanel::bottom("library_bottom").resizable(true).default_height((screen*0.45).max(360.0)).height_range(210.0..=screen*0.8)}else{egui::TopBottomPanel::bottom("bottom").exact_height(if self.tab==Tab::Compare {380.0}else{232.0})};
         bottom_panel.frame(egui::Frame::none().fill(C::from_rgb(28, 29, 33)).inner_margin(10.0)).show(ctx, |ui| self.bottom(ui));
         self.transport(ctx);
         egui::SidePanel::right("master").exact_width(42.0).resizable(false).frame(egui::Frame::none().fill(BG)).show(ctx, |ui| self.master_meter(ui));
@@ -2041,8 +2046,16 @@ fn section(ui: &mut egui::Ui, title: &str) {
 }
 /// Compact rounded label for track facts (BPM, key, duration).
 fn chip(ui: &mut egui::Ui, text: impl Into<String>, col: C) {
-    egui::Frame::none().fill(col.gamma_multiply(0.18)).rounding(Rounding::same(4.0)).inner_margin(egui::Margin::symmetric(6.0, 1.0))
-        .show(ui, |ui| { ui.label(egui::RichText::new(text.into()).color(col).size(12.0)); });
+    let galley = ui.painter().layout_no_wrap(text.into(), FontId::proportional(12.0), col);
+    let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(12.0, 4.0), Sense::hover());
+    ui.painter().rect_filled(rect, Rounding::same(4.0), col.gamma_multiply(0.18));
+    ui.painter().galley(rect.min + vec2(6.0, 2.0), galley, col);
+}
+/// Framed on/off button for filters, visible in both states.
+fn toggle_button(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
+    let r = ui.add(egui::Button::new(egui::RichText::new(text).color(if *on { ACCENT } else { TXT })).selected(*on));
+    if r.clicked() { *on = !*on; }
+    r
 }
 fn compat_col(c: u8) -> C { match c { 0 => C::from_rgb(90, 200, 110), 1 => C::from_rgb(230, 200, 60), _ => C::from_rgb(230, 80, 70) } }
 
