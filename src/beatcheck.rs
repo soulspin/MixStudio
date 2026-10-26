@@ -16,11 +16,17 @@ pub struct Report {
 #[derive(Clone,Debug)]
 pub struct BeatEvidence { pub beat:f64, pub reliable:bool, pub percussion:bool }
 
+/// Borrowed stereo samples, so analysis can search its mono rhythm signal (l = r) with the same detectors.
+#[derive(Clone, Copy)]
+pub(crate) struct Ch<'a> { pub l: &'a [f32], pub r: &'a [f32], pub sr: u32 }
+impl<'a> From<&'a Audio> for Ch<'a> { fn from(a: &'a Audio) -> Self { Ch { l: &a.l, r: &a.r, sr: a.sr } } }
+
 fn median(v: &mut [f64]) -> f64 { v.sort_by(f64::total_cmp); let n=v.len(); (v[n/2]+v[(n-1)/2])*0.5 }
 
 // A local bass-attack envelope, filtered per channel to tolerate opposite stereo polarity.
 // The rise test rejects continuous bass notes, where a slope alone is misleading.
-fn attack(a:&Audio, center:f64, period:f64)->Option<f64> {
+pub(crate) fn bass_attack(a:Ch, center:f64, period:f64)->Option<f64> { attack(a,center,period) }
+fn attack(a:Ch, center:f64, period:f64)->Option<f64> {
     if !center.is_finite() || period<=0.0 || a.sr<1000 { return None; }
     let sr=a.sr as f64; let radius=(period*0.20).min(0.10);
     let lo=((center-radius-0.08)*sr).max(0.0) as usize;
@@ -51,7 +57,7 @@ fn attack(a:&Audio, center:f64, period:f64)->Option<f64> {
 
 // Broadband high-pass onset energy catches snare/click attacks when the bass is weak.
 // A sharp rise from a quiet local floor is required; continuous tones are rejected.
-fn percussion_attack(a:&Audio,center:f64,period:f64)->Option<f64> {
+fn percussion_attack(a:Ch,center:f64,period:f64)->Option<f64> {
     if !center.is_finite() || !period.is_finite() || period<=0.0 || a.sr<1000 { return None; }
     let sr=a.sr as f64; let radius=(period*0.20).min(0.10);
     let lo=((center-radius-0.060)*sr).max(0.0) as usize; let hi=((center+radius+0.020)*sr).max(0.0) as usize;
@@ -72,7 +78,8 @@ fn percussion_attack(a:&Audio,center:f64,period:f64)->Option<f64> {
     if post<pre*2.5+0.004 { return None; }
     Some((lo+i) as f64/sr-center)
 }
-fn combined_attack(a:&Audio,center:f64,period:f64)->Option<(f64,bool)> {
+/// Attack offset (seconds from `center`) and whether only broadband percussion supported it.
+pub(crate) fn combined_attack(a:Ch,center:f64,period:f64)->Option<(f64,bool)> {
     let bass=attack(a,center,period); let high=percussion_attack(a,center,period);
     match (bass,high) {
         (Some(b),Some(h)) if (b-h).abs()>0.015=>None, // conflicting evidence stays uncertain
@@ -91,7 +98,7 @@ fn grid_attacks(t:&Track,au:&Audio,from:f64,to:f64)->Vec<(f64,f64,f64)> {
     for k in (lo..hi).step_by(stride) {
         let beat=k as f64; if g.cuts().any(|c|(c-beat).abs()<0.5) { continue; }
         let p=g.region_sec(beat+0.5,beat)-g.region_sec(beat-0.5,beat);
-        if let Some((x,_))=combined_attack(au,g.sec(beat),p) { v.push((beat,x/p,p)); }
+        if let Some((x,_))=combined_attack(au.into(),g.sec(beat),p) { v.push((beat,x/p,p)); }
     }
     v
 }
@@ -102,7 +109,13 @@ fn grid_relative(a:&Track,aa:&Audio,b:&Track,ab:&Audio,start:f64,end:f64,bpm_at:
     let xa=grid_attacks(a,aa,start-REACH_BEATS,end); let xb=grid_attacks(b,ab,start,end+REACH_BEATS);
     if xa.len()<12 || xb.len()<12 || xb.last()?.0-xb[0].0<16.0 { return None; }
     let mut av:Vec<_>=xa.iter().map(|p|p.1).collect(); let ma=median(&mut av);
+    // A is the reference: its own grid must hold steady over the measured span, or B would be aligned to a drifting grid.
+    let own:Vec<(f64,f64)>=xa.iter().map(|&(k,x,p)|(k,x*p)).collect(); let amid=(own[0].0+own[own.len()-1].0)*0.5;
+    let aline=fit_line(&own,amid); let aslope=(aline[1].1-aline[0].1)/(aline[1].0-aline[0].0).max(1e-9);
     let mut ad:Vec<_>=xa.iter().map(|p|(p.1-ma).abs()).collect(); let ja=median(&mut ad);
+    let mut ares:Vec<_>=own.iter().map(|(k,s)|(s-aline[0].1-aslope*(k-aline[0].0)).abs()).collect(); ares.sort_by(f64::total_cmp);
+    let a_ms=60000.0/bpm_at(amid)/(xa.iter().map(|p|p.2).sum::<f64>()/xa.len() as f64);
+    let a_unsteady=(aline[1].1-aline[0].1).abs()*a_ms>8.0 || ares[(ares.len()*9/10).min(ares.len()-1)]*a_ms>15.0;
     let rel:Vec<(f64,f64)>=xb.iter().map(|&(k,y,p)|(k,(y-ma)*p)).collect();
     let mid=(rel[0].0+rel[rel.len()-1].0)*0.5; let bpm=bpm_at(mid); if !bpm.is_finite() || bpm<=0.0 { return None; }
     let period=xb.iter().map(|p|p.2).sum::<f64>()/xb.len() as f64; let ms=60000.0/bpm/period; // source seconds -> mix ms
@@ -111,7 +124,7 @@ fn grid_relative(a:&Track,aa:&Audio,b:&Track,ab:&Audio,start:f64,end:f64,bpm_at:
     let jb=median(&mut dev); let tail=dev[(dev.len()*9/10).min(dev.len()-1)];
     let mut sv:Vec<_>=rel.iter().map(|p|p.1).collect(); let correction=median(&mut sv);
     let jitter=(jb*ms).max(ja*60000.0/bpm); let drift=(line[1].1-line[0].1)*ms;
-    let verdict=if jitter>6.0 || tail*ms>15.0 { Verdict::Uncertain } else if drift.abs()>8.0 { Verdict::Drifting } else { Verdict::Stable };
+    let verdict=if a_unsteady || jitter>6.0 || tail*ms>15.0 { Verdict::Uncertain } else if drift.abs()>8.0 { Verdict::Drifting } else { Verdict::Stable };
     Some(Report{verdict,offset_ms:correction*ms,drift_ms:drift,jitter_ms:jitter,correction_seconds:correction,pairs:xb.len(),sampled:xa.len(),line,paired:false})
 }
 
@@ -128,7 +141,7 @@ fn fit_line(points:&[(f64,f64)],mid:f64)->[(f64,f64);2] {
 /// Read-only evidence for the ignored local-corpus diagnostic; residuals are not ground truth.
 #[cfg(test)]
 pub(crate) fn diagnostic_attacks(a: &Audio, center: f64, period: f64) -> (Option<f64>, Option<f64>, Option<(f64, bool)>) {
-    (attack(a, center, period), percussion_attack(a, center, period), combined_attack(a, center, period))
+    (attack(a.into(), center, period), percussion_attack(a.into(), center, period), combined_attack(a.into(), center, period))
 }
 
 #[cfg(test)]
@@ -152,7 +165,7 @@ pub fn inspect(a:&Track, aa:&Audio, b:&Track, ab:&Audio, start:f64, end:f64, bpm
         let pa=ga.region_sec(beat+0.5,beat)-ga.region_sec(beat-0.5,beat);
         let pb=gb.region_sec(beat+0.5,beat)-gb.region_sec(beat-0.5,beat);
         let bpm=bpm_at(beat); if !bpm.is_finite() || bpm<=0.0 { continue; }
-        if let (Some((x,ha)),Some((y,hb)))=(combined_attack(aa,ga.sec(beat),pa),combined_attack(ab,gb.sec(beat),pb)) {
+        if let (Some((x,ha)),Some((y,hb)))=(combined_attack(aa.into(),ga.sec(beat),pa),combined_attack(ab.into(),gb.sec(beat),pb)) {
             let ev=evidence.last_mut().unwrap(); ev.reliable=true; ev.percussion=ha||hb;
             let delta=y/pb-x/pa; pairs.push((beat,delta*60000.0/bpm)); source.push(delta*pb);
         }
@@ -199,8 +212,8 @@ mod tests {
                 let mut t=t.clone();t.grid_mode=mode;let g=t.grid();let mut bass=vec![];let mut high=vec![];
                 for k in s.ceil() as i64+1..e.floor() as i64-1 {
                     let beat=k as f64;let period=g.sec(beat+0.5)-g.sec(beat-0.5);
-                    bass.push(attack(audio,g.sec(beat),period).map(|v|(v*10000.0).round()/10.0));
-                    high.push(percussion_attack(audio,g.sec(beat),period).map(|v|(v*10000.0).round()/10.0));
+                    bass.push(attack(audio.into(),g.sec(beat),period).map(|v|(v*10000.0).round()/10.0));
+                    high.push(percussion_attack(audio.into(),g.sec(beat),period).map(|v|(v*10000.0).round()/10.0));
                 }
                 eprintln!("{} mode {mode} bass ms {bass:?} percussion ms {high:?}",t.title);
             }
@@ -278,6 +291,14 @@ mod tests {
         let after=measure(&a,&aa,&b,&ab,20.0,40.0,|_|120.0).unwrap(); assert!(after.offset_ms.abs()<2.0,"{after:?}");
         let silent=Audio{sr:16000,l:vec![0.0;640000],r:vec![0.0;640000]};
         assert!(measure(&a,&aa,&b,&silent,20.0,40.0,|_|120.0).is_err());
+    }
+    #[test]
+    fn grid_relative_fallback_distrusts_a_drifting_reference_grid() {
+        let mut a=track(); a.duration=40.0; let b=a.clone();
+        let synth=|times:Vec<f64>|{let (l,r)=crate::testgen::synth_kicks(&times,40.0,16000);Audio{sr:16000,l,r}};
+        let aa=synth((0..24).map(|i|0.25+i as f64*0.5+i as f64*0.003).collect()); let ab=synth((38..79).map(|i|0.25+i as f64*0.5).collect());
+        let r=measure(&a,&aa,&b,&ab,20.0,40.0,|_|120.0).unwrap();
+        assert!(!r.paired && r.verdict==Verdict::Uncertain,"A drifts 70 ms against its own grid: {r:?}");
     }
     #[test]
     fn measured_drift_line_corrects_phase_and_tempo_together() {
