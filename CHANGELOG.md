@@ -25,6 +25,12 @@ Group 3 (sound quality):
 - The metronome clicks only when the playhead crosses a beat start, not mid-beat after a seek or resume; loops click on every pass (26).
 - Deck volume, mute/solo, A/B monitor switches and master gain ramp over ~5 ms instead of stepping (27).
 
+Group 4 (split songs):
+
+- Splitting inside a fade-in or fade-out is neutral: each half continues the same curve (`fade_skip` stores the part of a fade outside the clip), so the sound no longer jumps at the split (12).
+- Set all overlaps, Overlap outros with intros, Auto-order and the playlist ⏶/⏷ lay out whole songs: a split song's halves move together, stay on one deck and keep their transitions. The playlist arrows use the chosen overlap length instead of 16 bars (13).
+- Grid edits on one half of a split song (Beatgrid ±ms, `,`/`.`, Set downbeat, Reset/Use current analysis, grid mode, fixed BPM, beat-marker drags) apply to the whole song, so its halves stay contiguous and its transition unchanged (14).
+
 ## 0.30.0-beta
 
 - **Beat analysis (cache v14):** search kicks on a straight clock directly and adopt it when it is supported throughout the source, the tracker departs from it, no run of attacks corroborates the departure and it lands clearly more kicks. A final check moves a grid half a beat or by its median kick offset only when that lands at least half as many kicks again. Fixes steady tracks drifting tens of ms off their kicks or sitting on offbeat hi-hats, which made 125/126 BPM imports fall out of sync.

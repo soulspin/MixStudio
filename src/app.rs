@@ -349,15 +349,17 @@ impl App {
     /// Reorder the main-deck tracks for key and tempo flow (and the chosen energy curve); undoable.
     fn auto_order(&mut self) {
         if self.mix.has_transition_locks() {self.status="Unlock protected transitions before Auto-order.".into();return;}
-        let o = self.mix.main_order(); if o.len() < 3 { self.status = "Auto-order needs at least 3 tracks".into(); return; }
+        // Order whole songs: split fragments are one item and stay together.
+        let songs = self.mix.song_groups(&self.mix.main_order()); if songs.len() < 3 { self.status = "Auto-order needs at least 3 tracks".into(); return; }
+        let o: Vec<usize> = songs.iter().map(|g| g[0]).collect();
         let items: Vec<_> = o.iter().map(|&i| self.ao_item(i)).collect();
-        let locked: Vec<bool> = o.iter().enumerate().map(|(k, &i)| self.mix.tracks[i].locked || (k == 0 && self.ao_keep_first)).collect();
+        let locked: Vec<bool> = songs.iter().enumerate().map(|(k, g)| g.iter().any(|&i| self.mix.tracks[i].locked) || (k == 0 && self.ao_keep_first)).collect();
         let opts = crate::automix::Opts { mode: self.ao_mode, curve: self.ao_curve };
         let t0 = std::time::Instant::now();
         let ord = crate::automix::optimize(&items, &locked, &opts);
         let (c0, c1) = (crate::automix::order_cost(&items, &(0..o.len()).collect::<Vec<_>>(), &opts), crate::automix::order_cost(&items, &ord, &opts));
-        let new: Vec<usize> = ord.iter().map(|&k| o[k]).collect();
-        if new == o { self.status = "Auto-order: the current order is already the best one found".into(); return; }
+        let new: Vec<usize> = ord.iter().flat_map(|&k| songs[k].iter().copied()).collect();
+        if ord.iter().copied().eq(0..songs.len()) { self.status = "Auto-order: the current order is already the best one found".into(); return; }
         self.snapshot();
         let bars = self.bars as f64; let ph = self.phrase_list(); let np = self.mix.relayout_phrases(&new, bars, &ph);
         let greens = ord.windows(2).filter(|w| crate::automix::rate(&items[w[0]], &items[w[1]]).1 == 0).count();
@@ -379,16 +381,18 @@ impl App {
     /// Make the audio at mix beat `beat` (inside track ti) the downbeat, placed on the nearest mix bar.
     fn set_downbeat_at(&mut self, ti: usize, beat: f64) {
         if self.arrangement_locked() {return;}
-        let t = &mut self.mix.tracks[ti];
+        let t = &mut self.mix.tracks[ti]; let old = t.start_beat;
         let sec = t.sec_at(beat); let target = (beat / 4.0).round() * 4.0;
         t.offset = sec; t.start_beat = target; t.normalize_grid();
+        self.mix.sync_fragment_grid(ti, old);
     }
     /// Shift the beat grid (fixed or beat map) relative to the audio by `dsec` seconds.
     fn nudge(&mut self, ti: usize, dsec: f64) {
         if self.arrangement_locked() {return;}
-        let t = &mut self.mix.tracks[ti];
+        let t = &mut self.mix.tracks[ti]; let old = t.start_beat;
         if t.grid().dynamic() { t.edit_map(|m| m.shift(dsec)); }
         else { t.offset += dsec; t.normalize_grid(); }
+        self.mix.sync_fragment_grid(ti, old);
     }
     fn prepare_required_stems(&mut self) {
         let indices:Vec<_>=self.mix.tracks.iter().enumerate().filter(|(_,t)|!t.stem_mutes.is_empty() || t.auto.iter().skip(5).any(|p|!p.is_empty())).map(|(i,_)|i).collect();
@@ -1512,7 +1516,7 @@ impl App {
             else if at.elapsed().as_secs_f32() > 0.7 { self.bm_pop = None; }
         }
         if let Some((ti, k, what)) = bm_act {
-            self.snapshot(); self.sel = Some(ti);
+            self.snapshot(); self.sel = Some(ti); let old = self.mix.tracks[ti].start_beat;
             match what {
                 0 => { let t = &mut self.mix.tracks[ti];
                     if self.bm_mode!=BmMode::Grid {
@@ -1527,11 +1531,12 @@ impl App {
                     let mut m = (**t.map.as_ref().unwrap()).clone(); m.trim_before(i); t.map = Some(Arc::new(m));
                     t.offset = sec; t.start_beat = (mb / 4.0).round() * 4.0; t.normalize_grid(); self.status = "First beat set".into(); }
             }
+            self.mix.sync_fragment_grid(ti, old);
         }
         if let Some(d) = self.bm_drag.clone() {
             if ui.input(|i| i.pointer.primary_down()) && d.ti < self.mix.tracks.len() {
                 if let Some(pp) = ui.input(|i| i.pointer.hover_pos()) { if pp.x != d.lastx {
-                    let t = &mut self.mix.tracks[d.ti];
+                    let t = &mut self.mix.tracks[d.ti]; let old = t.start_beat;
                     let m = t.map.as_ref().unwrap(); let per = if d.i + 1 < m.beats.len() { m.beats[d.i + 1] - m.beats[d.i] } else { 60.0 / t.bpm };
                     let dsec = ((pp.x - d.lastx) / ppb) as f64 * per;
                     let msg = match d.mode {
@@ -1542,7 +1547,7 @@ impl App {
                             ui.painter().text(pp + vec2(12.0, -14.0), Align2::LEFT_BOTTOM, format!("{pct:+.2} %"), FontId::proportional(12.0), bm_col(BmMode::Following));
                             format!("Following beats stretched: tempo {pct:+.2} % (anchored 1 bar to the left)") }
                     };
-                    self.status = msg; self.bm_drag = Some(BmDrag { lastx: pp.x, ..d });
+                    self.status = msg; self.mix.sync_fragment_grid(d.ti, old); self.bm_drag = Some(BmDrag { lastx: pp.x, ..d });
                 } }
             } else { self.bm_drag = None; }
         }
@@ -1620,7 +1625,9 @@ impl App {
                     TlDrag::Fade { ti, left } => if ti < self.mix.tracks.len() {
                         let t = &mut self.mix.tracks[ti]; let (vs, ve) = (t.vis_start(bpm), t.end(bpm)); let len = ve - vs;
                         let snapb = |x: f64| if self.snapping == Snapping::Off { x } else { (x * 2.0).round() / 2.0 };
-                        if left { t.fade_in = snapb(b - vs).clamp(0.0, (len - t.fade_out).max(0.0)); } else { t.fade_out = snapb(ve - b).clamp(0.0, (len - t.fade_in).max(0.0)); } },
+                        let vis_in = (t.fade_in - t.fade_skip[0]).max(0.0); let vis_out = (t.fade_out - t.fade_skip[1]).max(0.0);
+                        if left { let v = snapb(b - vs).clamp(0.0, (len - vis_out).max(0.0)); t.fade_in = if v > 0.0 { v + t.fade_skip[0] } else { 0.0 }; if v == 0.0 { t.fade_skip[0] = 0.0; } }
+                        else { let v = snapb(ve - b).clamp(0.0, (len - vis_in).max(0.0)); t.fade_out = if v > 0.0 { v + t.fade_skip[1] } else { 0.0 }; if v == 0.0 { t.fade_skip[1] = 0.0; } } },
                     TlDrag::Curve {ti,left,wave,reset} => if ti<self.mix.tracks.len() {
                         let gain=((wave.bottom()-pp.y)/wave.height()).clamp(0.0,1.0);
                         self.mix.tracks[ti].fade_curve[if left {0}else{1}]=if reset {0.0}else{crate::fades::shape_from_midpoint(gain)};
@@ -1794,8 +1801,9 @@ impl App {
             0 => { self.sel = Some(i); self.seek(self.mix.tracks[i].vis_start(self.mix.bpm)); }
             9 => { self.sel = Some(i); self.remove_sel(); }
             7 => { self.snapshot(); self.mix.tracks[i].locked = !self.mix.tracks[i].locked; }
-            d => { let k = order.iter().position(|&x| x == i).unwrap() as i32; let n = k + d;
-                if n >= 0 && (n as usize) < order.len() { self.snapshot(); let mut o = order.clone(); o.swap(k as usize, n as usize); self.mix.relayout(&o, 16.0); } }
+            // Move the whole song (all split fragments) one song up or down.
+            d => { let mut songs = self.mix.song_groups(&order); let k = songs.iter().position(|g| g.contains(&i)).unwrap() as i32; let n = k + d;
+                if n >= 0 && (n as usize) < songs.len() { self.snapshot(); songs.swap(k as usize, n as usize); let o: Vec<usize> = songs.concat(); self.mix.relayout(&o, self.bars as f64); } }
         } }
     }
 
@@ -1851,7 +1859,7 @@ impl App {
         if self.arrangement_locked() { self.status="Unlock editing and protected transitions to correct the grid.".into(); return; }
         let Some(mut t)=self.mix.tracks.get(i).cloned() else { return; };
         match t.adjust_grid(scope,beat,seconds) {
-            Ok(d) if d.abs()>1e-10=>{ self.snapshot(); self.mix.tracks[i]=t; self.status=format!("Grid markers moved {:+.1} ms in source audio. Undo: Ctrl+Z.",d*1000.0); self.beat_check=None; },
+            Ok(d) if d.abs()>1e-10=>{ self.snapshot(); let old=self.mix.tracks[i].start_beat; self.mix.tracks[i]=t; self.mix.sync_fragment_grid(i,old); self.status=format!("Grid markers moved {:+.1} ms in source audio. Undo: Ctrl+Z.",d*1000.0); self.beat_check=None; },
             Ok(_)=>{}, Err(e)=>self.status=e,
         }
     }
@@ -1892,6 +1900,7 @@ impl App {
         // with the clip's previous bar phase: a moved downbeat must not leave kicks between mix beats.
         let kept=old.vis_start(0.0)+(t.start_beat-t.vis_start(0.0)); let bar=old.start_beat.round();
         t.start_beat=bar+((kept-bar)/4.0).round()*4.0;
+        self.mix.sync_fragment_grid(i,old.start_beat);
     }
     /// Measured corrections need an editable, uncut incoming clip.
     fn beat_check_editable(&self, incoming:usize)->bool {
@@ -1961,7 +1970,7 @@ impl App {
                             if ui.add_enabled(available,egui::SelectableLabel::new(k==mode,crate::model::GRID_MODES[k])).on_hover_text(crate::model::GRID_HELP[k]).clicked() { mode=k; }
                         }
                     }); });
-                    if mode!=cur { self.snapshot(); if mode==1 { if let Some((_,a))=self.store.get(&t.path) { self.mix.tracks[i].map=a.beat_map(); } } self.mix.tracks[i].set_grid_mode(mode as u8); }
+                    if mode!=cur { self.snapshot(); if mode==1 { if let Some((_,a))=self.store.get(&t.path) { self.mix.tracks[i].map=a.beat_map(); } } self.mix.tracks[i].set_grid_mode(mode as u8); self.mix.sync_fragment_grid(i,t.start_beat); }
                 });
                 if let Some((_,a))=self.store.get(&t.path) {
                     if a.rhythm.as_ref().is_some_and(|e|e.phase_bridged) {ui.colored_label(C::LIGHT_YELLOW,"Source analysis: a supported steady clock bridges an inconsistent passage. Reset to analysis adopts it; listen and check bar 1.");}
@@ -2002,7 +2011,7 @@ impl App {
                             }
                         }
                         if !self.taps.is_empty() { ui.label(format!("{} taps",self.taps.len())); }
-                        if (bpm-t.bpm).abs()>1e-9 { self.snapshot(); self.mix.tracks[i].bpm=bpm; self.mix.tracks[i].grid_mode=0; }
+                        if (bpm-t.bpm).abs()>1e-9 { self.snapshot(); self.mix.tracks[i].bpm=bpm; self.mix.tracks[i].grid_mode=0; self.mix.sync_fragment_grid(i,t.start_beat); }
                     });
                 });
                 ui.label(egui::RichText::new(match self.bm_mode { BmMode::Grid=>"Whole grid: correct a constant phase error. Clip placement stays fixed.",BmMode::Single=>"Single beat: correct one marker; neighbouring beats stay anchored.",BmMode::Following=>"Beat + following: stretch from the beat one bar before the target; earlier beats stay anchored." }).color(DIM).size(11.0));
@@ -2056,7 +2065,7 @@ impl App {
 /// A new clip for an analysed source at its own tempo and analysed (Dynamic) grid.
 fn base_track(key: String, an: &Analysis) -> Track {
     Track { path: key, title: an.title.clone(), artist: if an.artist.is_empty() { "Unknown artist".into() } else { an.artist.clone() }, bpm: an.bpm, offset: an.offset,
-        key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, fade_curve:[0.0;2], stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, gain_db:0.0, beat_mult:1.0, grid_mode: 1, stabilize: false, flex: None, imported: None, sections: vec![] }
+        key: an.key.clone(), duration: an.duration, start_beat: 0.0, lane: 0, trans: Default::default(), map: an.beat_map(), locked: false, trim_in: 0.0, trim_out: 0.0, fade_in: 0.0, fade_out: 0.0, fade_curve:[0.0;2],  fade_skip: [0.0; 2], stem_view: 0, stem_mutes: vec![], auto: vec![], stretch: 0, gain_db:0.0, beat_mult:1.0, grid_mode: 1, stabilize: false, flex: None, imported: None, sections: vec![] }
 }
 /// Small dim section title with a hairline, used to group panel controls.
 fn section(ui: &mut egui::Ui, title: &str) {

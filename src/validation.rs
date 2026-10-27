@@ -30,7 +30,7 @@ pub fn validate_mix(m: &Mix) -> Result<(), String> {
         require(t.lane < 4, &field("lane must be 0–3"))?;
         require(tempo(t.bpm) && number(t.beat_mult) && t.beat_mult>=1e-4 && t.beat_mult<=10000.0, &field("tempo/beat ratio"))?;
         require(number(t.duration) && t.duration>0.0 && number(t.offset) && number(t.start_beat), &field("duration/placement"))?;
-        require([t.trim_in,t.trim_out,t.fade_in,t.fade_out].iter().all(|&x| number(x) && x>=0.0)
+        require([t.trim_in,t.trim_out,t.fade_in,t.fade_out,t.fade_skip[0],t.fade_skip[1]].iter().all(|&x| number(x) && x>=0.0)
             && t.trim_in+t.trim_out<=t.duration+1e-7, &field("trim/fades"))?;
         require(t.grid_mode<=4 && t.stretch<=3 && t.stem_view<=2 && (t.trans.ratio as usize)<crate::model::RATIOS.len(), &field("mode"))?;
         for grid in [&t.map,&t.flex,&t.imported].into_iter().flatten() { map(grid,&field("beat map must be strictly increasing"))?; }
