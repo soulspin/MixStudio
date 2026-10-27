@@ -29,7 +29,7 @@ impl App {
         let Some((_,_,s,e))=self.mix.logical_transitions().into_iter().find(|x|x.1==i) else {return;};
         let Some(stamp)=self.alignment_stamp(i) else {self.status="Load both source tracks before listening.".into();return;};
         if self.transition_members(i).is_none_or(|g|g.iter().flatten().any(|k|!self.store.contains_key(&self.mix.tracks[*k].path))) {self.status="Load every source fragment before listening.".into();return;}
-        self.stop_comparison();self.stop_transition_audition();
+        self.stop_listen();self.stop_comparison();self.stop_transition_audition();
         let from=(s-self.transition_pre as f64*4.0).max(0.0);let to=(e+self.transition_post as f64*4.0).min(self.mix.length_beats());
         if to<=from {return;}
         self.transition_audition=Some(Audition{incoming:i,side:side.clamp(1,3),from,to,repeat,stamp,restore_loop:self.active_loop,restore_loop_on:self.loop_on});

@@ -68,7 +68,7 @@ impl App {
         let mut dry=Snap::build(&mix,&audio); dry.trans.clear(); dry.tcurves.clear(); dry.tempo=normal.tempo; dry.metro=normal.metro; dry
     }
     pub(super) fn start_comparison_preview(&mut self,side:u8,from:f64,to:f64) {
-        self.stop_transition_audition();
+        self.stop_listen(); self.stop_transition_audition();
         if from>=to { return; }
         if self.comparison.audition==0 {
             self.comparison.restore_loop=self.active_loop;

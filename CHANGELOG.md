@@ -12,6 +12,11 @@ Fixes from the [2026-10-27 audit](docs/AUDIT-2026-10-27.md), group 1 (crashes an
 - A non-finite duration no longer empties the library index, and an unreadable library or index file is kept as `.unreadable-<time>` instead of being replaced (16).
 - A decoder panic on a damaged file becomes a normal error in every loader (drop, preview, file load, Library analysis, relink) instead of "analysis timed out" or a load that never finishes (18).
 
+Group 2 (regressions in 0.30):
+
+- During a Library preview, edits (Ctrl+E, paste, nudge), snapping, ruler clicks and the transport buttons use the mix position. A click moves the parked mix playhead, which is kept when the preview stops; the preview itself is not moved. Transition and Compare auditions stop a running preview first (6, 7).
+- The Details folder column compares whole folder names and the deepest music root, so `/Music/House2` is no longer shown as "2" under a `/Music/House` root (39).
+
 ## 0.30.0-beta
 
 - **Beat analysis (cache v14):** search kicks on a straight clock directly and adopt it when it is supported throughout the source, the tracker departs from it, no run of attacks corroborates the departure and it lands clearly more kicks. A final check moves a grid half a beat or by its median kick offset only when that lands at least half as many kicks again. Fixes steady tracks drifting tens of ms off their kicks or sitting on offbeat hi-hats, which made 125/126 BPM imports fall out of sync.

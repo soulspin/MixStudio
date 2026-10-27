@@ -217,8 +217,7 @@ impl App {
                 row.col(|ui|{match &e.key {Some(key)=>chip(ui,key.clone(),if unavailable {DIM} else {key_col(key)}),None=>{ui.label(egui::RichText::new("—").color(DIM));}}});
                 row.col(|ui|{ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{ui.add_space(8.0);ui.label(egui::RichText::new(fmt_t(e.duration)).size(12.5).color(color));});});
                 if self.library_ui.details{
-                    let parent=PathBuf::from(&e.path).parent().map(|p|p.display().to_string()).unwrap_or_default();
-                    let folder=roots.iter().find_map(|r|parent.strip_prefix(r.as_str()).map(|rest|rest.trim_start_matches('/').to_string())).filter(|f|!f.is_empty()).unwrap_or(parent);
+                    let folder=relative_folder(&e.path,&roots);
                     for text in [folder,e.genre.clone()]{row.col(|ui|{ui.add(egui::Label::new(egui::RichText::new(text).size(11.5).color(DIM)).truncate());});}
                 }
                 let response=row.response().on_hover_ui(|ui|{ui.set_max_width(480.0);ui.strong(e.filename());ui.label(format!("{} · {}",e.artist,e.title));ui.label(egui::RichText::new(&e.path).size(11.0).color(DIM));
@@ -249,5 +248,13 @@ impl App {
         else if mods.command{if !self.lib_sel.remove(&path){self.lib_sel.insert(path.clone());}self.lib_anchor=Some(path.clone());}
         else{self.lib_sel.clear();self.lib_sel.insert(path.clone());self.lib_anchor=Some(path.clone());}
     }
+}
+/// A file's folder relative to the deepest music root containing it, compared by whole path components
+/// (so `/Music/House2/x` is not inside `/Music/House`). Files directly in a root show the root's name.
+pub(super) fn relative_folder(path:&str,roots:&[String])->String {
+    let parent=std::path::Path::new(path).parent().unwrap_or(std::path::Path::new(""));
+    roots.iter().filter_map(|r|parent.strip_prefix(r).ok().map(|rest|(r,rest))).max_by_key(|(r,_)|r.len())
+        .map(|(r,rest)|if rest.as_os_str().is_empty() { std::path::Path::new(r).file_name().map(|n|n.to_string_lossy().into_owned()).unwrap_or_else(||r.clone()) } else { rest.display().to_string() })
+        .unwrap_or_else(||parent.display().to_string())
 }
 fn sort_name(col:crate::library::SortCol)->&'static str {use crate::library::SortCol::*;match col{Filename=>"Filename",Title=>"Title",Artist=>"Artist",Bpm=>"BPM",Key=>"Key",Duration=>"Length",Genre=>"Genre",Folder=>"Folder"}}
