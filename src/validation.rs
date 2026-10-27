@@ -9,7 +9,7 @@ fn tempo(x: f64) -> bool { x.is_finite() && (1.0..=10000.0).contains(&x) }
 fn level(x: f32, lo: f32, hi: f32) -> bool { x.is_finite() && (lo..=hi).contains(&x) }
 fn map(m: &BeatMap, field: &str) -> Result<(), String> {
     require(tempo(m.bpm) && m.beats.len() >= 2 && m.beats.iter().all(|&x| number(x))
-        && m.beats.windows(2).all(|w| (0.006..=60.0).contains(&(w[1]-w[0]))), field)
+        && m.beats.windows(2).all(|w| (crate::beatmap::MIN_BEAT_GAP*0.5..=60.0).contains(&(w[1]-w[0]))), field)
 }
 
 /// Accept legacy duplicate automation times (dragging them is guarded), but

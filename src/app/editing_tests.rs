@@ -78,3 +78,39 @@ fn sample_rectangle_selects_both_lanes_and_drag_keeps_spacing() {
     assert!((a.mix.tracks[first].vis_start(0.0)-16.0).abs()<1e-8);assert!((a.mix.tracks[second].vis_start(0.0)-32.0).abs()<1e-8);assert_eq!(a.undo.len(),1);
     a.do_undo();assert_eq!(a.mix.tracks[first].vis_start(0.0),8.0);assert_eq!(a.mix.tracks[second].vis_start(0.0),24.0);drop(a);std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn fades_stay_inside_clips_after_split_and_section_delete_and_dragging_cannot_panic() {
+    let (mut a,ctx,_rx,dir)=setup(); a.mix.tracks[0].fade_in=48.0; a.mix.tracks[0].fade_out=40.0;
+    let right=a.mix.split(0,16.0).unwrap();
+    for i in [0,right] { let t=&a.mix.tracks[i]; let len=t.end(0.0)-t.vis_start(0.0); assert!(t.fade_in+t.fade_out<=len+1e-9,"fragment {i}: fades {}+{} exceed {len}",t.fade_in,t.fade_out); }
+    a.tl_drag=Some(TlDrag::Fade{ti:0,left:false});
+    let p=pos2(300.0,150.0);
+    frame(&mut a,&ctx,vec![egui::Event::PointerMoved(p),egui::Event::PointerButton{pos:p,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}],1000.0);
+    frame(&mut a,&ctx,vec![egui::Event::PointerMoved(p+vec2(5.0,0.0))],1000.0);
+    let t=&a.mix.tracks[0]; assert!(t.fade_out>=0.0 && t.fade_in+t.fade_out<=t.end(0.0)-t.vis_start(0.0)+1e-9);
+    let t=&mut a.mix.tracks[right]; t.fade_in=0.0; t.fade_out=40.0; let (vs,ve)=(t.vis_start(0.0),t.end(0.0));
+    a.mix.delete_section(right,vs+4.0,ve-4.0).unwrap();
+    let t=&a.mix.tracks[right]; assert!(t.fade_out<=t.end(0.0)-t.vis_start(0.0)+1e-9,"section delete left a fade longer than the clip");
+    drop(a);std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn delete_or_undo_during_an_edge_drag_cannot_overwrite_another_track() {
+    for undo in [false,true] {
+        let (mut a,ctx,_rx,dir)=setup();
+        let mut b=a.mix.tracks[0].clone();b.path="other.wav".into();b.lane=1;b.start_beat=48.0;b.title="Other".into();
+        let (au,an)=a.store["test.wav"].clone();a.store.insert("other.wav".into(),(au,an));a.mix.tracks.push(b);
+        frame(&mut a,&ctx,vec![],1000.0);
+        let pos=pos2(600.0,40.0);
+        frame(&mut a,&ctx,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}],1000.0);
+        a.snapshot();a.tl_drag=Some(TlDrag::Edge{ti:0,left:false,original:Box::new(a.mix.tracks[0].clone())});a.sel=Some(0);a.auto_track=Some(1);
+        if undo { a.mix.tracks.remove(0); a.do_undo(); a.mix.tracks.swap(0,1); } else { a.remove_sel(); }
+        let before:Vec<_>=a.mix.tracks.iter().map(|t|(t.path.clone(),t.start_beat,t.trim_out)).collect();
+        frame(&mut a,&ctx,vec![egui::Event::PointerMoved(pos2(620.0,40.0))],1000.0);
+        let after:Vec<_>=a.mix.tracks.iter().map(|t|(t.path.clone(),t.start_beat,t.trim_out)).collect();
+        assert_eq!(before,after,"a stale drag rewrote tracks after {}",if undo {"undo"} else {"delete"});
+        if !undo { assert_eq!(a.auto_track,Some(0),"the automation lane must follow its track"); }
+        drop(a);std::fs::remove_dir_all(dir).ok();
+    }
+}

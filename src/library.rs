@@ -62,7 +62,8 @@ pub const EXT_FOLDER: &str = "@import";
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct Entry {
     pub path: String, pub folder: String, pub size: u64, pub mtime: u64,
-    pub title: String, pub artist: String, pub album: String, pub genre: String, pub duration: f64,
+    pub title: String, pub artist: String, pub album: String, pub genre: String,
+    #[serde(default, deserialize_with = "finite_f64")] pub duration: f64,
     #[serde(default)] pub bpm: Option<f64>, #[serde(default)] pub key: Option<String>,
     /// file could not be read (tags); kept so it is not retried until it changes
     #[serde(default)] pub error: Option<String>,
@@ -80,6 +81,25 @@ pub struct Index { pub version: u32, pub entries: Vec<Entry> }
 #[cfg(test)]
 mod audit_tests {
     use super::*;
+    #[test]
+    fn library_files_survive_non_finite_numbers_damage_and_decoder_crashes() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-libsafe-{}",crate::recovery::unique_id())); std::fs::create_dir_all(&dir).unwrap();
+        // A non-finite duration is written as null; the rest of the index must still load.
+        let ix=Index{version:INDEX_VERSION,entries:vec![Entry{path:"/a.wav".into(),title:"good".into(),duration:100.0,analysis_version:crate::analysis::ANALYSIS_VERSION,..Default::default()},Entry{path:"/b.wav".into(),duration:f64::INFINITY,analysis_version:crate::analysis::ANALYSIS_VERSION,..Default::default()}]};
+        save_index(&dir,&ix).unwrap(); let back=load_index(&dir);
+        assert_eq!(back.entries.len(),2); assert_eq!(back.entries[1].duration,0.0);
+        // A damaged settings file is kept aside instead of being replaced on the next save.
+        std::fs::write(dir.join("library.json"),b"{\"folders\":[\"/Music\"").unwrap();
+        assert!(load_config(&dir).folders.is_empty());
+        assert!(std::fs::read_dir(&dir).unwrap().flatten().any(|e|e.file_name().to_string_lossy().starts_with("library.json.unreadable-")),"the unreadable file must be kept");
+        // A WAV with sample rate 0 panics inside the decoder: report it as an error, not a timeout or a dead thread.
+        let p=dir.join("zero.wav"); let data=4000u32; let mut v=vec![];
+        for part in [&b"RIFF"[..],&(36+data).to_le_bytes(),b"WAVEfmt ",&16u32.to_le_bytes(),&1u16.to_le_bytes(),&2u16.to_le_bytes(),&0u32.to_le_bytes(),&0u32.to_le_bytes(),&4u16.to_le_bytes(),&16u16.to_le_bytes(),b"data",&data.to_le_bytes()] { v.extend_from_slice(part); }
+        v.extend(vec![0u8;data as usize]); std::fs::write(&p,&v).unwrap();
+        assert!(crate::analysis::load(&p).is_err());
+        let r=analyse(&p.display().to_string()); assert!(r.as_ref().is_err_and(|e|!e.contains("timed out")),"{r:?}");
+        std::fs::remove_dir_all(dir).ok();
+    }
     #[test]
     fn partial_scan_preserves_blocked_subtree_but_applies_known_deletions() {
         let dir=std::env::temp_dir().join(format!("mixstudio-partial-{}",crate::recovery::unique_id()));
@@ -155,7 +175,24 @@ pub enum FolderState { Available(usize), Partial(usize), Missing, NotResponding 
 #[derive(Clone, Debug, Default)]
 pub struct ScanReport { pub files: usize, pub added: usize, pub updated: usize, pub unchanged: usize, pub removed: usize, pub errors: usize, pub timed_out: usize, pub missing: Vec<String>, pub ms: u128 }
 
-fn read_json<T: for<'a> Deserialize<'a> + Default>(p: &Path) -> T { std::fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default() }
+/// Read a settings/index file. An unreadable file is kept as `<name>.unreadable-<time>` before the
+/// default is used, so the next save cannot silently replace the user's folders or tags.
+fn read_json<T: for<'a> Deserialize<'a> + Default>(p: &Path) -> T {
+    let Ok(b) = std::fs::read(p) else { return T::default() };
+    match serde_json::from_slice(&b) {
+        Ok(v) => v,
+        Err(e) => {
+            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let keep = p.with_extension(format!("json.unreadable-{secs}"));
+            if !b.is_empty() && std::fs::rename(p, &keep).is_ok() { eprintln!("MixStudio: {} could not be read ({e}); kept as {}", p.display(), keep.display()); }
+            T::default()
+        }
+    }
+}
+/// serde_json writes NaN/inf as `null`; read such a duration back as 0 instead of rejecting the whole index.
+fn finite_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.filter(|x| x.is_finite()).unwrap_or(0.0))
+}
 fn write_json<T: Serialize>(p: &Path, v: &T) -> std::io::Result<()> {
     if let Some(d) = p.parent() { std::fs::create_dir_all(d)?; }
     let tmp = p.with_extension("tmp"); std::fs::write(&tmp, serde_json::to_vec(v).unwrap_or_default())?; std::fs::rename(tmp, p)

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Fixes from the [2026-10-27 audit](docs/AUDIT-2026-10-27.md), group 1 (crashes and data loss):
+
+- A Single-beat edit at the editor's 5 ms limit no longer makes the project unsaveable or blocks closing; editor and validation share one minimum beat spacing (1).
+- Edge fades are kept inside the clip after split, trim and section delete, and dragging a fade can no longer panic (2).
+- XML imports nested deeper than 256 levels fail with a clear error instead of overflowing the stack and crash-looping at every start (3).
+- NaN/inf samples are replaced at decode time, and analysis uses total ordering, so a damaged float file cannot panic analysis or leave loading unfinished (4).
+- Delete, Undo and Redo end any in-progress drag, so a stale edge drag can no longer overwrite another track; the automation lane follows its track (9).
+- A non-finite duration no longer empties the library index, and an unreadable library or index file is kept as `.unreadable-<time>` instead of being replaced (16).
+- A decoder panic on a damaged file becomes a normal error in every loader (drop, preview, file load, Library analysis, relink) instead of "analysis timed out" or a load that never finishes (18).
+
 ## 0.30.0-beta
 
 - **Beat analysis (cache v14):** search kicks on a straight clock directly and adopt it when it is supported throughout the source, the tracker departs from it, no run of attacks corroborates the departure and it lands clearly more kicks. A final check moves a grid half a beat or by its median kick offset only when that lands at least half as many kicks again. Fixes steady tracks drifting tens of ms off their kicks or sitting on offbeat hi-hats, which made 125/126 BPM imports fall out of sync.

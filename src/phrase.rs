@@ -37,7 +37,7 @@ pub fn detect(f: &[[f32; 3]]) -> Vec<(f64, u8)> {
     let nov = novelty(f);
     let cands: Vec<usize> = (1..).map(|i| i * 8).take_while(|&k| k + 4 <= n).collect();
     let mx = cands.iter().map(|&k| nov[k]).fold(0f32, f32::max);
-    let mut sorted: Vec<f32> = cands.iter().map(|&k| nov[k]).collect(); sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut sorted: Vec<f32> = cands.iter().map(|&k| nov[k]).collect(); sorted.sort_by(|a, b| a.total_cmp(b));
     let med = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
     let thr = (4.0 * med).max(0.3).min(0.3 * mx).max(0.25);
     let mut bounds = vec![0usize];
@@ -46,7 +46,7 @@ pub fn detect(f: &[[f32; 3]]) -> Vec<(f64, u8)> {
     let mut i = 0;
     while i < bounds.len() {
         let s = bounds[i]; let e = bounds.get(i + 1).copied().unwrap_or(n);
-        if e - s > 32 { if let Some(&k) = cands.iter().filter(|&&k| k > s + 4 && k + 4 < e && nov[k] >= 0.5 * thr).max_by(|&&a, &&b| nov[a].partial_cmp(&nov[b]).unwrap()) { bounds.insert(i + 1, k); continue; } }
+        if e - s > 32 { if let Some(&k) = cands.iter().filter(|&&k| k > s + 4 && k + 4 < e && nov[k] >= 0.5 * thr).max_by(|&&a, &&b| nov[a].total_cmp(&nov[b])) { bounds.insert(i + 1, k); continue; } }
         i += 1;
     }
     let segs: Vec<(usize, usize)> = bounds.iter().enumerate().map(|(i, &s)| (s, bounds.get(i + 1).copied().unwrap_or(n))).collect();

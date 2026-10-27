@@ -249,7 +249,7 @@ impl App {
     fn snapshot(&mut self) { self.undo.push(serde_json::to_string(&self.mix).unwrap()); if self.undo.len() > 200 { self.undo.remove(0); } self.redo.clear(); }
     fn do_undo(&mut self) { if let Some(s) = self.undo.pop() { self.redo.push(serde_json::to_string(&self.mix).unwrap()); self.mix = serde_json::from_str(&s).unwrap(); self.fix_sel(); } }
     fn do_redo(&mut self) { if let Some(s) = self.redo.pop() { self.undo.push(serde_json::to_string(&self.mix).unwrap()); self.mix = serde_json::from_str(&s).unwrap(); self.fix_sel(); } }
-    fn fix_sel(&mut self) { self.stem_volume_drag=None; self.samples=Default::default(); self.clear_section(); let n = self.mix.tracks.len(); if self.sel.is_some_and(|s| s >= n) { self.sel = None; } if self.sel_in.is_some_and(|s| s >= n) { self.sel_in = None; } }
+    fn fix_sel(&mut self) { self.cancel_edit_gestures(); self.samples=Default::default(); self.clear_section(); let n = self.mix.tracks.len(); if self.sel.is_some_and(|s| s >= n) { self.sel = None; } if self.sel_in.is_some_and(|s| s >= n) { self.sel_in = None; } self.auto_track = self.auto_track.filter(|&s| s < n); }
     fn beat(&self) -> f64 { self.out.shared.beat() }
     fn playing(&self) -> bool { self.out.shared.playing.load(std::sync::atomic::Ordering::Relaxed) }
     fn set_loop(&mut self,range:Option<(f64,f64)>) { self.active_loop=range; let _=self.out.tx.send(Cmd::Loop(range)); }
@@ -361,8 +361,15 @@ impl App {
     fn remove_sel(&mut self) {
         self.samples=Default::default();
         if self.arrangement_locked() {self.status="Unlock timeline and protected transitions before removing tracks.".into();return;}
-        if let Some(i) = self.sel { self.clear_section(); self.snapshot(); self.mix.tracks.remove(i); self.sel = None; self.sel_in = None;
+        if let Some(i) = self.sel { self.clear_section(); self.cancel_edit_gestures(); self.snapshot(); self.mix.tracks.remove(i); self.sel = None; self.sel_in = None;
+            self.auto_track = self.auto_track.and_then(|a| if a == i { None } else if a > i { Some(a - 1) } else { Some(a) });
             self.mix.alternate_main_lanes(); }
+    }
+    /// End every in-progress pointer edit. Drags hold track indices and pre-drag copies that would be
+    /// re-applied to the wrong track after a removal, undo or redo.
+    fn cancel_edit_gestures(&mut self) {
+        self.drag=None; self.tl_drag=None; self.grid_drag=None; self.tempo_drag=None; self.auto_drag=None; self.tc_drag=None;
+        self.fx_drag=None; self.bm_drag=None; self.bm_pop=None; self.stem_drag=false; self.section_drag=None; self.stem_volume_drag=None;
     }
     /// Make the audio at mix beat `beat` (inside track ti) the downbeat, placed on the nearest mix bar.
     fn set_downbeat_at(&mut self, ti: usize, beat: f64) {
@@ -1608,7 +1615,7 @@ impl App {
                     TlDrag::Fade { ti, left } => if ti < self.mix.tracks.len() {
                         let t = &mut self.mix.tracks[ti]; let (vs, ve) = (t.vis_start(bpm), t.end(bpm)); let len = ve - vs;
                         let snapb = |x: f64| if self.snapping == Snapping::Off { x } else { (x * 2.0).round() / 2.0 };
-                        if left { t.fade_in = snapb(b - vs).clamp(0.0, len - t.fade_out); } else { t.fade_out = snapb(ve - b).clamp(0.0, len - t.fade_in); } },
+                        if left { t.fade_in = snapb(b - vs).clamp(0.0, (len - t.fade_out).max(0.0)); } else { t.fade_out = snapb(ve - b).clamp(0.0, (len - t.fade_in).max(0.0)); } },
                     TlDrag::Curve {ti,left,wave,reset} => if ti<self.mix.tracks.len() {
                         let gain=((wave.bottom()-pp.y)/wave.height()).clamp(0.0,1.0);
                         self.mix.tracks[ti].fade_curve[if left {0}else{1}]=if reset {0.0}else{crate::fades::shape_from_midpoint(gain)};

@@ -114,7 +114,7 @@ impl Mix {
             if let Some(value)=interp(points,hi) { v.push((lo,value)); }
             v.extend(points.iter().filter(|p| p.0>hi).map(|p| (p.0-(b-a),p.1))); v
         }).collect();
-        self.tracks[ti].set_sections(spans); self.tracks[ti].auto=auto;
+        self.tracks[ti].set_sections(spans); self.tracks[ti].auto=auto; self.tracks[ti].clamp_fades();
         self.ripple_section(ti,a,b,a-b); Ok(())
     }
 }

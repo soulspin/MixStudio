@@ -201,6 +201,12 @@ impl Track {
     /// mix beat -> source seconds
     pub fn sec_at(&self, b: f64) -> f64 { self.grid().sec(b) }
     pub fn vis_start(&self, _mix_bpm: f64) -> f64 { self.source_grid().beat(self.trim_in) }
+    /// Keep both edge fades (beats) inside the visible clip; when together they exceed it, shorten both proportionally.
+    pub fn clamp_fades(&mut self) {
+        let len=(self.end(0.0)-self.vis_start(0.0)).max(0.0);
+        for f in [&mut self.fade_in,&mut self.fade_out] { *f=if f.is_finite() { f.clamp(0.0,len) } else { 0.0 }; }
+        let sum=self.fade_in+self.fade_out; if sum>len && sum>0.0 { let k=len/sum; self.fade_in*=k; self.fade_out*=k; }
+    }
     pub fn end(&self, _mix_bpm: f64) -> f64 { if self.sections.is_empty() { self.source_grid().beat(self.duration - self.trim_out) } else { let g = self.source_grid(); self.vis_start(0.0) + self.sections.iter().map(|(a,b)| g.beat(*b)-g.beat(*a)).sum::<f64>() } }
     /// beats from the file start to the first downbeat
     pub fn intro_beats(&self) -> f64 { self.start_beat - self.grid().beat(0.0) }
@@ -451,14 +457,15 @@ impl Mix {
             for points in &mut right.auto { for p in points { p.0-=b-vs; } }
             right.fade_in=0.0; right.trans.splice_fades[0]=splice; right.locked=false;
             let spans=t.section_spans(vs,b); self.tracks[ti].set_sections(spans); self.tracks[ti].fade_out=0.0; self.tracks[ti].trans.splice_fades[1]=splice;
+            right.clamp_fades(); self.tracks[ti].clamp_fades();
             self.tracks.push(right); return Some(self.tracks.len()-1);
         }
         let s = t.sec_at(b);
         if s <= t.trim_in + 0.05 || s >= t.duration - t.trim_out - 0.05 { return None; }
         let mut right = t.clone();
         right.trim_in = s; right.fade_in = 0.0; right.trans.splice_fades[0]=splice; right.locked = false;
-        let left = &mut self.tracks[ti]; left.trim_out = left.duration - s; left.fade_out = 0.0; left.trans.splice_fades[1]=splice;
-        self.tracks.push(right); Some(self.tracks.len() - 1)
+        let left = &mut self.tracks[ti]; left.trim_out = left.duration - s; left.fade_out = 0.0; left.trans.splice_fades[1]=splice; left.clamp_fades();
+        right.clamp_fades(); self.tracks.push(right); Some(self.tracks.len() - 1)
     }
     /// Move the left or right edge of a clip to mix beat `b` (trim or extend, at least one beat long).
     pub fn set_edge(&mut self, ti: usize, left: bool, b: f64) {
@@ -472,11 +479,12 @@ impl Mix {
                 let b=b.clamp(vs,(ve-0.1).max(vs)); t.set_sections(t.section_spans(b,ve)); t.start_beat+=b-vs;
                 for points in &mut t.auto { for p in points { p.0-=b-vs; } }
             } else { let b=b.clamp((vs+0.1).min(ve),ve); t.set_sections(t.section_spans(vs,b)); }
-            t.fade_in=t.fade_in.min(t.end(0.0)-t.vis_start(0.0)); t.fade_out=t.fade_out.min(t.end(0.0)-t.vis_start(0.0)); return;
+            t.clamp_fades(); return;
         }
         let s = t.sec_at(b); let min = 60.0 / t.bpm;
-        if left { t.trim_in = s.clamp(0.0, (t.duration - t.trim_out - min).max(0.0)); t.fade_in = t.fade_in.min(t.end(0.0) - t.vis_start(0.0)); }
-        else { t.trim_out = (t.duration - s).clamp(0.0, (t.duration - t.trim_in - min).max(0.0)); t.fade_out = t.fade_out.min(t.end(0.0) - t.vis_start(0.0)); }
+        if left { t.trim_in = s.clamp(0.0, (t.duration - t.trim_out - min).max(0.0)); }
+        else { t.trim_out = (t.duration - s).clamp(0.0, (t.duration - t.trim_in - min).max(0.0)); }
+        t.clamp_fades();
     }
     /// Copy a clip (Alt+drag on a sample); returns the copy's index.
     pub fn duplicate(&mut self, ti: usize) -> usize { let mut c = self.tracks[ti].clone(); c.trans.fragment_group=0; c.trans.locked=false; c.locked = false; self.tracks.push(c); self.tracks.len() - 1 }
@@ -645,6 +653,16 @@ mod audit_tests {
     use super::*;
     fn track(bpm: f64, start: f64) -> Track {
         serde_json::from_value(serde_json::json!({"path":"test.wav","title":"Test","artist":"Test","bpm":bpm,"offset":0.0,"key":"8A","duration":120.0,"start_beat":start,"lane":0,"trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]}})).unwrap()
+    }
+    #[test]
+    fn single_beat_edits_at_the_neighbour_limit_stay_saveable() {
+        let mut m=Mix { bpm:120.0, ..Default::default() };
+        let mut t=track(120.0,0.0); t.offset=0.25; t.duration=24.0; m.tracks.push(t);
+        for _ in 0..4 { m.tracks[0].adjust_grid(GridScope::Single,16.0,0.25).unwrap(); }
+        let map=m.tracks[0].map.clone().unwrap();
+        let min=map.beats.windows(2).map(|w|w[1]-w[0]).fold(f64::MAX,f64::min);
+        assert!(min<0.0051,"the edit should reach the editor's limit: {min}");
+        crate::validation::validate_mix(&m).expect("a grid the editor produced must remain saveable");
     }
     #[test]
     fn grouped_ratio_changes_keep_arranged_and_trimmed_fragments_contiguous() {
