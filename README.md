@@ -99,7 +99,7 @@ sudo pacman -S onnxruntime-cpu
 export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
 ```
 
-The first time you separate a track, MixStudio downloads the model (166 MB, verified by SHA-256) to `~/.local/share/mixstudio/models`. Stems are cached in `~/.cache/mixstudio/stems` (about 30 MB per minute of audio). Set `MIXSTUDIO_CPU=1` to force CPU inference.
+The first time you separate a track, MixStudio downloads the model (166 MB, verified by SHA-256) to `~/.local/share/mixstudio/models` (`MIXSTUDIO_DATA_DIR` overrides it). Stems are cached in `~/.cache/mixstudio/stems` (`MIXSTUDIO_CACHE_DIR`; about 30 MB per minute of audio). Set `MIXSTUDIO_CPU=1` to force CPU inference.
 
 **Model and license:** `htdemucs_fp16weights.onnx` from [StemSplitio/htdemucs-onnx](https://huggingface.co/StemSplitio/htdemucs-onnx) (pinned revision). It's an ONNX export of HT-Demucs by Meta AI Research ([facebookresearch/demucs](https://github.com/facebookresearch/demucs)). Both the original weights/code and the export are **MIT-licensed**. The model isn't bundled with MixStudio.
 

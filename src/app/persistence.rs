@@ -64,8 +64,10 @@ impl App {
         self.dl_offer=None;self.tl_hover=None;self.bm_drag=None;self.bm_pop=None;self.section_copy=None;self.taps.clear();self.comparison=Default::default();
         self.mix=target.mix;self.file=target.file;self.sel=None;self.sel_in=None;self.undo.clear();self.redo.clear();self.beat_check=None;
         self.persistence.reset(&self.mix,target.clean);self.persistence.restored=target.restored;self.persistence.original=target.original;
+        let shifted=self.mix.migrate_gapless(|p|crate::analysis::mp3_gapless_trim(std::path::Path::new(p)));
         self.load_project_sources();
         self.status=if target.clean{"Project opened".into()}else{"Recovered a copy. Save as… to keep it; the original project is untouched.".into()};
+        if shifted>0 {self.status+=&format!(". {shifted} MP3 clip(s) moved onto the encoder-delay-free audio; save to keep it.");}
     }
     pub(super) fn finish_save(&mut self,path:PathBuf,id:&str){if id==self.persistence.id {self.save(path);}}
     pub(super) fn finish_pick(&mut self,paths:Vec<PathBuf>,sample:Option<usize>,id:&str){if id==self.persistence.id {self.load_files(paths,sample);}}

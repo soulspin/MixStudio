@@ -16,6 +16,10 @@ pub const INDEX_VERSION: u32 = 1;
 const TAG_TIMEOUT: Duration = Duration::from_secs(15);
 const WALK_TIMEOUT: Duration = Duration::from_secs(600);
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(180);
+/// Timeouts depend on the drive and the load at the time, so they are retried instead of being kept.
+const TAGS_TIMED_OUT: &str = "read timed out (failing or slow drive?)";
+const ANALYSIS_TIMED_OUT: &str = "analysis timed out";
+fn transient(err: &Option<String>) -> bool { err.as_deref().is_some_and(|e| e == TAGS_TIMED_OUT || e == ANALYSIS_TIMED_OUT) }
 
 pub fn is_audio(p: &Path) -> bool { p.extension().and_then(|e| e.to_str()).is_some_and(|e| EXTS.contains(&e.to_ascii_lowercase().as_str())) }
 
@@ -51,6 +55,14 @@ pub fn cache_dir() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".cache")).join("mixstudio")
 }
 
+/// Downloaded models: ~/.local/share/mixstudio (Linux), ~/Library/Application Support/MixStudio (macOS), %LOCALAPPDATA%\MixStudio (Windows).
+pub fn data_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("MIXSTUDIO_DATA_DIR") { return PathBuf::from(d); }
+    if cfg!(windows) { return std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(home).join("MixStudio"); }
+    if cfg!(target_os = "macos") { return home().join("Library/Application Support/MixStudio"); }
+    std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/share")).join("mixstudio")
+}
+
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct Config { pub folders: Vec<String>,
     /// library files of other DJ apps (read-only imports) and path prefix rewrites for them
@@ -81,6 +93,53 @@ pub struct Index { pub version: u32, pub entries: Vec<Entry> }
 #[cfg(test)]
 mod audit_tests {
     use super::*;
+    fn silent_wav(sr: u32, frames: u32) -> Vec<u8> {
+        let data=frames*4; let mut v=vec![];
+        for part in [&b"RIFF"[..],&(36+data).to_le_bytes(),b"WAVEfmt ",&16u32.to_le_bytes(),&1u16.to_le_bytes(),&2u16.to_le_bytes(),&sr.to_le_bytes(),&(sr*4).to_le_bytes(),&4u16.to_le_bytes(),&16u16.to_le_bytes(),b"data",&data.to_le_bytes()] { v.extend_from_slice(part); }
+        v.resize(44+data as usize,0); v
+    }
+    #[test]
+    fn removing_an_import_never_maps_its_paths_to_another_library() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-imports-{}",crate::recovery::unique_id())); std::fs::create_dir_all(&dir).unwrap();
+        let lib=|name:&str,file:&str,bpm:f64| { let a=dir.join(file); std::fs::write(&a,b"x").unwrap();
+            let x=format!(r#"<?xml version="1.0"?><DJ_PLAYLISTS><COLLECTION><TRACK TrackID="1" Name="{file}" AverageBpm="{bpm}" Location="file://localhost{}"><TEMPO Inizio="0.1" Bpm="{bpm}" Battito="1"/></TRACK></COLLECTION></DJ_PLAYLISTS>"#,a.display());
+            let p=dir.join(format!("{name}.xml")); std::fs::write(&p,x).unwrap(); (p,a) };
+        let (xa,ta)=lib("A","a.mp3",120.0); let (xb,tb)=lib("B","b.mp3",90.0);
+        save_config(&dir,&Config{imports:vec![xa.display().to_string(),xb.display().to_string()],..Default::default()}).unwrap();
+        let mut l=Library::new(dir.clone(),dir.clone(),Arc::new(||{}));
+        for _ in 0..500 { l.poll(); if l.ext.len()==2 { break; } std::thread::sleep(Duration::from_millis(10)); }
+        let (pa,pb)=(ta.display().to_string(),tb.display().to_string());
+        assert_eq!(l.ext_info(&pa).map(|(_,t)|t.bpm),Some(Some(120.0)));
+        l.remove_import(0);
+        // Until the reimport arrives, A's path must not resolve to B's track (B moved to index 0).
+        let (a,b)=(l.ext_info(&pa).is_none(),l.ext_info(&pb).map(|(_,t)|t.bpm)); std::fs::remove_dir_all(dir).ok();
+        assert!(a,"removed import's path resolves to another library's track"); assert_eq!(b,Some(Some(90.0)));
+    }
+    #[test]
+    fn timeouts_are_retried_and_symlinked_folders_are_scanned() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-retry-{}",crate::recovery::unique_id())); let real=dir.join("real"); let root=dir.join("root");
+        std::fs::create_dir_all(&real).unwrap(); std::fs::create_dir_all(&root).unwrap();
+        let p=root.join("song.wav"); std::fs::write(&p,silent_wav(44100,44100)).unwrap(); std::fs::write(real.join("linked.wav"),silent_wav(44100,100)).unwrap();
+        #[cfg(unix)] { std::os::unix::fs::symlink(&real,root.join("link")).unwrap(); std::os::unix::fs::symlink(&root,root.join("loop")).unwrap(); }
+        let m=std::fs::metadata(&p).unwrap(); let folder=root.display().to_string();
+        let old=Index{version:INDEX_VERSION,entries:vec![Entry{path:p.display().to_string(),folder:folder.clone(),size:m.len(),mtime:mtime(&m),error:Some(TAGS_TIMED_OUT.into()),..Default::default()}]};
+        let (next,rep,_)=scan(&[folder],&old,&Arc::new(AtomicBool::new(false)),&|_,_|{});
+        let song=next.entries.iter().find(|e|e.path==p.display().to_string()).unwrap();
+        assert!(song.error.is_none() && (song.duration-1.0).abs()<1e-6,"a timed-out tag read must be retried: {:?}",song.error); assert_eq!(rep.updated,1);
+        #[cfg(unix)] assert_eq!(next.entries.len(),2,"symlinked folder (and only once despite the loop): {:?}",next.entries.iter().map(|e|&e.path).collect::<Vec<_>>());
+        // A timed-out analysis is retried on the next start; real analysis errors are kept.
+        let mut ix=next.clone(); ix.entries[0].analysis_version=crate::analysis::ANALYSIS_VERSION; ix.entries[0].analysis_error=Some(ANALYSIS_TIMED_OUT.into());
+        ix.entries[1].analysis_version=crate::analysis::ANALYSIS_VERSION; ix.entries[1].analysis_error=Some("could not decode audio".into());
+        save_index(&dir,&ix).unwrap(); let back=load_index(&dir);
+        assert!(back.entries[0].analysis_error.is_none()); assert!(back.entries[1].analysis_error.is_some());
+        // A timed-out decode hands its thread back, so the worker can wait for it instead of starting another.
+        // (A FIFO blocks the decode until the test opens and closes its other end.)
+        #[cfg(unix)] { let fifo=dir.join("slow.wav"); assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+            let (r,late)=analyse_job(&fifo.display().to_string(),Duration::from_millis(50));
+            assert_eq!(r.unwrap_err(),ANALYSIS_TIMED_OUT); let late=late.expect("thread of the timed-out decode"); assert!(!late.is_finished());
+            drop(std::fs::OpenOptions::new().write(true).open(&fifo).unwrap()); late.join().unwrap(); }
+        std::fs::remove_dir_all(dir).ok();
+    }
     #[test]
     fn library_files_survive_non_finite_numbers_damage_and_decoder_crashes() {
         let dir=std::env::temp_dir().join(format!("mixstudio-libsafe-{}",crate::recovery::unique_id())); std::fs::create_dir_all(&dir).unwrap();
@@ -202,7 +261,7 @@ pub fn save_config(dir: &Path, c: &Config) -> std::io::Result<()> { write_json(&
 pub fn load_index(dir: &Path) -> Index {
     let mut i: Index = read_json(&dir.join("library-index.json"));
     if i.version != INDEX_VERSION { return Index { version: INDEX_VERSION, entries: vec![] }; }
-    for e in &mut i.entries { if e.analysis_version != crate::analysis::ANALYSIS_VERSION {
+    for e in &mut i.entries { if e.analysis_version != crate::analysis::ANALYSIS_VERSION || transient(&e.analysis_error) {
         e.bpm=None; e.key=None; e.analysis_error=None;
     } }
     i
@@ -218,15 +277,18 @@ pub fn with_timeout<T: Send + 'static>(t: Duration, f: impl FnOnce() -> T + Send
 
 fn mtime(m: &std::fs::Metadata) -> u64 { m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0) }
 
-fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64, u64)>, failed: &mut Vec<PathBuf>, depth: usize, cancel: &AtomicBool) {
+/// Symlinked folders are followed; `seen` (canonical paths) stops loops and folders linked twice.
+fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64, u64)>, failed: &mut Vec<PathBuf>, depth: usize, cancel: &AtomicBool, seen: &mut HashSet<PathBuf>) {
     if depth > 40 || cancel.load(Ordering::Relaxed) { failed.push(dir.to_path_buf()); return; }
+    if let Ok(c) = std::fs::canonicalize(dir) { if !seen.insert(c) { return; } }
     let rd = match std::fs::read_dir(dir) { Ok(r) => r, Err(_) => { failed.push(dir.to_path_buf()); return; } };
     for e in rd {
         // A failed entry cannot be named, so retain old entries throughout this directory.
         let Ok(e) = e else { failed.push(dir.to_path_buf()); continue };
         let p = e.path();
         let Ok(ft) = e.file_type() else { failed.push(p); continue };
-        if ft.is_dir() { if !e.file_name().to_string_lossy().starts_with('.') { walk(&p, out, failed, depth + 1, cancel); } }
+        let is_dir = ft.is_dir() || (ft.is_symlink() && std::fs::metadata(&p).is_ok_and(|m| m.is_dir()));
+        if is_dir { if !e.file_name().to_string_lossy().starts_with('.') { walk(&p, out, failed, depth + 1, cancel, seen); } }
         else if is_audio(&p) { match std::fs::metadata(&p) {
             Ok(m) if m.is_file() => out.push((p, m.len(), mtime(&m))), Ok(_) => {}, Err(_) => failed.push(p),
         } }
@@ -240,7 +302,8 @@ pub fn read_tags(path: &Path) -> Result<Tags, String> {
     let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(Box::new(f), Default::default());
     let mut hint = Hint::new(); if let Some(e) = path.extension().and_then(|e| e.to_str()) { hint.with_extension(e); }
-    let mut pr = symphonia::default::get_probe().format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default()).map_err(|e| e.to_string())?;
+    let mp3 = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mp3"));
+    let mut pr = symphonia::default::get_probe().format(&hint, mss, &FormatOptions { enable_gapless: mp3, ..Default::default() }, &MetadataOptions::default()).map_err(|e| e.to_string())?;
     let mut t = Tags { title: String::new(), artist: String::new(), album: String::new(), genre: String::new(), duration: 0.0 };
     let mut read = |m: &symphonia::core::meta::MetadataRevision| { for tag in m.tags() { let v = tag.value.to_string(); match tag.std_key {
         Some(StandardTagKey::TrackTitle) => t.title = v, Some(StandardTagKey::Artist) => t.artist = v, Some(StandardTagKey::Album) => t.album = v, Some(StandardTagKey::Genre) => t.genre = v, _ => {} } } };
@@ -265,10 +328,11 @@ pub fn scan(folders: &[String], old: &Index, cancel: &Arc<AtomicBool>, progress:
         let fp = PathBuf::from(f); let fc = fp.clone();
         let st = match with_timeout(Duration::from_secs(10), move || fc.is_dir()) {
             Some(true) => { let fc = fp.clone(); let cc = cancel.clone();
-                match with_timeout(WALK_TIMEOUT, move || { let mut v = vec![]; let mut failed = vec![]; walk(&fc, &mut v, &mut failed, 0, &cc); (v, failed) }) {
+                match with_timeout(WALK_TIMEOUT, move || { let mut v = vec![]; let mut failed = vec![]; walk(&fc, &mut v, &mut failed, 0, &cc, &mut HashSet::new()); (v, failed) }) {
                     Some((files, failed)) => { rep.errors += failed.len(); let n = files.len();
                         for (p, size, mt) in files { let ps = p.display().to_string(); if !seen.insert(ps.clone()) { continue; }
-                            match oldmap.get(ps.as_str()) { Some(e) if e.size == size && e.mtime == mt => { let mut e = (*e).clone(); e.folder = f.clone(); out.push(e); rep.unchanged += 1; }
+                            match oldmap.get(ps.as_str()) { Some(e) if e.size == size && e.mtime == mt && !transient(&e.error) => { let mut e = (*e).clone(); e.folder = f.clone();
+                                    if transient(&e.analysis_error) { e.analysis_error = None; } out.push(e); rep.unchanged += 1; }
                                 Some(_) => { rep.updated += 1; todo.push((p, size, mt, f.clone())); }
                                 None => { rep.added += 1; todo.push((p, size, mt, f.clone())); } } }
                         for e in old.entries.iter().filter(|e| e.folder == *f && failed.iter().any(|p| Path::new(&e.path).starts_with(p))) {
@@ -299,7 +363,7 @@ pub fn scan(folders: &[String], old: &Index, cancel: &Arc<AtomicBool>, progress:
             match r {
                 Ok(Ok(t)) => { e.title = t.title; e.artist = t.artist; e.album = t.album; e.genre = t.genre; e.duration = t.duration; }
                 Ok(Err(err)) => { rep.errors += 1; e.title = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(); e.error = Some(err); }
-                Err(_) => { rep.timed_out += 1; e.title = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(); e.error = Some("read timed out (failing or slow drive?)".into()); }
+                Err(_) => { rep.timed_out += 1; e.title = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(); e.error = Some(TAGS_TIMED_OUT.into()); }
             }
             out.push(e); done += 1;
         }
@@ -314,10 +378,18 @@ pub fn scan(folders: &[String], old: &Index, cancel: &Arc<AtomicBool>, progress:
 }
 
 /// BPM, key and duration through the shared analysis cache (decodes only when not cached yet).
-pub fn analyse(path: &str) -> Result<(f64, String, f64), String> {
-    let p = PathBuf::from(path);
-    with_timeout(ANALYSIS_TIMEOUT, move || crate::analysis::load_analysis(&p).map(|a| (a.bpm, a.key, a.duration)).map_err(|e| e.to_string()))
-        .unwrap_or_else(|| Err("analysis timed out".into()))
+pub fn analyse(path: &str) -> Analysed { analyse_job(path, ANALYSIS_TIMEOUT).0 }
+/// BPM, key and duration, or why they are missing
+pub type Analysed = Result<(f64, String, f64), String>;
+/// As `analyse`; a decode that times out keeps running, and its thread is returned so the caller can wait for it.
+fn analyse_job(path: &str, limit: Duration) -> (Analysed, Option<std::thread::JoinHandle<()>>) {
+    let p = PathBuf::from(path); let (tx, rx) = crossbeam_channel::bounded(1);
+    let job = std::thread::Builder::new().name("mixstudio-analysis".into()).spawn(move || {
+        let r = std::panic::catch_unwind(|| crate::analysis::load_analysis(&p).map(|a| (a.bpm, a.key, a.duration)).map_err(|e| e.to_string()));
+        let _ = tx.send(r.unwrap_or_else(|_| Err("decoder crashed".into())));
+    });
+    let h = match job { Ok(h) => h, Err(e) => return (Err(e.to_string()), None) };
+    match rx.recv_timeout(limit) { Ok(r) => (r, None), Err(_) => (Err(ANALYSIS_TIMED_OUT.into()), Some(h)) }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -388,7 +460,13 @@ impl Library {
         let s = p.display().to_string(); if self.cfg.imports.contains(&s) { return Ok(()); }
         self.cfg.imports.push(s); let _ = save_config(&self.cfg_dir, &self.cfg); self.reimport(); Ok(())
     }
-    pub fn remove_import(&mut self, i: usize) { if i < self.cfg.imports.len() { self.cfg.imports.remove(i); if i < self.ext.len() { let _ = self.ext.remove(i); } let _ = save_config(&self.cfg_dir, &self.cfg); self.reimport(); } }
+    pub fn remove_import(&mut self, i: usize) { if i < self.cfg.imports.len() { self.cfg.imports.remove(i); if i < self.ext.len() { let _ = self.ext.remove(i); } self.rebuild_ext_map(); let _ = save_config(&self.cfg_dir, &self.cfg); self.reimport(); } }
+    /// path -> (import, track) for the current `ext`; must follow every change to `ext`, or paths resolve to another library's tracks
+    fn rebuild_ext_map(&mut self) {
+        self.ext_map.clear();
+        for (li, l) in self.ext.iter().enumerate() { if let Ok(l) = l { for (ti, t) in l.tracks.iter().enumerate() { self.ext_map.entry(t.path.clone()).or_insert((li, ti)); } } }
+        self.gen += 1;
+    }
     pub fn set_remaps(&mut self, r: Vec<crate::import::Remap>) { self.cfg.remaps = r; let _ = save_config(&self.cfg_dir, &self.cfg); self.reimport(); }
     /// the imported track for a (local) path, from the first import that has it
     pub fn ext_info(&self, path: &str) -> Option<(crate::import::Source, &crate::import::ExtTrack)> {
@@ -424,17 +502,17 @@ impl Library {
         let left = Arc::new(std::sync::atomic::AtomicUsize::new(workers));
         for _ in 0..workers { let (qrx, tx, cancel, rp, left) = (qrx.clone(), self.tx.clone(), self.cancel.clone(), self.repaint.clone(), left.clone());
             std::thread::Builder::new().name("mixstudio-analyse".into()).spawn(move || {
-                while let Ok(p) = qrx.recv() { if cancel.load(Ordering::Relaxed) { break; } let r = analyse(&p); let _ = tx.send(Event::Analysed(cancel.clone(), p, r)); rp(); }
+                while let Ok(p) = qrx.recv() { if cancel.load(Ordering::Relaxed) { break; }
+                    let (r, late) = analyse_job(&p, ANALYSIS_TIMEOUT); let _ = tx.send(Event::Analysed(cancel.clone(), p, r)); rp();
+                    // a timed-out decode still uses this worker's share: let it finish before the next file
+                    if let Some(h) = late { while !h.is_finished() && !cancel.load(Ordering::Relaxed) { std::thread::sleep(Duration::from_millis(200)); } } }
                 if left.fetch_sub(1, Ordering::Relaxed) == 1 { let _ = tx.send(Event::AnalysisDone(cancel.clone())); rp(); }
             }).ok(); }
     }
     /// Apply background results; call once per frame.
     pub fn poll(&mut self) {
         while let Ok(ev) = self.rx.try_recv() { match ev {
-            Event::Imported(seq, v) => if seq == self.imp_seq {
-                self.ext_map.clear();
-                for (li, l) in v.iter().enumerate() { if let Ok(l) = l { for (ti, t) in l.tracks.iter().enumerate() { self.ext_map.entry(t.path.clone()).or_insert((li, ti)); } } }
-                self.ext = v; self.gen += 1; },
+            Event::Imported(seq, v) => if seq == self.imp_seq { self.ext = v; self.rebuild_ext_map(); },
             Event::Progress(d, t) => self.progress = (d, t),
             Event::Scanned(ix, rep, st) => { self.scanning = false;
                 // keep folders the user removed while the scan ran out of the result

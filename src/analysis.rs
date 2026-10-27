@@ -234,7 +234,7 @@ impl Audio { pub fn secs(&self) -> f64 { self.l.len() as f64 / self.sr as f64 } 
 
 /// Samples per waveform peak column (at the track's own sample rate).
 /// Bump when BPM/downbeat/key analysis changes so cached results are recomputed.
-pub const ANALYSIS_VERSION: u32 = 14;
+pub const ANALYSIS_VERSION: u32 = 15;
 
 pub const PEAK_HOP: usize = 441;
 
@@ -294,6 +294,34 @@ impl Analysis {
     }
 }
 
+/// Streamed WAVs (ffmpeg to a pipe, some recorders) declare a placeholder data size such as 0xFFFFFFFF;
+/// it says nothing about the length. A declared size above 2 GB that the file cannot hold is treated as unknown,
+/// while a smaller one still catches truncated files.
+fn placeholder_size(path: &Path, cp: &symphonia::core::codecs::CodecParameters, frames: u64) -> bool {
+    let frame = cp.bits_per_sample.map_or(2, |b| (b as u64).div_ceil(8)) * cp.channels.map_or(2, |c| c.count() as u64);
+    let declared = frames.saturating_mul(frame);
+    declared >= 0x7FFF_0000 && std::fs::metadata(path).is_ok_and(|m| declared > m.len())
+}
+
+fn is_mp3(path: &Path, header: &[u8]) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
+        || header.starts_with(b"ID3") || (header.len() > 1 && header[0] == 0xFF && header[1] & 0xE0 == 0xE0)
+}
+
+/// Seconds of encoder delay and padding that `decode` trims from an MP3 (LAME tag), if any.
+/// Projects saved before 0.31 placed their grids on the untrimmed audio; see `Mix::migrate_gapless`.
+pub fn mp3_gapless_trim(path: &Path) -> Option<(f64, f64)> {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut header = [0u8; 12]; f.read_exact(&mut header).ok()?; f.rewind().ok()?;
+    if !is_mp3(path, &header) { return None; }
+    let mut hint = Hint::new(); hint.with_extension("mp3");
+    let pr = symphonia::default::get_probe().format(&hint, MediaSourceStream::new(Box::new(f), Default::default()), &FormatOptions::default(), &MetadataOptions::default()).ok()?;
+    let cp = &pr.format.default_track()?.codec_params; let sr = cp.sample_rate? as f64;
+    let (d, p) = (cp.delay.unwrap_or(0), cp.padding.unwrap_or(0));
+    (d + p > 0).then(|| (d as f64 / sr, p as f64 / sr))
+}
+
 pub fn decode(path: &Path) -> anyhow::Result<(Audio, String, String)> {
     use std::io::{Read, Seek};
     let mut f = std::fs::File::open(path)?;
@@ -302,7 +330,9 @@ pub fn decode(path: &Path) -> anyhow::Result<(Audio, String, String)> {
     let mss = MediaSourceStream::new(Box::new(f), Default::default());
     let mut hint = Hint::new();
     if let Some(e) = path.extension().and_then(|e| e.to_str()) { hint.with_extension(e); }
-    let mut probed = symphonia::default::get_probe().format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())?;
+    // MP3: drop the LAME encoder delay and padding, so the audio starts where the DJ apps place cues and grids.
+    let opts = FormatOptions { enable_gapless: is_mp3(path, &header), ..Default::default() };
+    let mut probed = symphonia::default::get_probe().format(&hint, mss, &opts, &MetadataOptions::default())?;
     let (mut title, mut artist) = (String::new(), String::new());
     let mut read_meta = |m: &symphonia::core::meta::MetadataRevision| {
         for t in m.tags() {
@@ -321,7 +351,7 @@ pub fn decode(path: &Path) -> anyhow::Result<(Audio, String, String)> {
     // the SSND header bytes, so it cannot serve as an exact sample count either.
     let flac = track.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_FLAC;
     let exact_frames = if flac || (wave && codecs.get_codec(track.codec_params.codec).is_some_and(|c| c.short_name.starts_with("pcm_"))) {
-        track.codec_params.n_frames.filter(|&n| n > 0)
+        track.codec_params.n_frames.filter(|&n| n > 0 && !(wave && placeholder_size(path, &track.codec_params, n)))
     } else { None };
     let mut sr = track.codec_params.sample_rate.unwrap_or(44100);
     let (mut l, mut r) = (Vec::new(), Vec::new());
@@ -679,8 +709,7 @@ fn cache_path(path: &Path) -> Option<std::path::PathBuf> {
     let mut h: u64 = 1469598103934665603;
     for b in path.to_string_lossy().bytes().chain(md.len().to_le_bytes()) { h = (h ^ b as u64).wrapping_mul(1099511628211); }
     if let Ok(m) = md.modified() { if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) { h ^= d.as_secs(); } }
-    let home = std::env::var("HOME").ok()?;
-    Some(Path::new(&home).join(".cache/mixstudio").join(format!("{h:016x}.json")))
+    Some(crate::library::cache_dir().join(format!("{h:016x}.json")))
 }
 
 /// Analysis only (no audio kept): from the cache when present, otherwise decode + analyse + cache.
@@ -1101,6 +1130,27 @@ mod decode_integrity_tests {
             let result=decode(&path); assert!(result.is_ok(),"valid {name} rejected: {:?}",result.err());
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn streamed_wav_with_a_placeholder_size_decodes() {
+        let dir=std::env::temp_dir().join(format!("mixstudio-stream-{}",crate::recovery::unique_id())); std::fs::create_dir(&dir).unwrap();
+        let path=dir.join("pipe.wav"); let mut bytes=wav(8000);
+        bytes[4..8].copy_from_slice(&u32::MAX.to_le_bytes()); bytes[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&path,&bytes).unwrap(); let r=decode(&path); std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(r.map(|x|x.0.l.len()).map_err(|e|e.to_string()),Ok(8000));
+    }
+    #[test]
+    fn mp3_encoder_delay_is_removed() {
+        if std::process::Command::new("ffmpeg").arg("-version").output().is_err() { return; }
+        let dir=std::env::temp_dir().join(format!("mixstudio-gapless-{}",crate::recovery::unique_id())); std::fs::create_dir(&dir).unwrap();
+        let (l,r)=crate::testgen::synth_kicks(&[0.5],2.0,44100); let src=dir.join("kick.wav"); crate::engine::write_wav(&src,&l,&r,44100).unwrap();
+        let mp3=dir.join("kick.mp3");
+        assert!(std::process::Command::new("ffmpeg").args(["-v","error","-nostdin","-i"]).arg(&src).args(["-c:a","libmp3lame","-b:a","192k"]).arg(&mp3).status().unwrap().success());
+        let onset=|p:&Path| { let a=decode(p).unwrap().0; let peak=a.l.iter().fold(0f32,|m,x|m.max(x.abs())); a.l.iter().position(|x|x.abs()>peak*0.3).unwrap() as f64/a.sr as f64 };
+        let (wav_at,mp3_at)=(onset(&src),onset(&mp3)); let trim=mp3_gapless_trim(&mp3); let none=mp3_gapless_trim(&src);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!((mp3_at-wav_at).abs()<0.002,"MP3 kick at {mp3_at:.4}s, WAV at {wav_at:.4}s");
+        assert!(trim.is_some_and(|(d,_)|(0.02..0.03).contains(&d)),"{trim:?}"); assert!(none.is_none());
     }
     #[test]
     fn truncated_wav_is_not_successful_audio() {

@@ -297,13 +297,38 @@ pub struct Mix { #[serde(default)] pub output:crate::levels::OutputSettings, pub
     /// hand-edited phrase labels per file (replaces the detected phrases)
     #[serde(default)] pub phrase_edit: std::collections::BTreeMap<String, Vec<(f64, u8)>>,
     /// cue points imported from other DJ apps per file: (source seconds, name)
-    #[serde(default)] pub cue_marks: std::collections::BTreeMap<String, Vec<(f64, String)>> }
+    #[serde(default)] pub cue_marks: std::collections::BTreeMap<String, Vec<(f64, String)>>,
+    /// MP3 times refer to audio without the encoder delay (0.31+); older projects are shifted once on open
+    #[serde(default)] pub gapless: bool }
 fn yes() -> bool { true }
 fn half() -> f32 { 0.5 }
 fn one() -> f32 { 1.0 }
-impl Default for Mix { fn default() -> Self { Mix { output:Default::default(), name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![], tempo_mode: 0, tempo_pts: vec![], ramp: (0.0, 0.0), phrase_edit: Default::default(), cue_marks: Default::default() } } }
+impl Default for Mix { fn default() -> Self { Mix { output:Default::default(), name: "My mix".into(), bpm: 128.0, tracks: vec![], decks: [Deck::default(); 4], master: 1.0, key_lock: true, metronome: false, metro_vol: 0.5, auto_stems: false, trans_stem_style: 0, fx: vec![], tempo_mode: 0, tempo_pts: vec![], ramp: (0.0, 0.0), phrase_edit: Default::default(), cue_marks: Default::default(), gapless: true } } }
 
 impl Mix {
+    /// Projects saved before 0.31 decoded MP3s with the encoder delay in front. Shift each MP3 clip's
+    /// analysed grid, cut points and stem ranges by the trimmed delay once, so they stay on the same audio
+    /// and the clip keeps its place in the mix. Imported grids already used the trimmed timeline.
+    /// `trim` gives (delay, padding) seconds per file. Returns the number of clips shifted.
+    pub fn migrate_gapless(&mut self, trim: impl Fn(&str) -> Option<(f64, f64)>) -> usize {
+        if self.gapless { return 0; }
+        self.gapless = true;
+        let mut seen: std::collections::HashMap<String, Option<(f64, f64)>> = Default::default(); let mut n = 0;
+        for t in &mut self.tracks {
+            let Some((d, p)) = *seen.entry(t.path.clone()).or_insert_with(|| trim(&t.path)) else { continue };
+            let shift = |m: &mut Option<Arc<BeatMap>>| if let Some(b) = m { let mut b2 = (**b).clone(); for x in &mut b2.beats { *x -= d; } *m = Some(Arc::new(b2)); };
+            shift(&mut t.map); shift(&mut t.flex);
+            if t.grid_mode != 3 { t.offset -= d; }
+            t.duration = (t.duration - d - p).max(0.01);
+            t.trim_in = (t.trim_in - d).max(0.0); t.trim_out = (t.trim_out - p).max(0.0).min((t.duration - t.trim_in).max(0.0));
+            let dur = t.duration;
+            for s in &mut t.sections { *s = ((s.0 - d).max(0.0), (s.1 - d).min(dur)); }
+            t.sections.retain(|s| s.1 > s.0);
+            for m in &mut t.stem_mutes { m.a -= d; m.b -= d; }
+            n += 1;
+        }
+        n
+    }
     /// indices of main-deck tracks sorted by start
     pub fn main_order(&self) -> Vec<usize> {
         let mut v: Vec<usize> = (0..self.tracks.len()).filter(|&i| self.tracks[i].lane < 2).collect();
@@ -693,6 +718,26 @@ mod audit_tests {
     use super::*;
     fn track(bpm: f64, start: f64) -> Track {
         serde_json::from_value(serde_json::json!({"path":"test.wav","title":"Test","artist":"Test","bpm":bpm,"offset":0.0,"key":"8A","duration":120.0,"start_beat":start,"lane":0,"trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]}})).unwrap()
+    }
+    #[test]
+    fn old_projects_move_mp3_clips_onto_the_trimmed_audio_once() {
+        let mut m:Mix=serde_json::from_value(serde_json::json!({"name":"old","bpm":120.0,"tracks":[],"decks":[{},{},{},{}]})).unwrap_or_else(|_|{let mut m=Mix::default();m.gapless=false;m});
+        assert!(!m.gapless,"projects without the flag predate the trimmed MP3 timeline");
+        let mut a=track(120.0,0.0); a.path="a.mp3".into(); a.offset=0.525; a.trim_in=8.025; a.trim_out=4.0; a.sections=vec![(10.025,20.025)]; a.stem_mutes=vec![StemMute{stem:0,a:12.025,b:13.025}];
+        a.map=Some(Arc::new(BeatMap{beats:(0..64).map(|k|0.525+k as f64*0.5).collect(),bpm:120.0}));
+        let mut imp=a.clone(); imp.grid_mode=3; let mut w=track(120.0,64.0); w.path="w.wav".into(); w.offset=0.525;
+        m.tracks=vec![a.clone(),imp,w];
+        let before=(m.tracks[0].vis_start(0.0),m.tracks[0].end(0.0));
+        let trim=|p:&str|(p.ends_with(".mp3")).then_some((0.025,0.01));
+        assert_eq!(m.migrate_gapless(trim),2);
+        let t=&m.tracks[0];
+        assert!((t.offset-0.5).abs()<1e-9 && (t.map.as_ref().unwrap().beats[0]-0.5).abs()<1e-9 && (t.trim_in-8.0).abs()<1e-9 && (t.trim_out-3.99).abs()<1e-9);
+        assert!((t.duration-119.965).abs()<1e-9 && (t.sections[0].0-10.0).abs()<1e-9 && (t.stem_mutes[0].a-12.0).abs()<1e-9);
+        assert!((t.vis_start(0.0)-before.0).abs()<1e-6,"the clip keeps its place in the mix");
+        assert!((m.tracks[1].offset-0.525).abs()<1e-12,"imported grids already used the trimmed timeline");
+        assert!((m.tracks[2].offset-0.525).abs()<1e-12,"other formats are untouched");
+        assert_eq!(m.migrate_gapless(trim),0,"only once"); assert!(Mix::default().gapless);
+        crate::validation::validate_mix(&m).unwrap();
     }
     #[test]
     fn splitting_inside_fades_does_not_change_the_sound() {
