@@ -7,6 +7,9 @@
 #[cfg(test)]
 #[path="engine/level_tests.rs"]
 mod level_tests;
+#[cfg(test)]
+#[path="engine/sound_tests.rs"]
+mod sound_tests;
 
 use crate::analysis::Audio;
 use crate::model::{Deck, Mix, Preset, StemMode};
@@ -223,6 +226,28 @@ impl Wsola {
 }
 
 /// Polyphonic key lock, primed and read ahead so output stays on the source grid.
+const SINC_TAPS: usize = 16;
+const SINC_PHASES: usize = 512;
+/// Lanczos (a = 8) interpolation weights for taps k-7 ..= k+8 at fraction `frac` between k and k+1,
+/// from a table built once (nearest of 512 phases, normalised to unity gain).
+fn sinc_taps(frac: f32) -> &'static [f32; SINC_TAPS] {
+    static TABLE: std::sync::OnceLock<Vec<[f32; SINC_TAPS]>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| (0..=SINC_PHASES).map(|p| {
+        let f = p as f64 / SINC_PHASES as f64; let a = (SINC_TAPS / 2) as f64; let mut w = [0f32; SINC_TAPS];
+        for (j, v) in w.iter_mut().enumerate() { let x = j as f64 - (a - 1.0) - f;
+            let sinc = |x: f64| if x.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+            *v = (sinc(x) * sinc(x / a)) as f32; }
+        let sum: f32 = w.iter().sum(); for v in &mut w { *v /= sum; } w
+    }).collect());
+    &table[((frac * SINC_PHASES as f32).round() as usize).min(SINC_PHASES)]
+}
+/// Per-sample smoothing factor for gain changes (~5 ms), so faders, mute/solo and A/B switches do not click.
+#[inline] fn gain_glide(sr: f32) -> f32 { 1.0 - (-1.0 / (0.005 * sr)).exp() }
+/// Four-point cubic Hermite (Catmull-Rom) interpolation between y[1] and y[2] at fraction `f`.
+#[inline] fn hermite(y: [f32; 4], f: f32) -> f32 {
+    let c1 = 0.5 * (y[2] - y[0]); let c2 = y[0] - 2.5 * y[1] + 2.0 * y[2] - 0.5 * y[3]; let c3 = 0.5 * (y[3] - y[0]) + 1.5 * (y[1] - y[2]);
+    ((c3 * f + c2) * f + c1) * f + y[1]
+}
 struct Polyphonic {
     stretch:signalsmith_stretch::Stretch, sr:f64, input:Vec<f32>, output:[f32;WH*2],
     position:i64, ready:bool, history:usize,
@@ -246,7 +271,8 @@ impl Polyphonic {
                 let read=|k:i64|if k<0 || k as usize>=a.l.len(){0.0}else{let k=k as usize;match (&gains,t.stems.as_deref()) {
                     (Some(g),Some(st))=>st.mixed(a,c,k,g),_=>if c==0{a.l[k]}else{a.r[k]}
                 }};
-                self.input[i*2+c]=read(k)*(1.0-frac)+read(k+1)*frac;
+                // Windowed-sinc conversion: linear (and even cubic) interpolation audibly dulls 44.1 kHz sources on 48 kHz devices.
+                self.input[i*2+c]=if frac==0.0 {read(k)} else {let w=sinc_taps(frac);(0..SINC_TAPS).map(|j|read(k+j as i64-(SINC_TAPS/2-1) as i64)*w[j]).sum()};
             }
         }
     }
@@ -276,18 +302,18 @@ impl Polyphonic {
     }
 }
 
-struct DeckState { settings: [f32;4], lowsh: Biquad, mid: Biquad, hish: Biquad, lpf: Biquad, hpf: Biquad, kill: Biquad, delay: Vec<[f32; 2]>, dpos: usize }
+struct DeckState { settings: [f32;4], vol: f32, lowsh: Biquad, mid: Biquad, hish: Biquad, lpf: Biquad, hpf: Biquad, kill: Biquad, delay: Vec<[f32; 2]>, dpos: usize }
 
 pub struct Engine {
     pub levels:crate::levels::OutputLevels,
     pub sr: f32, pub shared: Arc<Shared>, snap: Option<Arc<Snap>>, beat: f64, playing: bool, loop_r: Option<(f64, f64)>,
-    order:Vec<usize>, sample_beats:[f64;256], decks: Vec<DeckState>, buf: Vec<[f32; 2]>, dbuf: [Vec<[f32; 2]>; 4], ws: Vec<Option<Wsola>>, click: (f32, f32), click_ph: f32, click_beat: Option<i64>, pub metro_enabled: bool, fx: Vec<(FxKey, Option<crate::fx::FxState>)>,
+    order:Vec<usize>, sample_beats:[f64;256], decks: Vec<DeckState>, buf: Vec<[f32; 2]>, dbuf: [Vec<[f32; 2]>; 4], ws: Vec<Option<Wsola>>, click: (f32, f32), click_ph: f32, click_prev: f64, master: f32, since_jump: usize, pub metro_enabled: bool, fx: Vec<(FxKey, Option<crate::fx::FxState>)>,
 }
 
 impl Engine {
     pub fn new(sr: f32, shared: Arc<Shared>) -> Self {
-        let decks = (0..4).map(|_| DeckState { settings:[f32::NAN;4], lowsh: Biquad::default(), mid: Biquad::default(), hish: Biquad::default(), lpf: Biquad::default(), hpf: Biquad::default(), kill: Biquad::default(), delay: vec![[0.0; 2]; ((sr * 3.0) as usize).max(2)], dpos: 0 }).collect();
-        Engine { levels:Default::default(), order:vec![], sample_beats:[0.0;256], sr, shared, snap: None, beat: 0.0, playing: false, loop_r: None, decks, buf: Vec::with_capacity(512), dbuf: std::array::from_fn(|_| Vec::with_capacity(256)), ws: vec![], click: (0.0, 0.0), click_ph: 0.0, click_beat: None, metro_enabled: true, fx: vec![] }
+        let decks = (0..4).map(|_| DeckState { settings:[f32::NAN;4], vol: f32::NAN, lowsh: Biquad::default(), mid: Biquad::default(), hish: Biquad::default(), lpf: Biquad::default(), hpf: Biquad::default(), kill: Biquad::default(), delay: vec![[0.0; 2]; ((sr * 3.0) as usize).max(2)], dpos: 0 }).collect();
+        Engine { levels:Default::default(), order:vec![], sample_beats:[0.0;256], sr, shared, snap: None, beat: 0.0, playing: false, loop_r: None, decks, buf: Vec::with_capacity(512), dbuf: std::array::from_fn(|_| Vec::with_capacity(256)), ws: vec![], click: (0.0, 0.0), click_ph: 0.0, master: f32::NAN, since_jump: 0, click_prev: f64::NAN, metro_enabled: true, fx: vec![] }
     }
     pub fn handle(&mut self, c: Cmd) {
         match c {
@@ -297,7 +323,7 @@ impl Engine {
                 self.install(builder.prepare(s,self.sr));
             }
             Cmd::Prepared(p) => self.install(p),
-            Cmd::Play(p) => { self.playing = p; self.shared.playing.store(p, Ordering::Relaxed); }
+            Cmd::Play(p) => { if p && !self.playing { self.since_jump = 0; } self.playing = p; self.shared.playing.store(p, Ordering::Relaxed); }
             Cmd::Seek(b) => { self.beat = b; self.reset_transport(); self.shared.beat.store(b.to_bits(), Ordering::Relaxed); }
             Cmd::Loop(l) => self.loop_r = l,
             Cmd::ResetLevels => self.shared.reset_levels(),
@@ -338,7 +364,7 @@ impl Engine {
             d.delay.fill([0.0;2]);d.dpos=0;
         }
         for f in &mut self.fx { if let Some(f)=&mut f.1 {f.reset();} }
-        self.click=(0.0,0.0);self.click_ph=0.0;self.click_beat=None;
+        self.click=(0.0,0.0);self.click_ph=0.0;self.click_prev=f64::NAN;self.since_jump=0;
     }
     /// Render interleaved output with `ch` channels.
     pub fn render(&mut self, out: &mut [f32], ch: usize) { self.render_clocked(out,ch,None); }
@@ -353,7 +379,7 @@ impl Engine {
             let mut n = (frames - done).min(256);
             if let (Some((s,e)),Some(snap))=(self.loop_r,self.snap.as_ref()) {
                 if e>s && self.playing {
-                    if self.beat>=e { self.beat=snap.advance(s,snap.secs(e,self.beat).rem_euclid(snap.secs(s,e))); }
+                    if self.beat>=e { self.beat=snap.advance(s,snap.secs(e,self.beat).rem_euclid(snap.secs(s,e))); self.since_jump=0; }
                     n=n.min((snap.secs(self.beat,e)*self.sr as f64).ceil().max(1.0) as usize);
                 }
             }
@@ -470,9 +496,7 @@ impl Engine {
                 let k = pos as usize; let f = (pos - k as f64) as f32;
                 let sg = combine(track_mods(&snap,ti,b).stem, combine(t.mute_gain(sec),t.stem_auto_gain(b))); let st = t.stems.as_deref();
                 let herm = |ch: usize| { let v = |i: usize| match (sg.as_ref(), st) { (Some(g), Some(st)) => st.mixed(a, ch, i, g), _ => if ch == 0 { a.l[i] } else { a.r[i] } };
-                    let (y0, y1, y2, y3) = (v(k - 1), v(k), v(k + 1), v(k + 2));
-                    let c1 = 0.5 * (y2 - y0); let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3; let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
-                    ((c3 * f + c2) * f + c1) * f + y1 };
+                    hermite([v(k - 1), v(k), v(k + 1), v(k + 2)], f) };
                 dst[i][0] += herm(0) * g; dst[i][1] += herm(1) * g;
             }
         }
@@ -483,6 +507,7 @@ impl Engine {
             let p = snap.decks[d]; let st = &mut self.decks[d];
             let audible = !p.mute && (!any_solo || p.solo);
             let vol = if audible { p.vol } else { 0.0 };
+            let glide = gain_glide(sr);
             let mut pk = 0f32;
             let dlen = st.delay.len();
             for i in 0..n {
@@ -502,8 +527,10 @@ impl Engine {
                 for c in 0..2 {
                     let mut x = self.dbuf[d][i][c];
                     x = st.lowsh.run(c, x); x = st.mid.run(c, x); x = st.hish.run(c, x);
-                    if filt < -0.001 { x = st.lpf.run(c, x); }
-                    if filt > 0.001 { x = st.hpf.run(c, x); }
+                    // Keep both filters running at their neutral settings while bypassed, so their state follows
+                    // the signal and re-engaging does not replay stale history as a click.
+                    let lp = st.lpf.run(c, x); if filt < -0.001 { x = lp; }
+                    let hp = st.hpf.run(c, x); if filt > 0.001 { x = hp; }
                     y[c] = x;
                 }
                 // echo: feedback delay, send amount from transition
@@ -511,7 +538,8 @@ impl Engine {
                 let e = st.delay[rp];
                 st.delay[st.dpos] = [y[0] * m.echo + e[1] * 0.55, y[1] * m.echo + e[0] * 0.55];
                 st.dpos = (st.dpos + 1) % dlen;
-                for c in 0..2 { let v = (y[c] + e[c] * 0.8) * vol; self.buf[i][c] += v; pk = pk.max(v.abs()); }
+                st.vol = if st.vol.is_nan() { vol } else { st.vol + (vol - st.vol) * glide };
+                for c in 0..2 { let v = (y[c] + e[c] * 0.8) * st.vol; self.buf[i][c] += v; pk = pk.max(v.abs()); }
             }
             let old = Shared::get(&self.shared.deck_meter[d]);
             self.shared.deck_meter[d].store(pk.max(old * 0.9).to_bits(), Ordering::Relaxed);
@@ -519,18 +547,32 @@ impl Engine {
         for (k, f) in snap.fx.iter().enumerate() { if f.target >= 4 { self.fx[k].1.as_mut().expect("prepared effect state").process(f, &mut self.buf, &beats[..=n], &snap, false); } }
         { let last = self.fx.len() - 1; match &snap.live { Some(f) => self.fx[last].1.as_mut().expect("prepared live state").process(f, &mut self.buf, &beats[..=n], &snap, true), None => if self.fx[last].1.as_ref().is_some_and(|f|f.active) { self.fx[last].1.as_mut().unwrap().reset(); } } }
         let mut pk = [0f32; 2];
-        for f in &mut self.buf {for value in f {*value*=snap.master;}}
+        let glide = gain_glide(self.sr);
+        for f in &mut self.buf { self.master = if self.master.is_nan() { snap.master } else { self.master + (snap.master - self.master) * glide }; for value in f {*value*=self.master;} }
         if let (Some(vol), true) = (snap.metro, self.metro_enabled) {
             for i in 0..n { let b = beats[i];
-                if self.click_beat != Some(b.floor() as i64) { self.click_beat=Some(b.floor() as i64);let down = (b.floor() as i64).rem_euclid(4) == 0; self.click = (if down { 1.0 } else { 0.55 }, if down { 1600.0 } else { 1000.0 }); self.click_ph = 0.0; }
+                // Click only where the playhead crosses a beat start (also after a jump back): not mid-beat after a seek or resume.
+                let crossed = (b.floor() != self.click_prev.floor() || b < self.click_prev) && b - b.floor() < 0.05; self.click_prev = b;
+                if crossed { let down = (b.floor() as i64).rem_euclid(4) == 0; self.click = (if down { 1.0 } else { 0.55 }, if down { 1600.0 } else { 1000.0 }); self.click_ph = 0.0; }
                 if self.click.0 > 1e-4 { self.click_ph += self.click.1 / self.sr; let v = (self.click_ph * 2.0 * PI).sin() * self.click.0 * vol * 0.5;
                     self.click.0 *= 0.9985; self.buf[i][0] += v; self.buf[i][1] += v; } }
+        }
+        // Declick jumps: ~3 ms fade-in after a seek, resume or loop wrap, and a matching fade-out
+        // into the loop end, so a wrap is a brief dip rather than a waveform discontinuity.
+        let fade=((0.003*self.sr) as usize).max(1);
+        let loop_fade=self.loop_r.filter(|&(s,e)|e>s && snap.secs(s,e)>0.012);
+        for (i,f) in self.buf.iter_mut().enumerate() {
+            let mut g=if self.since_jump<fade { self.since_jump as f32/fade as f32 } else { 1.0 }; self.since_jump=self.since_jump.saturating_add(1);
+            // Exact time to the loop end per sample (not a per-block tempo), so output stays callback-independent.
+            if let Some((s,e))=loop_fade { if beats[i]>=s && beats[i]<e && e-beats[i]<0.05 { g*=(snap.secs(beats[i],e)*self.sr as f64/fade as f64).min(1.0) as f32; } }
+            if g<1.0 { for v in f.iter_mut() { *v*=g; } }
         }
         let output=snap.output.prepare();
         for f in &mut self.buf {for c in 0..2 {let x=f[c];let y=output.process(x);self.levels.observe(x,y);f[c]=y;pk[c]=pk[c].max(y.abs());}}
         for c in 0..2 { let old = Shared::get(&self.shared.meter[c]); self.shared.meter[c].store(pk[c].max(old * 0.92).to_bits(), Ordering::Relaxed); }
         self.beat = b1;
         if let Some((s,e))=self.loop_r { if e>s && self.beat>=e {
+            self.since_jump=0;
             let duration=snap.secs(s,e);let extra=snap.secs(e,self.beat);
             self.beat=snap.advance(s,extra.rem_euclid(duration));
             for w in self.ws.iter_mut().flatten() {
@@ -836,7 +878,7 @@ mod maintenance_tests {
         let mut running=engine(original);output(&mut running,1234,128);let beat=running.beat;
         let make=||{let mut s=snap();tone(&mut s);s.bpm=140.0;s.tracks[0].audio=audio.clone();s};
         running.handle(Cmd::Snap(Arc::new(make())));
-        let mut reference=engine(make());reference.handle(Cmd::Seek(beat));
+        let mut reference=engine(make());reference.handle(Cmd::Seek(beat));reference.since_jump=usize::MAX; // compare content, not the seek's declick fade-in
         let expected=output(&mut reference,2048,128);let actual=output(&mut running,2048,128);
         assert!(actual.iter().zip(expected).all(|(a,b)|(a-b).abs()<1e-6),"old tempo input/FIFO survived a tempo edit");
     }

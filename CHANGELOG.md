@@ -17,6 +17,14 @@ Group 2 (regressions in 0.30):
 - During a Library preview, edits (Ctrl+E, paste, nudge), snapping, ruler clicks and the transport buttons use the mix position. A click moves the parked mix playhead, which is kept when the preview stops; the preview itself is not moved. Transition and Compare auditions stop a running preview first (6, 7).
 - The Details folder column compares whole folder names and the deepest music root, so `/Music/House2` is no longer shown as "2" under a `/Music/House` root (39).
 
+Group 3 (sound quality):
+
+- Key lock converts the source rate with a 16-tap windowed sinc instead of linear interpolation: 44.1 kHz tracks on a 48 kHz device keep their treble (14 kHz: −2.76 dB → −0.02 dB) and sound like the export (5).
+- Loop wraps, seeks and resumes are declicked with ~3 ms fades; a 1-beat loop's wrap step fell from 0.79 to within the signal's normal slope (10).
+- The deck low/high-pass filters keep running while bypassed, so re-engaging them no longer clicks (11).
+- The metronome clicks only when the playhead crosses a beat start, not mid-beat after a seek or resume; loops click on every pass (26).
+- Deck volume, mute/solo, A/B monitor switches and master gain ramp over ~5 ms instead of stepping (27).
+
 ## 0.30.0-beta
 
 - **Beat analysis (cache v14):** search kicks on a straight clock directly and adopt it when it is supported throughout the source, the tracker departs from it, no run of attacks corroborates the departure and it lands clearly more kicks. A final check moves a grid half a beat or by its median kick offset only when that lands at least half as many kicks again. Fixes steady tracks drifting tens of ms off their kicks or sitting on offbeat hi-hats, which made 125/126 BPM imports fall out of sync.
