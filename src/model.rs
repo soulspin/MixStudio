@@ -58,8 +58,11 @@ pub struct Track {
     #[serde(default)] pub locked: bool,
     /// seconds cut from the start / end of the file (split and trim keep the source offsets)
     #[serde(default)] pub trim_in: f64, #[serde(default)] pub trim_out: f64,
-    /// fade-in / fade-out length in beats
+    /// fade-in / fade-out curve length in beats
     #[serde(default)] pub fade_in: f64, #[serde(default)] pub fade_out: f64,
+    /// Beats of each fade curve lying outside this clip (before its start / after its end). A fragment
+    /// split inside a fade continues the curve, so splitting is neutral. The visible part is length − skip.
+    #[serde(default)] pub fade_skip: [f64;2],
     /// Shape per edge: 0 linear, positive slow rise, negative fast rise.
     #[serde(default)] pub fade_curve: [f32;2],
     /// stem view on the timeline: 0 = full track, 1 = instrumental / vocals, 2 = four stems
@@ -201,11 +204,23 @@ impl Track {
     /// mix beat -> source seconds
     pub fn sec_at(&self, b: f64) -> f64 { self.grid().sec(b) }
     pub fn vis_start(&self, _mix_bpm: f64) -> f64 { self.source_grid().beat(self.trim_in) }
-    /// Keep both edge fades (beats) inside the visible clip; when together they exceed it, shorten both proportionally.
+    /// Keep the visible parts of both edge fades (beats) inside the clip; when together they exceed it,
+    /// shorten both proportionally. Curve parts outside the clip (`fade_skip`) are kept.
     pub fn clamp_fades(&mut self) {
         let len=(self.end(0.0)-self.vis_start(0.0)).max(0.0);
-        for f in [&mut self.fade_in,&mut self.fade_out] { *f=if f.is_finite() { f.clamp(0.0,len) } else { 0.0 }; }
-        let sum=self.fade_in+self.fade_out; if sum>len && sum>0.0 { let k=len/sum; self.fade_in*=k; self.fade_out*=k; }
+        for k in 0..2 { if !self.fade_skip[k].is_finite() || self.fade_skip[k]<0.0 { self.fade_skip[k]=0.0; } }
+        let mut vis=[self.fade_in-self.fade_skip[0],self.fade_out-self.fade_skip[1]].map(|v|if v.is_finite() { v.clamp(0.0,len) } else { 0.0 });
+        let sum=vis[0]+vis[1]; if sum>len && sum>0.0 { let k=len/sum; vis[0]*=k; vis[1]*=k; }
+        self.fade_in=if vis[0]>0.0 { vis[0]+self.fade_skip[0] } else { 0.0 }; self.fade_out=if vis[1]>0.0 { vis[1]+self.fade_skip[1] } else { 0.0 };
+        if self.fade_in==0.0 { self.fade_skip[0]=0.0; }
+        if self.fade_out==0.0 { self.fade_skip[1]=0.0; }
+    }
+    /// Split fades at `at` beats after the clip start: `self` becomes the left part, the result's fades
+    /// for the right part continue the same curves, so the split does not change the sound.
+    fn split_fades(&mut self, right: &mut Track, at: f64, len: f64) {
+        let (fin,fout)=(self.fade_in-self.fade_skip[0],self.fade_out-self.fade_skip[1]);
+        if self.fade_in>0.0 && at<fin { right.fade_in=self.fade_in; right.fade_skip[0]=self.fade_skip[0]+at; } else { right.fade_in=0.0; right.fade_skip[0]=0.0; }
+        if self.fade_out>0.0 && len-at<fout { self.fade_skip[1]+=len-at; } else { self.fade_out=0.0; self.fade_skip[1]=0.0; }
     }
     pub fn end(&self, _mix_bpm: f64) -> f64 { if self.sections.is_empty() { self.source_grid().beat(self.duration - self.trim_out) } else { let g = self.source_grid(); self.vis_start(0.0) + self.sections.iter().map(|(a,b)| g.beat(*b)-g.beat(*a)).sum::<f64>() } }
     /// beats from the file start to the first downbeat
@@ -309,6 +324,27 @@ impl Mix {
         }
         groups
     }
+    /// Whole logical songs in the order of their first mention in `order` (fragment indices, as from
+    /// `main_order`), each with its contiguous split fragments in timeline order.
+    pub fn song_groups(&self, order: &[usize]) -> Vec<Vec<usize>> {
+        let groups=self.main_groups(); let mut seen=vec![false;groups.len()]; let mut songs=vec![];
+        for &i in order { match groups.iter().position(|g|g.contains(&i)) {
+            Some(g) => if !seen[g] { seen[g]=true; songs.push(groups[g].clone()); },
+            None => songs.push(vec![i]),
+        } }
+        songs
+    }
+    /// After a source-grid edit on one fragment, give its split siblings the same source grid and move
+    /// them with it, so the song stays one contiguous unit with an unchanged transition.
+    pub fn sync_fragment_grid(&mut self, i: usize, old_start: f64) {
+        let Some(t)=self.tracks.get(i).cloned() else { return; };
+        if t.trans.fragment_group==0 { return; }
+        let delta=t.start_beat-old_start;
+        for (j,s) in self.tracks.iter_mut().enumerate() {
+            if j==i || s.trans.fragment_group!=t.trans.fragment_group || s.path!=t.path { continue; }
+            s.bpm=t.bpm; s.offset=t.offset; s.map=t.map.clone(); s.flex=t.flex.clone(); s.grid_mode=t.grid_mode; s.imported=t.imported.clone(); s.start_beat+=delta;
+        }
+    }
     /// Alternate whole logical songs, preserving the deck shared by contiguous split fragments.
     pub fn alternate_main_lanes(&mut self) {
         for (lane,group) in self.main_groups().into_iter().enumerate() {
@@ -361,14 +397,15 @@ impl Mix {
     pub fn relayout_phrases(&mut self, order: &[usize], overlap_bars: f64, ph: &[Vec<(f64, u8)>]) -> usize {
         self.layout_resolved(order,overlap_bars,Some(ph))
     }
-    fn align_phrases(&mut self,order:&[usize],ph:&[Vec<(f64,u8)>]) -> usize {
+    fn align_phrases(&mut self,songs:&[Vec<usize>],ph:&[Vec<(f64,u8)>]) -> usize {
         let mut n=0;
-        for k in 1..order.len() {
-            let (p,i)=(order[k-1],order[k]);
+        for k in 1..songs.len() {
+            // The outgoing song ends in its last fragment; the incoming song starts in its first.
+            let (p,i)=(*songs[k-1].last().unwrap(),songs[k][0]);
             let outgoing=ph.get(p).and_then(|v|v.last()).filter(|q|q.1==4).and_then(|q|self.tracks[p].phrase_occurrences(q.0).last().copied());
             let incoming=ph.get(i).and_then(|v|v.first()).filter(|p|p.1==0).and_then(|p|self.tracks[i].phrase_occurrences(p.0).first().copied());
             if let (Some(a),Some(b))=(outgoing,incoming) {
-                for &j in &order[k..] { self.tracks[j].start_beat+=a-b; } n+=1;
+                for song in &songs[k..] { for &j in song { self.tracks[j].start_beat+=a-b; } } n+=1;
             }
         }
         n
@@ -396,16 +433,17 @@ impl Mix {
                 }
             }
             seen.push(state);
+            // Lay out whole songs: a split song's fragments move together and keep one deck.
+            let songs=self.song_groups(order);
             let mut cursor = 0.0f64;
-            for (k, &i) in order.iter().enumerate() {
-                let bpm = self.bpm;
-                let t = &mut self.tracks[i];
-                t.lane = k % 2;
-                if k == 0 { t.start_beat = (t.intro_beats() / 4.0 - 0.01).ceil() * 4.0; }
-                else { let intro = t.intro_beats(); t.start_beat = ((cursor - overlap_bars * 4.0 + intro) / 4.0).round() * 4.0; }
-                cursor = t.end(bpm);
+            for (k, song) in songs.iter().enumerate() {
+                let bpm = self.bpm; let first = &self.tracks[song[0]]; let intro = first.intro_beats();
+                let target = if k == 0 { (intro / 4.0 - 0.01).ceil() * 4.0 } else { ((cursor - overlap_bars * 4.0 + intro) / 4.0).round() * 4.0 };
+                let delta = target - first.start_beat;
+                for &i in song { self.tracks[i].start_beat += delta; self.tracks[i].lane = k % 2; }
+                cursor = self.tracks[*song.last().unwrap()].end(bpm);
             }
-            aligned=phrases.map(|ph|self.align_phrases(order,ph)).unwrap_or(0);
+            aligned=phrases.map(|ph|self.align_phrases(&songs,ph)).unwrap_or(0);
             if !self.resolve_ratios_in(order) { break; }
         }
         aligned
@@ -455,17 +493,19 @@ impl Mix {
             let (vs,ve)=(t.vis_start(0.0),t.end(0.0)); if b-vs<0.1 || ve-b<0.1 { return None; }
             let mut right=t.clone(); right.set_sections(t.section_spans(b,ve)); right.start_beat+=b-vs;
             for points in &mut right.auto { for p in points { p.0-=b-vs; } }
-            right.fade_in=0.0; right.trans.splice_fades[0]=splice; right.locked=false;
-            let spans=t.section_spans(vs,b); self.tracks[ti].set_sections(spans); self.tracks[ti].fade_out=0.0; self.tracks[ti].trans.splice_fades[1]=splice;
-            right.clamp_fades(); self.tracks[ti].clamp_fades();
+            right.trans.splice_fades[0]=splice; right.locked=false;
+            let spans=t.section_spans(vs,b);
+            self.tracks[ti].split_fades(&mut right,b-vs,ve-vs);
+            self.tracks[ti].set_sections(spans); self.tracks[ti].trans.splice_fades[1]=splice;
             self.tracks.push(right); return Some(self.tracks.len()-1);
         }
         let s = t.sec_at(b);
         if s <= t.trim_in + 0.05 || s >= t.duration - t.trim_out - 0.05 { return None; }
         let mut right = t.clone();
-        right.trim_in = s; right.fade_in = 0.0; right.trans.splice_fades[0]=splice; right.locked = false;
-        let left = &mut self.tracks[ti]; left.trim_out = left.duration - s; left.fade_out = 0.0; left.trans.splice_fades[1]=splice; left.clamp_fades();
-        right.clamp_fades(); self.tracks.push(right); Some(self.tracks.len() - 1)
+        right.trim_in = s; right.trans.splice_fades[0]=splice; right.locked = false;
+        let (vs,ve)=(t.vis_start(0.0),t.end(0.0));
+        let left = &mut self.tracks[ti]; left.split_fades(&mut right,b-vs,ve-vs); left.trim_out = left.duration - s; left.trans.splice_fades[1]=splice;
+        self.tracks.push(right); Some(self.tracks.len() - 1)
     }
     /// Move the left or right edge of a clip to mix beat `b` (trim or extend, at least one beat long).
     pub fn set_edge(&mut self, ti: usize, left: bool, b: f64) {
@@ -653,6 +693,29 @@ mod audit_tests {
     use super::*;
     fn track(bpm: f64, start: f64) -> Track {
         serde_json::from_value(serde_json::json!({"path":"test.wav","title":"Test","artist":"Test","bpm":bpm,"offset":0.0,"key":"8A","duration":120.0,"start_beat":start,"lane":0,"trans":{"preset":"Crossfade","stems":["Full","Full","Full","Full"]}})).unwrap()
+    }
+    #[test]
+    fn splitting_inside_fades_does_not_change_the_sound() {
+        let audio=Arc::new(crate::analysis::Audio{sr:8000,l:vec![0.2;8000*120],r:vec![0.2;8000*120]});
+        let render=|m:&Mix| { let a=vec![Some(audio.clone());m.tracks.len()]; crate::engine::render_offline(Arc::new(crate::engine::Snap::build(m,&a)),8000,0.0,240.0).0 };
+        let mut m=Mix { bpm:120.0, ..Default::default() }; let mut t=track(120.0,0.0); t.fade_in=48.0; t.fade_out=40.0; t.fade_curve=[0.4,-0.3]; m.tracks.push(t);
+        let end=m.tracks[0].end(0.0); let before=render(&m);
+        m.split(0,16.0).unwrap(); let right=m.split(m.tracks.len()-1,end-10.0).unwrap(); let _=right;
+        let after=render(&m);
+        let diff=before.iter().zip(&after).skip(800).map(|(a,b)|(a-b).abs()).fold(0.0f32,f32::max);
+        assert!(diff<1e-4,"splitting inside the fade-in and fade-out changed the audio by {diff}");
+        crate::validation::validate_mix(&m).unwrap();
+    }
+    #[test]
+    fn relayout_moves_split_songs_as_one_unit() {
+        let mut m=Mix { bpm:120.0, ..Default::default() };
+        let a=track(120.0,0.0); let mut b=track(120.0,160.0); b.lane=1; b.path="b.wav".into(); let mut c=track(120.0,360.0); c.path="c.wav".into();
+        m.tracks=vec![a,b,c]; let right=m.split(1,240.0).unwrap();
+        let o=m.main_order(); m.relayout(&o,16.0); m.resolve_ratios();
+        assert!((m.tracks[right].vis_start(0.0)-m.tracks[1].end(0.0)).abs()<1e-7,"split song got a gap: {} .. {}",m.tracks[1].end(0.0),m.tracks[right].vis_start(0.0));
+        assert_eq!(m.tracks[1].lane,m.tracks[right].lane,"both halves stay on one deck");
+        assert_eq!(m.logical_transitions().len(),2,"A→B and B→C, not a transition inside B: {:?}",m.logical_transitions());
+        assert_eq!(m.song_groups(&m.main_order()).len(),3);
     }
     #[test]
     fn single_beat_edits_at_the_neighbour_limit_stay_saveable() {

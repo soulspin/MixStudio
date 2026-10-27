@@ -80,15 +80,16 @@ fn sample_rectangle_selects_both_lanes_and_drag_keeps_spacing() {
 }
 
 #[test]
-fn fades_stay_inside_clips_after_split_and_section_delete_and_dragging_cannot_panic() {
+fn fades_continue_across_splits_stay_inside_after_section_delete_and_dragging_cannot_panic() {
     let (mut a,ctx,_rx,dir)=setup(); a.mix.tracks[0].fade_in=48.0; a.mix.tracks[0].fade_out=40.0;
     let right=a.mix.split(0,16.0).unwrap();
-    for i in [0,right] { let t=&a.mix.tracks[i]; let len=t.end(0.0)-t.vis_start(0.0); assert!(t.fade_in+t.fade_out<=len+1e-9,"fragment {i}: fades {}+{} exceed {len}",t.fade_in,t.fade_out); }
+    // The halves continue the original curves (neutral split); the right half starts 16 beats into the fade-in.
+    assert_eq!(a.mix.tracks[right].fade_skip[0],16.0); assert_eq!(a.mix.tracks[right].fade_in,48.0);
     a.tl_drag=Some(TlDrag::Fade{ti:0,left:false});
     let p=pos2(300.0,150.0);
     frame(&mut a,&ctx,vec![egui::Event::PointerMoved(p),egui::Event::PointerButton{pos:p,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}],1000.0);
     frame(&mut a,&ctx,vec![egui::Event::PointerMoved(p+vec2(5.0,0.0))],1000.0);
-    let t=&a.mix.tracks[0]; assert!(t.fade_out>=0.0 && t.fade_in+t.fade_out<=t.end(0.0)-t.vis_start(0.0)+1e-9);
+    let t=&a.mix.tracks[0]; assert!(t.fade_out>=0.0 && t.fade_out-t.fade_skip[1]<=t.end(0.0)-t.vis_start(0.0)+1e-9);
     let t=&mut a.mix.tracks[right]; t.fade_in=0.0; t.fade_out=40.0; let (vs,ve)=(t.vis_start(0.0),t.end(0.0));
     a.mix.delete_section(right,vs+4.0,ve-4.0).unwrap();
     let t=&a.mix.tracks[right]; assert!(t.fade_out<=t.end(0.0)-t.vis_start(0.0)+1e-9,"section delete left a fade longer than the clip");
@@ -113,4 +114,18 @@ fn delete_or_undo_during_an_edge_drag_cannot_overwrite_another_track() {
         if !undo { assert_eq!(a.auto_track,Some(0),"the automation lane must follow its track"); }
         drop(a);std::fs::remove_dir_all(dir).ok();
     }
+}
+
+#[test]
+fn grid_edits_on_one_half_of_a_split_song_keep_the_song_together() {
+    let (mut a,_ctx,_rx,dir)=setup();
+    let mut b=a.mix.tracks[0].clone(); b.path="b.wav".into(); b.lane=1; b.start_beat=16.0; b.duration=64.0;
+    let (au,an)=a.store["test.wav"].clone(); a.store.insert("b.wav".into(),(au,an)); a.mix.tracks.push(b);
+    let right=a.mix.split(1,40.0).unwrap(); let before=a.mix.logical_transitions();
+    a.nudge_incoming(1,1.0); a.nudge_incoming(1,-10.0);
+    let gap=a.mix.tracks[right].vis_start(0.0)-a.mix.tracks[1].end(0.0); assert!(gap.abs()<1e-7,"halves drifted apart by {gap}");
+    let after=a.mix.logical_transitions(); assert_eq!(after.len(),before.len());
+    assert!((after[0].3-before[0].3).abs()<0.05,"transition end moved from {} to {}",before[0].3,after[0].3);
+    a.mix.tracks.remove(0); a.mix.alternate_main_lanes(); assert_eq!(a.mix.tracks[0].lane,a.mix.tracks[1].lane,"still one song on one deck");
+    drop(a);std::fs::remove_dir_all(dir).ok();
 }

@@ -18,11 +18,11 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub struct SnapTrack { pub gain:f32, pub fragment_group:u64, pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub fade_curve:[f32;2], pub mutes: Vec<(u8, f64, f64)>, pub auto: Vec<Vec<(f64, f32)>>, pub stretch: u8 }
+pub struct SnapTrack { pub gain:f32, pub fragment_group:u64, pub stems: Option<Arc<Stems>>, pub audio: Arc<Audio>, pub lane: usize, pub start_beat: f64, pub offset: f64, pub bpm: f64, pub vis: f64, pub end: f64, pub grid: crate::beatmap::Grid, pub fade_in: f64, pub fade_out: f64, pub fade_skip:[f64;2], pub fade_curve:[f32;2], pub mutes: Vec<(u8, f64, f64)>, pub auto: Vec<Vec<(f64, f32)>>, pub stretch: u8 }
 impl SnapTrack {
     /// clip gate and fades: 0 outside [vis, end), linear fades in beats
     #[inline] fn edge(&self, b: f64) -> f32 { if b < self.vis || b >= self.end || (self.lane>=2 && !self.mutes.is_empty() && self.stems.is_none()) { return 0.0; } let mut g = 1.0;
-        if self.fade_in > 0.0 { g *= crate::fades::value((b - self.vis) / self.fade_in,self.fade_curve[0]); } if self.fade_out > 0.0 { g *= crate::fades::value((self.end - b) / self.fade_out,self.fade_curve[1]); } (g * self.grid.splice_gain(b)) as f32*self.gain }
+        if self.fade_in > 0.0 { g *= crate::fades::value((b - self.vis + self.fade_skip[0]) / self.fade_in,self.fade_curve[0]); } if self.fade_out > 0.0 { g *= crate::fades::value((self.end - b + self.fade_skip[1]) / self.fade_out,self.fade_curve[1]); } (g * self.grid.splice_gain(b)) as f32*self.gain }
 }
 #[allow(dead_code)]
 pub struct Snap { pub output:crate::levels::OutputSettings, pub key_lock: bool, pub metro: Option<f32>, pub bpm: f64, pub tracks: Vec<SnapTrack>, pub trans: Vec<(usize, usize, f64, f64, Preset, [StemMode; 4])>, pub decks: [Deck; 4], pub master: f32,
@@ -37,7 +37,7 @@ impl Snap {
         for (i, t) in mix.tracks.iter().enumerate() {
             if let Some(Some(a)) = audio.get(i) {
                 map[i] = tracks.len();
-                tracks.push(SnapTrack { gain:crate::levels::amplitude(t.gain_db), fragment_group:t.trans.fragment_group, stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.eff_bpm(), vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, fade_curve:t.fade_curve, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect(), auto: t.auto.clone(), stretch: match t.stretch { 0 => if mix.key_lock { 1 } else { 2 }, x => x } });
+                tracks.push(SnapTrack { gain:crate::levels::amplitude(t.gain_db), fragment_group:t.trans.fragment_group, stems: stems.get(i).cloned().flatten(), audio: a.clone(), lane: t.lane, start_beat: t.start_beat, offset: t.offset, bpm: t.eff_bpm(), vis: t.vis_start(mix.bpm), end: t.end(mix.bpm), grid: t.grid(), fade_in: t.fade_in, fade_out: t.fade_out, fade_skip: t.fade_skip, fade_curve:t.fade_curve, mutes: t.stem_mutes.iter().map(|m| (m.stem, m.a, m.b)).collect(), auto: t.auto.clone(), stretch: match t.stretch { 0 => if mix.key_lock { 1 } else { 2 }, x => x } });
             }
         }
         let tcurves = mix.transitions().into_iter().filter(|x| map[x.0] != usize::MAX && map[x.1] != usize::MAX).map(|x| (mix.tracks[x.1].trans.curve_out.clone(), mix.tracks[x.1].trans.curve_in.clone())).collect();
