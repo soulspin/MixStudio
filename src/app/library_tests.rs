@@ -134,13 +134,39 @@ fn library_preview_plays_the_source_at_its_own_tempo_and_restores_the_mix() {
     a.store.insert("test.wav".into(),(Arc::new(Audio{sr:8000,l:noise.clone(),r:noise.clone()}),Arc::new(an)));
     a.seek(10.0);a.loop_on=true;a.set_loop(Some((8.0,16.0)));
     a.toggle_listen("test.wav".into(),"Test".into(),&ctx);
-    assert!(a.listen.as_ref().is_some_and(|l|l.ready.is_some()));assert_eq!(a.timeline_beat(),10.0,"the mix playhead must stay put");assert_eq!(a.active_loop,None);
+    assert!(a.listen.as_ref().is_some_and(|l|l.ready.is_some()));assert_eq!(a.beat(),10.0,"the mix playhead must stay put");assert_eq!(a.active_loop,None);
     let snap=a.build_playback_snap();assert_eq!(snap.tracks.len(),1);
-    let beat=a.beat();let sec=0.3+(beat-4.0)*60.0/123.0;assert!((sec-32.0/3.0).abs()<1e-6,"no drop detected: start a third of the way in");
+    let beat=a.engine_beat();let sec=0.3+(beat-4.0)*60.0/123.0;assert!((sec-32.0/3.0).abs()<1e-6,"no drop detected: start a third of the way in");
     let (l,_)=crate::engine::render_offline(Arc::new(snap),8000,beat,beat+2.0);let s0=(sec*8000.0).round() as usize;let n=l.len().min(4000);
     let corr=|lag:i64|{let src=&noise[(s0 as i64+lag) as usize..];let (mut xy,mut xx,mut yy)=(0.0,0.0,0.0);for i in 200..n {let (x,y)=(l[i] as f64,src[i] as f64);xy+=x*y;xx+=x*x;yy+=y*y;}xy/(xx*yy).sqrt().max(1e-12)};
     assert!((-3..=3).map(corr).fold(f64::MIN,f64::max)>0.9,"preview is not the unstretched source at the cue");
     a.stop_listen();assert!(a.listen.is_none());assert_eq!(a.beat(),10.0);assert_eq!(a.active_loop,Some((8.0,16.0)));assert!(a.loop_on);
     a.toggle_listen("test.wav".into(),"Test".into(),&ctx);a.tab=Tab::Track;a.validate_listen();assert!(a.listen.is_none(),"leaving the Library stops the preview");
     drop(a);std::fs::remove_dir_all(dir).ok();
+}
+#[test]
+fn edits_and_timeline_clicks_during_a_preview_use_the_mix_position() {
+    let (mut a,ctx,_rx,dir)=setup();a.tab=Tab::Library;a.mix.tracks[0].duration=32.0;
+    a.seek(10.0);a.toggle_listen("test.wav".into(),"Test".into(),&ctx);
+    assert!((a.engine_beat()-10.0).abs()>1.0,"the preview plays elsewhere in its own file");
+    // Ctrl+E splits at the visible mix playhead, not at the preview position.
+    a.tl_hover=None;a.split_here();
+    assert!(a.mix.tracks.iter().any(|t|(t.end(0.0)-10.0).abs()<1e-6),"split at {:?}",a.mix.tracks.iter().map(|t|t.end(0.0)).collect::<Vec<_>>());
+    a.do_undo();
+    // A ruler click moves the mix playhead (kept when the preview stops) and leaves the preview where it is.
+    frame(&mut a,&ctx,vec![],1000.0);let out=frame(&mut a,&ctx,vec![],1000.0);
+    let pos=out.shapes.iter().find_map(|s|if let egui::epaint::Shape::Text(t)=&s.shape {if t.galley.text()=="0:10" && t.pos.x>200.0{Some(t.pos+t.galley.size()*0.5)}else{None}}else{None}).expect("ruler label");
+    let preview=a.engine_beat();let pointer=|pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
+    frame(&mut a,&ctx,vec![egui::Event::PointerMoved(pos),pointer(true)],1000.0);frame(&mut a,&ctx,vec![pointer(false)],1000.0);
+    let clicked=a.beat();assert!((clicked-10.0).abs()>0.5,"the click must move the mix playhead");assert_eq!(a.engine_beat(),preview,"the click must not move the preview");
+    a.stop_listen();assert_eq!(a.beat(),clicked,"stopping the preview keeps the clicked mix position");
+    drop(a);std::fs::remove_dir_all(dir).ok();
+}
+#[test]
+fn library_folder_column_compares_whole_folder_names() {
+    let roots=vec!["/Music/House".to_string(),"/Music".to_string()];
+    assert_eq!(super::library_ui::relative_folder("/Music/House2/x.wav",&roots),"House2");
+    assert_eq!(super::library_ui::relative_folder("/Music/House/Deep/x.wav",&roots),"Deep");
+    assert_eq!(super::library_ui::relative_folder("/Music/House/x.wav",&roots),"House");
+    assert_eq!(super::library_ui::relative_folder("/Other/x.wav",&roots),"/Other");
 }

@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) struct Listen {
     pub path:String, pub title:String, pub ready:Option<(Arc<Audio>,Arc<Analysis>)>, pub error:Option<String>,
-    restore_beat:f64, restore_loop:Option<(f64,f64)>, restore_loop_on:bool,
+    pub restore_beat:std::cell::Cell<f64>, restore_loop:Option<(f64,f64)>, restore_loop_on:bool,
 }
 /// Source seconds to preview beats on a fixed grid at the file's own tempo (stretch ratio 1).
 fn start_beat(an:&Analysis)->f64 { (an.offset*an.bpm/60.0/4.0).ceil()*4.0 }
@@ -20,10 +20,10 @@ impl App {
     pub(super) fn toggle_listen(&mut self,path:String,title:String,ctx:&egui::Context) {
         if self.listening(&path) { self.stop_listen(); return; }
         self.stop_comparison(); self.stop_transition_audition();
-        let (restore_beat,restore_loop,restore_loop_on)=match self.listen.take() { Some(l)=>(l.restore_beat,l.restore_loop,l.restore_loop_on), None=>(self.beat(),self.active_loop,self.loop_on) };
+        let (restore_beat,restore_loop,restore_loop_on)=match self.listen.take() { Some(l)=>(l.restore_beat.get(),l.restore_loop,l.restore_loop_on), None=>(self.beat(),self.active_loop,self.loop_on) };
         let _=self.out.tx.send(Cmd::Play(false)); self.set_loop(None);
         let ready=self.store.get(&path).map(|(a,an)|(a.clone(),an.clone()));
-        self.listen=Some(Listen{path:path.clone(),title,ready:None,error:None,restore_beat,restore_loop,restore_loop_on});
+        self.listen=Some(Listen{path:path.clone(),title,ready:None,error:None,restore_beat:std::cell::Cell::new(restore_beat),restore_loop,restore_loop_on});
         match ready { Some((a,an))=>self.listen_ready(&path,Ok((a,an))), None=>{
             let tx=self.tx.clone(); let ctx=ctx.clone();
             std::thread::spawn(move||{ let r=analysis::load(std::path::Path::new(&path)).map(|(a,an)|(Arc::new(a),Arc::new(an))).map_err(|e|e.to_string());
@@ -34,22 +34,20 @@ impl App {
         let Some(l)=self.listen.as_mut().filter(|l|l.path==path) else { return; };
         match result {
             Err(e)=>{ l.error=Some(e); },
-            Ok((a,an))=>{ let at=beat_at(&an,cue(&an)); l.ready=Some((a,an)); let _=self.out.snapshot(Arc::new(self.build_playback_snap())); self.seek(at); let _=self.out.tx.send(Cmd::Play(true)); },
+            Ok((a,an))=>{ let at=beat_at(&an,cue(&an)); l.ready=Some((a,an)); let _=self.out.snapshot(Arc::new(self.build_playback_snap())); self.engine_seek(at); let _=self.out.tx.send(Cmd::Play(true)); },
         }
     }
     pub(super) fn stop_listen(&mut self) {
         let Some(l)=self.listen.take() else { return; };
         let _=self.out.tx.send(Cmd::Play(false)); let _=self.out.snapshot(Arc::new(self.build_playback_snap()));
-        self.seek(l.restore_beat); self.loop_on=l.restore_loop_on; self.set_loop(l.restore_loop);
+        self.engine_seek(l.restore_beat.get()); self.loop_on=l.restore_loop_on; self.set_loop(l.restore_loop);
     }
     /// Stop when leaving the Library or at the end of the file.
     pub(super) fn validate_listen(&mut self) {
         let Some(l)=&self.listen else { return; };
-        let ended=l.ready.as_ref().is_some_and(|(_,an)|self.playing() && sec_at(an,self.beat())>=an.duration-0.05);
+        let ended=l.ready.as_ref().is_some_and(|(_,an)|self.playing() && sec_at(an,self.engine_beat())>=an.duration-0.05);
         if self.tab!=Tab::Library || ended { self.stop_listen(); }
     }
-    /// The playhead the timeline should show: the mix position stays put while a preview plays.
-    pub(super) fn timeline_beat(&self)->f64 { self.listen.as_ref().map(|l|l.restore_beat).unwrap_or_else(||self.beat()) }
     pub(super) fn listen_snap(&self)->Option<Snap> {
         let (audio,an)=self.listen.as_ref()?.ready.clone()?;
         let mut mix=crate::model::Mix{output:self.mix.output,master:self.mix.master,bpm:an.bpm,..Default::default()};
@@ -70,7 +68,7 @@ impl App {
                     ui.label(egui::RichText::new(match (&error,&ready) { (Some(e),_)=>format!("Cannot play: {e}"), (None,None)=>"Loading…".into(), (None,Some((_,an)))=>format!("Preview · original tempo {:.1} BPM · {}",an.bpm,an.key) }).size(10.5).color(if error.is_some() {C::LIGHT_RED} else {DIM}));
                 });
                 let Some((_,an))=&ready else { if error.is_none() { ui.spinner(); } return; };
-                let pos=sec_at(an,self.beat()).clamp(0.0,an.duration);
+                let pos=sec_at(an,self.engine_beat()).clamp(0.0,an.duration);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
                     ui.label(egui::RichText::new(format!("{} / {}",fmt_t(pos),fmt_t(an.duration))).size(11.5).color(DIM).monospace());
                     let (rect,response)=ui.allocate_exact_size(vec2(ui.available_width().max(80.0),30.0),Sense::click_and_drag());
@@ -88,6 +86,6 @@ impl App {
                 });
             });
         });
-        if stop { self.stop_listen(); } else if let Some(b)=seek { self.seek(b); if !self.playing() { let _=self.out.tx.send(Cmd::Play(true)); } }
+        if stop { self.stop_listen(); } else if let Some(b)=seek { self.engine_seek(b); if !self.playing() { let _=self.out.tx.send(Cmd::Play(true)); } }
     }
 }

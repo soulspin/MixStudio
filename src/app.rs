@@ -250,7 +250,10 @@ impl App {
     fn do_undo(&mut self) { if let Some(s) = self.undo.pop() { self.redo.push(serde_json::to_string(&self.mix).unwrap()); self.mix = serde_json::from_str(&s).unwrap(); self.fix_sel(); } }
     fn do_redo(&mut self) { if let Some(s) = self.redo.pop() { self.undo.push(serde_json::to_string(&self.mix).unwrap()); self.mix = serde_json::from_str(&s).unwrap(); self.fix_sel(); } }
     fn fix_sel(&mut self) { self.cancel_edit_gestures(); self.samples=Default::default(); self.clear_section(); let n = self.mix.tracks.len(); if self.sel.is_some_and(|s| s >= n) { self.sel = None; } if self.sel_in.is_some_and(|s| s >= n) { self.sel_in = None; } self.auto_track = self.auto_track.filter(|&s| s < n); }
-    fn beat(&self) -> f64 { self.out.shared.beat() }
+    /// The mix position. During a Library preview the engine plays the previewed file, so edits,
+    /// snapping and the timeline use the parked mix position instead of the engine playhead.
+    fn beat(&self) -> f64 { self.listen.as_ref().map(|l|l.restore_beat.get()).unwrap_or_else(||self.engine_beat()) }
+    fn engine_beat(&self) -> f64 { self.out.shared.beat() }
     fn playing(&self) -> bool { self.out.shared.playing.load(std::sync::atomic::Ordering::Relaxed) }
     fn set_loop(&mut self,range:Option<(f64,f64)>) { self.active_loop=range; let _=self.out.tx.send(Cmd::Loop(range)); }
     fn toggle_playback(&mut self) {
@@ -259,7 +262,9 @@ impl App {
         if self.playing() && self.comparison.audition!=0 { self.stop_comparison(); }
         else { let _=self.out.tx.send(Cmd::Play(!self.playing())); }
     }
-    fn seek(&self, b: f64) { self.out.shared.beat.store(b.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed); let _ = self.out.tx.send(Cmd::Seek(b.max(0.0))); }
+    /// Move the mix position; during a preview it is parked and applied when the preview stops.
+    fn seek(&self, b: f64) { match &self.listen { Some(l)=>l.restore_beat.set(b.max(0.0)), None=>self.engine_seek(b) } }
+    fn engine_seek(&self, b: f64) { self.out.shared.beat.store(b.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed); let _ = self.out.tx.send(Cmd::Seek(b.max(0.0))); }
     fn sec(&self, b: f64) -> f64 { self.mix.secs(0.0, b) }
 
     fn insert(&mut self,p:PathBuf,au:Audio,an:Analysis,sample:Option<(usize,f64)>) {
@@ -964,7 +969,7 @@ impl App {
         let tl_x0 = area.left() + HEAD_W; let tl_w = area.right() - tl_x0;
         let bpm = self.mix.bpm;
         let len = self.mix.length_beats().max(64.0);
-        let beat_now = self.timeline_beat();
+        let beat_now = self.beat();
         if ui.rect_contains_pointer(Rect::from_min_max(pos2(tl_x0, area.top()), area.max)) {
             let (zoom, sc, mx) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.pointer.hover_pos()));
             if zoom != 1.0 { let mxb = mx.map(|m| self.scroll + ((m.x - tl_x0) / self.ppb) as f64).unwrap_or(self.scroll);
