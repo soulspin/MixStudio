@@ -137,6 +137,10 @@ impl Grid {
     fn raw_beat(&self, s: f64) -> f64 { self.start + match &self.map { Some(m) => (m.u_of(s) - self.u0) / self.r, None => (s - self.offset) * self.bpm / 60.0 } }
 }
 
+/// Smallest spacing the beatgrid editor leaves between neighbouring beats (seconds).
+/// Project validation accepts half of it, so float rounding at the limit can never block saving.
+pub const MIN_BEAT_GAP: f64 = 0.005;
+
 /// Beatgrid editor operations. Every edit keeps the beats strictly increasing.
 impl BeatMap {
     /// Build an explicit beat map (one entry per track beat) from any grid, so a fixed grid or
@@ -147,11 +151,11 @@ impl BeatMap {
     }
     /// Shift every beat by `d` seconds.
     pub fn shift(&mut self, d: f64) { for b in &mut self.beats { *b += d; } }
-    /// Move beat `i` alone by `d` seconds, clamped 5 ms inside its neighbours. Returns the applied shift.
+    /// Move beat `i` alone by `d` seconds, clamped `MIN_BEAT_GAP` inside its neighbours. Returns the applied shift.
     pub fn move_single(&mut self, i: usize, d: f64) -> f64 {
         let n = self.beats.len(); if i >= n { return 0.0; }
-        let lo = if i > 0 { self.beats[i - 1] + 0.005 } else { f64::MIN };
-        let hi = if i + 1 < n { self.beats[i + 1] - 0.005 } else { f64::MAX };
+        let lo = if i > 0 { self.beats[i - 1] + MIN_BEAT_GAP } else { f64::MIN };
+        let hi = if i + 1 < n { self.beats[i + 1] - MIN_BEAT_GAP } else { f64::MAX };
         if lo>hi || !d.is_finite() { return 0.0; }
         let old = self.beats[i]; self.beats[i] = (old + d).clamp(lo, hi); self.beats[i] - old
     }

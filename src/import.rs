@@ -75,7 +75,10 @@ fn unescape(s: &str) -> String {
     }
     o
 }
-pub fn parse_xml(s: &str) -> El {
+/// Deepest element nesting accepted. DJ library exports use about ten levels; a corrupt or hostile file
+/// with unbounded nesting would otherwise overflow the stack when the tree is walked or dropped.
+const MAX_XML_DEPTH: usize = 256;
+pub fn parse_xml(s: &str) -> Result<El, String> {
     let b = s.as_bytes(); let mut i = 0; let mut stack = vec![El::default()];
     let find = |from: usize, pat: &str| s[from..].find(pat).map(|k| from + k);
     while i < b.len() {
@@ -110,9 +113,10 @@ pub fn parse_xml(s: &str) -> El {
         }
         i = j;
         if close { stack.last_mut().unwrap().kids.push(el); } else { stack.push(el); }
+        if stack.len() > MAX_XML_DEPTH { return Err(format!("XML is nested more than {MAX_XML_DEPTH} levels deep; the file is damaged")); }
     }
     while stack.len() > 1 { let e = stack.pop().unwrap(); stack.last_mut().unwrap().kids.push(e); }
-    stack.pop().unwrap()
+    Ok(stack.pop().unwrap())
 }
 
 /// file:// URL (Rekordbox, iTunes) -> path; Windows drive paths keep their drive letter.
@@ -341,7 +345,7 @@ pub fn sniff(p: &Path) -> Option<Source> {
 /// Read a library file (read-only), remap its paths and check which files exist.
 pub fn load(p: &Path, maps: &[Remap]) -> Result<ExtLib, String> {
     let src = sniff(p).ok_or_else(|| format!("{}: unknown library format", p.display()))?;
-    let xml = || -> Result<El, String> { let b = std::fs::read(p).map_err(|e| e.to_string())?; Ok(parse_xml(&String::from_utf8_lossy(&b))) };
+    let xml = || -> Result<El, String> { let b = std::fs::read(p).map_err(|e| e.to_string())?; parse_xml(&String::from_utf8_lossy(&b)) };
     let (mut tracks, root) = match src {
         Source::Rekordbox => rekordbox(&xml()?)?, Source::Traktor => traktor(&xml()?)?, Source::ITunes => itunes(&xml()?)?, Source::Engine => engine(p)?,
         Source::Serato => { let d = if p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("_serato_")) { p.to_path_buf() } else if p.extension().is_some_and(|e| e == "crate") { p.parent().and_then(|x| x.parent()).unwrap_or(p).to_path_buf() } else { p.parent().unwrap_or(p).to_path_buf() }; serato(&d)? }
@@ -381,4 +385,22 @@ pub fn grid_beats(g: &[(f64, f64, i32)], dur: f64) -> Option<Vec<f64>> {
     for (k, s) in g.iter().enumerate() { let end = g.get(k + 1).map(|n| n.0).unwrap_or(dur + 60.0 / s.1); let p = 60.0 / s.1; let mut t = s.0; while t < end - 1e-6 { beats.push(t); t += p; } }
     let drop = down % 4; if beats.len() < drop + 16 { return None; }
     Some(beats[drop..].to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn deeply_nested_xml_is_rejected_without_overflowing_the_stack() {
+        let mut deep=String::new(); for _ in 0..100_000 { deep.push_str("<a>"); }
+        assert!(parse_xml(&deep).unwrap_err().contains("nested"));
+        let dir=std::env::temp_dir().join(format!("mixstudio-import-deep-{}",std::process::id())); std::fs::create_dir_all(&dir).unwrap();
+        let p=dir.join("rekordbox.xml");
+        let mut s=String::from(r#"<?xml version="1.0"?><DJ_PLAYLISTS><PLAYLISTS>"#); for _ in 0..100_000 { s.push_str(r#"<NODE Type="0" Name="x">"#); }
+        std::fs::write(&p,&s).unwrap();
+        assert!(load(&p,&[]).is_err(),"a damaged export must fail as an error, not abort the app");
+        let shallow=parse_xml(r#"<a x="1"><b>t&amp;</b><c/></a>"#).unwrap();
+        assert_eq!(shallow.kids[0].kids.len(),2); assert_eq!(shallow.kids[0].kids[0].text,"t&");
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

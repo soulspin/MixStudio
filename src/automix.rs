@@ -64,7 +64,7 @@ impl Ctx {
         let mut pair = vec![0.0; n * n];
         for i in 0..n { for j in 0..n { if i != j { let ks = key_score(&items[i].key, &items[j].key).0; let bs = bpm_score(items[i].bpm, items[j].bpm).0; pair[i * n + j] = 1.0 - wk * ks - wb * bs; } } }
         // energy normalised by rank (robust to scale)
-        let mut idx: Vec<usize> = (0..n).collect(); idx.sort_by(|&a, &b| items[a].energy.partial_cmp(&items[b].energy).unwrap());
+        let mut idx: Vec<usize> = (0..n).collect(); idx.sort_by(|&a, &b| items[a].energy.total_cmp(&items[b].energy));
         let mut en = vec![0.5; n]; if n > 1 { for (r, &i) in idx.iter().enumerate() { en[i] = r as f64 / (n - 1) as f64; } }
         Ctx { n, pair, en, curve: o.curve, we: 0.6 }
     }
@@ -95,7 +95,7 @@ pub fn optimize(items: &[Item], locked: &[bool], o: &Opts) -> Vec<usize> {
             let pick = if k == free_pos[0] && first.is_some() { left.iter().position(|&x| Some(x) == first).unwrap() } else {
                 let prev = if k > 0 { Some(ord[k - 1]) } else { None }; let next = if k + 1 < n && locked[k + 1] { Some(k + 1) } else { None };
                 (0..left.len()).min_by(|&a, &b| { let c = |i: usize| prev.map(|p| cx.pair[p * n + i]).unwrap_or(0.0) + next.map(|q| cx.pair[i * n + q]).unwrap_or(0.0);
-                    c(left[a]).partial_cmp(&c(left[b])).unwrap() }).unwrap() };
+                    c(left[a]).total_cmp(&c(left[b])) }).unwrap() };
             ord[k] = left.remove(pick);
         }
         ord

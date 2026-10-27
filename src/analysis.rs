@@ -51,6 +51,22 @@ mod precision_tests {
     use super::*;
 
     #[test]
+    fn non_finite_samples_neither_reach_analysis_nor_crash_it() {
+        let sr=22050u32; let times:Vec<_>=(0..64).map(|k|0.3+k as f64*0.48).collect();
+        let (mut l,mut r)=crate::testgen::synth_kicks(&times,32.0,sr); l[1000]=f32::NAN; r[2000]=f32::INFINITY;
+        // A 32-bit float WAV with one NaN and one inf decodes to finite samples.
+        let mut wav=Vec::new(); let data=(l.len()*8) as u32;
+        for part in [&b"RIFF"[..],&(36+data).to_le_bytes(),b"WAVEfmt ",&16u32.to_le_bytes(),&3u16.to_le_bytes(),&2u16.to_le_bytes(),&sr.to_le_bytes(),&(sr*8).to_le_bytes(),&8u16.to_le_bytes(),&32u16.to_le_bytes(),b"data",&data.to_le_bytes()] { wav.extend_from_slice(part); }
+        for (a,b) in l.iter().zip(&r) { wav.extend(a.to_le_bytes()); wav.extend(b.to_le_bytes()); }
+        let path=std::env::temp_dir().join(format!("mixstudio-nan-{}.wav",std::process::id())); std::fs::write(&path,&wav).unwrap();
+        let (decoded,_,_)=decode(&path).unwrap(); std::fs::remove_file(&path).ok();
+        assert!(decoded.l.iter().chain(&decoded.r).all(|x|x.is_finite()),"decode must not pass NaN/inf through");
+        // Audio that bypasses decode (rendered clips, stems) must not panic the analysis either.
+        let an=analyse(&Audio{sr,l,r},String::new(),String::new(),Path::new("nan.wav"));
+        assert!(an.duration>31.0);
+    }
+
+    #[test]
     fn fractional_tempo_does_not_accumulate_integer_rounding_drift() {
         for expected in [127.98, 128.025] {
             let sr = 22050;
@@ -322,9 +338,11 @@ pub fn decode(path: &Path) -> anyhow::Result<(Audio, String, String)> {
         let ch = spec.channels.count().max(1);
         let mut sb = SampleBuffer::<f32>::new(buf.capacity() as u64, spec);
         sb.copy_interleaved_ref(buf);
+        // A single NaN/inf (a damaged float file) would poison every filter and envelope downstream.
+        let clean = |x: f32| if x.is_finite() { x } else { 0.0 };
         for fr in sb.samples().chunks(ch) {
-            l.push(fr[0]);
-            r.push(if ch > 1 { fr[1] } else { fr[0] });
+            l.push(clean(fr[0]));
+            r.push(clean(if ch > 1 { fr[1] } else { fr[0] }));
         }
     }
     if l.is_empty() { anyhow::bail!("could not decode audio"); }
@@ -672,7 +690,12 @@ pub fn load_analysis(path: &Path) -> anyhow::Result<Analysis> {
 }
 
 /// Decode + analyse, using the on-disk analysis/waveform cache when present.
+/// Decode and analyse a file (cached). A decoder panic on a damaged file becomes an error, so
+/// background loaders always report back instead of leaving the UI waiting.
 pub fn load(path: &Path) -> anyhow::Result<(Audio, Analysis)> {
+    std::panic::catch_unwind(|| load_unguarded(path)).unwrap_or_else(|_| Err(anyhow::anyhow!("the decoder crashed on this file; it may be damaged")))
+}
+fn load_unguarded(path: &Path) -> anyhow::Result<(Audio, Analysis)> {
     let (audio, title, artist) = decode(path)?;
     let cp = cache_path(path);
     if let Some(c) = &cp { if let Ok(s) = std::fs::read(c) { if let Ok(a) = serde_json::from_slice::<Analysis>(&s) { if a.version == ANALYSIS_VERSION { return Ok((audio, a)); } } } }
@@ -714,7 +737,7 @@ fn track_beats(o: &[f32], fps: f64, period: f64, phase: f64) -> Vec<f64> {
         if best.1 != usize::MAX && best.0 > 0.0 { c[t] = on[t] + best.0; back[t] = best.1; }
     }
     // start from the best score in the last beat period
-    let mut t = (n.saturating_sub(hi)..n).max_by(|&a, &b| c[a].partial_cmp(&c[b]).unwrap()).unwrap();
+    let mut t = (n.saturating_sub(hi)..n).max_by(|&a, &b| c[a].total_cmp(&c[b])).unwrap();
     let mut fr = vec![t];
     while back[t] != usize::MAX { t = back[t]; fr.push(t); }
     fr.reverse();
@@ -863,7 +886,7 @@ fn detect_rhythm(m:&[f32],sr:u32)->(f64,f64,Vec<f64>,RhythmEvidence) {
     // the original estimate for variable/uncertain grids.
     let bpm = steady_tempo(&observed, bpm).unwrap_or(bpm);
     // bar phase from the global grid (robust), snapped to the nearest tracked beat; offset = first such downbeat
-    let near = beats.iter().enumerate().min_by(|x, y| (x.1 - off_lin).abs().partial_cmp(&(y.1 - off_lin).abs()).unwrap()).map(|x| x.0).unwrap_or(0);
+    let near = beats.iter().enumerate().min_by(|x, y| (x.1 - off_lin).abs().total_cmp(&(y.1 - off_lin).abs())).map(|x| x.0).unwrap_or(0);
     let _ = downbeat_idx;
     let k = near % 4;
     evidence.grid_supported=true;
@@ -908,7 +931,7 @@ fn refine_attacks(m: &[f32], sr: u32, beats: &[f64]) -> (Vec<f64>,Vec<(f64,f64)>
     let mut fold = vec![0f64; (2 * fw / step) as usize + 1];
     for &t in beats { let c = (t * sr as f64) as i64; if c - fw < 0 || (c + fw) as usize + d >= env.len() { continue; }
         for (i, f) in fold.iter_mut().enumerate() { let q = (c - fw + i as i64 * step) as usize; *f += (env[q + d] - env[q]) as f64; } }
-    let gi = fold.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|x| x.0).unwrap_or((fw / step) as usize);
+    let gi = fold.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|x| x.0).unwrap_or((fw / step) as usize);
     let g = ((gi as i64 * step - fw) as f64) / sr as f64;
     let beats: Vec<f64> = beats.iter().map(|t| t + g).collect(); let beats = &beats[..];
     let mut obs = vec![(0f64, 0f64); n];
@@ -927,7 +950,7 @@ fn refine_attacks(m: &[f32], sr: u32, beats: &[f64]) -> (Vec<f64>,Vec<(f64,f64)>
         } else {false};
         obs[k] = (best.1 as f64 / sr as f64, if contrast {best.0 as f64}else{0.0});
     }
-    let mut rs: Vec<f64> = obs.iter().map(|o| o.1).collect(); rs.sort_by(|a, b| a.partial_cmp(b).unwrap()); let med = rs[n / 2].max(1e-9);
+    let mut rs: Vec<f64> = obs.iter().map(|o| o.1).collect(); rs.sort_by(|a, b| a.total_cmp(b)); let med = rs[n / 2].max(1e-9);
     let strongest=rs.get((n-1)*95/100).copied().unwrap_or(0.0);
     let threshold=(0.3*med).max(strongest*0.02);
     let reliable:Vec<usize>=(0..n).filter(|&k|obs[k].1>threshold).collect();
@@ -973,7 +996,7 @@ pub fn flex_beats(m: &[f32], sr: u32, bpm: f64) -> (Vec<f64>, Vec<f64>) {
         let w = &o[c..c + win];
         let ac = |l: usize| -> f64 { if l + 1 >= win { return 0.0; } (0..win - l).map(|i| (w[i] * w[i + l]) as f64).sum::<f64>() / (win - l) as f64 };
         let sc: Vec<f64> = (lmin..=lmax + 1).map(|l| ac(l) + 0.5 * ac(2 * l)).collect();
-        let k = (1..sc.len() - 1).max_by(|&a, &b| sc[a].partial_cmp(&sc[b]).unwrap()).unwrap_or(1);
+        let k = (1..sc.len() - 1).max_by(|&a, &b| sc[a].total_cmp(&sc[b])).unwrap_or(1);
         let (a, b, cc) = (sc[k - 1], sc[k], sc[k + 1]); let d = a - 2.0 * b + cc;
         let lag = (lmin + k) as f64 + if d.abs() > 1e-12 { (0.5 * (a - cc) / d).clamp(-0.5, 0.5) } else { 0.0 };
         if b > 1e-9 { pts.push(((c + win / 2) as f64 / fps, 60.0 * fps / lag)); }
@@ -1012,7 +1035,7 @@ pub fn flex_beats(m: &[f32], sr: u32, bpm: f64) -> (Vec<f64>, Vec<f64>) {
         for tau in t.saturating_sub(hi)..=t - lo { let d = (t - tau) as f64 / p; let s = cs[tau] - 120.0 * d.ln().powi(2); if s > bst.0 { bst = (s, tau); } }
         if bst.1 != usize::MAX && bst.0 > 0.0 { cs[t] = on[t] + bst.0; back[t] = bst.1; } }
     let pend = 60.0 * fps / tempo_at(n as f64 / fps);
-    let mut t = (n.saturating_sub(pend as usize + 1)..n).max_by(|&a, &b| cs[a].partial_cmp(&cs[b]).unwrap()).unwrap();
+    let mut t = (n.saturating_sub(pend as usize + 1)..n).max_by(|&a, &b| cs[a].total_cmp(&cs[b])).unwrap();
     let mut fr = vec![t]; while back[t] != usize::MAX { t = back[t]; fr.push(t); } fr.reverse();
     let beats: Vec<f64> = fr.iter().map(|&f| { let mut bi = f; for i in f.saturating_sub(2)..(f + 3).min(n) { if o[i] > o[bi] { bi = i; } }
         let y = if bi > 0 && bi + 1 < n { let (a, b, c) = (o[bi - 1] as f64, o[bi] as f64, o[bi + 1] as f64); let d = a - 2.0 * b + c; if d.abs() > 1e-12 { bi as f64 + (0.5 * (a - c) / d).clamp(-0.5, 0.5) } else { bi as f64 } } else { bi as f64 };
@@ -1031,7 +1054,7 @@ fn flex_attacks(m: &[f32], sr: u32, beats: &[f64]) -> Vec<f64> {
     let fw = (0.080 * sr as f64) as i64; let step = 8i64; let mut fold = vec![0f64; (2 * fw / step) as usize + 1];
     for &t in beats { let c = (t * sr as f64) as i64; if c - fw < 0 || (c + fw) as usize + d >= env.len() { continue; }
         for (i, f) in fold.iter_mut().enumerate() { let q = (c - fw + i as i64 * step) as usize; *f += (env[q + d] - env[q]) as f64; } }
-    let gi = fold.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|x| x.0).unwrap_or((fw / step) as usize);
+    let gi = fold.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|x| x.0).unwrap_or((fw / step) as usize);
     let g = ((gi as i64 * step - fw) as f64) / sr as f64;
     let mut out: Vec<f64> = beats.iter().map(|&t0| { let t = t0 + g; let c = (t * sr as f64) as i64;
         if c - (w as i64) < 0 || (c as usize) + w + d >= env.len() { return t; }
