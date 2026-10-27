@@ -818,7 +818,7 @@ impl App {
                         if ui.button("Separate stems for all tracks").clicked() { for i in 0..self.mix.tracks.len() { self.request_stems(i); } ui.close_menu(); }
                         ui.separator();
                         let ep = self.ep.lock().unwrap().clone();
-                        ui.label(egui::RichText::new(format!("Stem model: HT-Demucs (MIT), {} MB, downloaded on first use to ~/.local/share/mixstudio/models", crate::stems::MODEL_SIZE / 1_000_000)).color(DIM).size(11.0));
+                        ui.label(egui::RichText::new(format!("Stem model: HT-Demucs (MIT), {} MB, downloaded on first use to {}", crate::stems::MODEL_SIZE / 1_000_000, crate::stems::models_dir().display())).color(DIM).size(11.0));
                         ui.label(egui::RichText::new(if ep.is_empty() { "Inference: not started yet (CUDA if available, else CPU)".to_string() } else { format!("Inference: {ep}") }).color(DIM).size(11.0));
                     });
                     ui.add(egui::Button::new("?").min_size(vec2(28.0, 28.0))).on_hover_text("Space = play/pause · Ctrl+scroll = zoom · scroll = pan · Ctrl+Z = undo · Delete = remove track · drop audio files on the window");
@@ -1606,7 +1606,7 @@ impl App {
             let mut open = true; let mut go = false; let mut close = false;
             egui::Window::new("Stem model needed").collapsible(false).resizable(false).open(&mut open).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(ui.ctx(), |ui| {
                 ui.label(format!("The stem view needs AI stem separation. MixStudio uses the HT-Demucs model (MIT license, {} MB).", crate::stems::MODEL_SIZE / 1_000_000));
-                ui.label(egui::RichText::new("It is downloaded once to ~/.local/share/mixstudio/models and verified by SHA-256.").color(DIM));
+                ui.label(egui::RichText::new(format!("It is downloaded once to {} and verified by SHA-256.", crate::stems::models_dir().display())).color(DIM));
                 ui.horizontal(|ui| { if ui.button("Download and separate").clicked() { go = true; } if ui.button("Cancel").clicked() { close = true; } });
             });
             if go { self.dl_offer = None; if ti < self.mix.tracks.len() { self.request_stems(ti); self.status = "Downloading the stem model, then separating…".into(); } }

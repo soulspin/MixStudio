@@ -212,12 +212,16 @@ pub fn itunes(root: &El) -> Result<(Vec<ExtTrack>, Node), String> {
         for p in pl { if p.yes("Master") || p.get("Distinguished Kind").is_some() { continue; }
             let tr = match p.get("Playlist Items") { Some(P::Arr(v)) => v.iter().filter_map(|i| by_id.get(&i.int("Track ID")?).copied()).collect(), _ => vec![] };
             items.push((p.str("Playlist Persistent ID"), p.str("Parent Persistent ID"), Node { name: p.str("Name"), folder: p.yes("Folder"), children: vec![], tracks: tr })); }
-        fn build(parent: &str, items: &[(String, String, Node)], depth: usize) -> Vec<Node> {
-            if depth > 30 { return vec![]; }
-            items.iter().filter(|x| x.1 == parent).map(|x| { let mut n = x.2.clone(); if !x.0.is_empty() { n.children = build(&x.0, items, depth + 1); } n }).collect()
+        // Each persistent id is expanded once: repeated or self-parented ids (damaged libraries) would otherwise grow exponentially.
+        fn node(x: &(String, String, Node), items: &[(String, String, Node)], depth: usize, used: &mut std::collections::HashSet<String>) -> Node {
+            let mut n = x.2.clone(); if !x.0.is_empty() && used.insert(x.0.clone()) { n.children = build(&x.0, items, depth + 1, used); } n
         }
-        let ids: std::collections::HashSet<&str> = items.iter().map(|x| x.0.as_str()).collect();
-        let tops: Vec<Node> = items.iter().filter(|x| x.1.is_empty() || !ids.contains(x.1.as_str())).map(|x| { let mut n = x.2.clone(); if !x.0.is_empty() { n.children = build(&x.0, &items, 1); } n }).collect();
+        fn build(parent: &str, items: &[(String, String, Node)], depth: usize, used: &mut std::collections::HashSet<String>) -> Vec<Node> {
+            if depth > 30 { return vec![]; }
+            items.iter().filter(|x| x.1 == parent).map(|x| node(x, items, depth, used)).collect()
+        }
+        let ids: std::collections::HashSet<&str> = items.iter().map(|x| x.0.as_str()).collect(); let mut used = std::collections::HashSet::new();
+        let tops: Vec<Node> = items.iter().filter(|x| x.1.is_empty() || !ids.contains(x.1.as_str())).map(|x| node(x, &items, 0, &mut used)).collect();
         root.children = tops;
     }
     Ok((tracks, root))
@@ -296,14 +300,19 @@ pub fn engine(db: &Path) -> Result<(Vec<ExtTrack>, Node), String> {
         if cols.is_empty() { return Err("no Track table (not an Engine DJ database?)".into()); }
         let col = |n: &str| if cols.iter().any(|c| c == n) { n.to_string() } else { "NULL".into() };
         let q = format!("SELECT id, {}, {}, {}, {}, {}, {}, {}, {}, {}, {} FROM Track", col("path"), col("filename"), col("title"), col("artist"), col("album"), col("genre"), col("bpm"), col("bpmAnalyzed"), col("key"), col("length"));
-        let base = db.parent().unwrap_or(Path::new("."));
+        // Engine 1.x keeps m.db in `Engine Library` and paths relative to it. Engine 2.x keeps it in
+        // `Engine Library/Database2`, with paths documented (libdjinterop, Mixxx) as relative to `Engine Library`.
+        // Take the base where the file exists; otherwise the documented one.
+        let near = db.parent().unwrap_or(Path::new("."));
+        let bases: Vec<&Path> = match near.parent() { Some(up) if near.file_name().is_some_and(|n| n == "Database2") => vec![up, near], _ => vec![near] };
+        let resolve = |p: &str| { let at = |b: &Path| lexical(&b.join(p)); bases.iter().map(|b| at(b)).find(|c| c.exists()).unwrap_or_else(|| at(bases[0])) };
         let mut tracks = vec![]; let mut by = HashMap::new();
         let mut st = c.prepare(&q).map_err(|e| e.to_string())?;
         let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?,
             r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?, r.get::<_, Option<f64>>(7)?, r.get::<_, Option<f64>>(8)?, r.get::<_, Option<i64>>(9)?, r.get::<_, Option<f64>>(10)?))).map_err(|e| e.to_string())?;
         for row in rows { let (id, p, f, ti, ar, al, ge, bpm, bpma, key, len) = row.map_err(|e| e.to_string())?;
             let Some(p) = p.filter(|p| !p.is_empty()) else { continue };
-            let raw = if Path::new(&p).is_absolute() || p.get(1..2) == Some(":") { p.clone() } else { lexical(&base.join(&p)).display().to_string() };
+            let raw = if Path::new(&p).is_absolute() || p.get(1..2) == Some(":") { p.clone() } else { resolve(&p).display().to_string() };
             by.insert(id, tracks.len());
             tracks.push(ExtTrack { raw, title: ti.filter(|s| !s.is_empty()).or(f).unwrap_or_default(), artist: ar.unwrap_or_default(), album: al.unwrap_or_default(), genre: ge.unwrap_or_default(),
                 bpm: bpma.or(bpm).filter(|b| *b > 0.0), key: key.and_then(engine_key), duration: len.unwrap_or(0.0), ..Default::default() });
@@ -390,6 +399,22 @@ pub fn grid_beats(g: &[(f64, f64, i32)], dur: f64) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn engine_2_paths_resolve_against_engine_library_and_itunes_duplicate_ids_stay_finite() {
+        let root=std::env::temp_dir().join(format!("mixstudio-engine-base-{}",crate::recovery::unique_id()));
+        let ed=root.join("Engine Library/Database2"); std::fs::create_dir_all(&ed).unwrap(); std::fs::create_dir_all(root.join("Music")).unwrap(); std::fs::write(root.join("Music/a.mp3"),b"x").unwrap();
+        let db=ed.join("m.db");
+        { let c=rusqlite::Connection::open(&db).unwrap(); c.execute_batch("CREATE TABLE Track (id INTEGER PRIMARY KEY, path TEXT, filename TEXT, title TEXT, artist TEXT, album TEXT, genre TEXT, bpm INTEGER, bpmAnalyzed REAL, key INTEGER, length REAL); INSERT INTO Track VALUES (1,'../Music/a.mp3','a.mp3','A','','','',120,120.0,0,100.0);").unwrap(); }
+        let l=load(&db,&[]).unwrap(); std::fs::remove_dir_all(&root).ok();
+        assert!(l.tracks[0].exists,"Engine 2.x path relative to Engine Library: {}",l.tracks[0].path);
+        assert!(l.tracks[0].path.ends_with("/Music/a.mp3") && !l.tracks[0].path.contains("Engine Library"));
+        // Repeated persistent ids (each playlist its own parent) once expanded exponentially.
+        let mut pl=String::new(); for i in 0..6 { pl.push_str(&format!("<dict><key>Name</key><string>p{i}</string><key>Playlist Persistent ID</key><string>A</string><key>Parent Persistent ID</key><string>A</string></dict>")); }
+        pl.push_str("<dict><key>Name</key><string>top</string><key>Playlist Persistent ID</key><string>A</string></dict>");
+        let x=format!("<plist><dict><key>Tracks</key><dict></dict><key>Playlists</key><array>{pl}</array></dict></plist>");
+        let t=std::time::Instant::now(); let (_,n)=itunes(&parse_xml(&x).unwrap()).unwrap();
+        assert!(t.elapsed()<std::time::Duration::from_secs(1)); assert_eq!(n.children.len(),1); assert_eq!(n.children[0].children.len(),6);
+    }
     #[test]
     fn deeply_nested_xml_is_rejected_without_overflowing_the_stack() {
         let mut deep=String::new(); for _ in 0..100_000 { deep.push_str("<a>"); }

@@ -31,6 +31,17 @@ Group 4 (split songs):
 - Set all overlaps, Overlap outros with intros, Auto-order and the playlist ⏶/⏷ lay out whole songs: a split song's halves move together, stay on one deck and keep their transitions. The playlist arrows use the chosen overlap length instead of 16 bars (13).
 - Grid edits on one half of a split song (Beatgrid ±ms, `,`/`.`, Set downbeat, Reset/Use current analysis, grid mode, fixed BPM, beat-marker drags) apply to the whole song, so its halves stay contiguous and its transition unchanged (14).
 
+Group 5 (import and library robustness):
+
+- MP3s are decoded without the LAME encoder delay (cache v15, so the library is re-analysed once): grids and cues imported from Rekordbox, Traktor, Serato and Engine now land on the beat, and an MP3 and a WAV of the same song get the same grid. Projects saved earlier move their MP3 clips' grids, cut points and stem ranges by the trimmed delay when opened, so nothing shifts in the mix; save to keep it (19).
+- WAVs streamed with a placeholder data size (ffmpeg to a pipe, some recorders) are accepted instead of rejected as incomplete; truncated files are still caught (25).
+- Removing an imported library no longer lets its paths pick up another library's cues and beat grid until the reimport finishes (15).
+- Tag-read and analysis timeouts (a sleeping USB drive, a busy computer) are retried on the next scan or start instead of being stored for good (17). A timed-out analysis keeps its worker until the decode ends, so the worker limit holds (37).
+- Symlinked folders inside a music folder are scanned; loops and folders linked twice are visited once (38).
+- Engine DJ 2.x paths are resolved against `Engine Library` (as documented by libdjinterop and Mixxx) when the file is there; Engine 1.x layouts keep working (21).
+- An iTunes library with repeated playlist IDs no longer expands exponentially and keeps a CPU core busy after the import times out (36).
+- Stems and the analysis cache follow `MIXSTUDIO_CACHE_DIR` and the platform cache folder, and the stem model `MIXSTUDIO_DATA_DIR` and the platform data folder, instead of hard-coded `~/.cache` and `~/.local/share` (40).
+
 ## 0.30.0-beta
 
 - **Beat analysis (cache v14):** search kicks on a straight clock directly and adopt it when it is supported throughout the source, the tracker departs from it, no run of attacks corroborates the departure and it lands clearly more kicks. A final check moves a grid half a beat or by its median kick offset only when that lands at least half as many kicks again. Fixes steady tracks drifting tens of ms off their kicks or sitting on offbeat hi-hats, which made 125/126 BPM imports fall out of sync.

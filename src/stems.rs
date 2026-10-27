@@ -30,8 +30,8 @@ impl Stems {
     }
 }
 
-pub fn models_dir() -> PathBuf { let h = std::env::var("HOME").unwrap_or_else(|_| ".".into()); Path::new(&h).join(".local/share/mixstudio/models") }
-pub fn stems_dir() -> PathBuf { let h = std::env::var("HOME").unwrap_or_else(|_| ".".into()); Path::new(&h).join(".cache/mixstudio/stems") }
+pub fn models_dir() -> PathBuf { crate::library::data_dir().join("models") }
+pub fn stems_dir() -> PathBuf { crate::library::cache_dir().join("stems") }
 pub fn model_path() -> PathBuf { models_dir().join(MODEL_FILE) }
 
 fn sha256_file(p: &Path) -> std::io::Result<String> {
